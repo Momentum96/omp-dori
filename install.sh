@@ -58,10 +58,11 @@ link "$src/extension" "$extensions/omp-dori" || fail "cannot install the omp-dor
 mkdir -p "$HOME/.dori"
 config="$HOME/.dori/config.json"
 [ -f "$config" ] || cp "$src/skills/dori-mode/references/config.example.json" "$config"
-CONFIG="$config" ULW_INDEX="$ulw/index.ts" bun -e '
+# An explicit OMP_ULW_SRC always wins; otherwise only an unset or example value is filled in.
+CONFIG="$config" ULW_INDEX="$ulw/index.ts" ULW_EXPLICIT="${OMP_ULW_SRC:+1}" bun -e '
   const path = process.env.CONFIG, index = process.env.ULW_INDEX;
   const config = await Bun.file(path).json();
-  if (!config.ompUlwPath || config.ompUlwPath === "~/.dori/omp-ulw/index.ts") {
+  if (process.env.ULW_EXPLICIT || !config.ompUlwPath || config.ompUlwPath === "~/.dori/omp-ulw/index.ts") {
     config.ompUlwPath = index;
     await Bun.write(path, JSON.stringify(config, null, 2) + "\n");
   }'
