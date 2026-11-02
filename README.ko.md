@@ -40,6 +40,8 @@ Dori나 레인 세션에서 확장이 하는 일:
 - omp-ulw의 명령(`/ulw`, `/review-work` 등)은 세션 역할이 정해지기 전, omp가 확장을 불러오는 시점에 등록됩니다. 그래서 어느 세션의 명령 목록에나 보일 수 있습니다. Dori나 레인이 아닌 세션에서 실행하면 안내만 띄우고 아무 일도 하지 않습니다.
 - omp 프로세스 하나가 Dori나 레인 세션을 한 번이라도 띄우면, 그 프로세스가 끝날 때까지 omp-dori가 도구 승인 창을 지켜봅니다. 무언가 승인 창을 지켜보는 동안 omp는 읽기 추측 실행(read speculation)을 끕니다. 그래서 Dori나 레인 세션에서 `/resume`이나 `/new`로 넘어간 평소 세션은 이 기능 없이 돕니다. Dori나 레인 세션을 띄운 적 없는 프로세스는 영향이 없습니다.
 
+레인은 브리프의 지시를 따라 스스로 goal을 만들고 `dori claim-done`을 실행합니다. 그래서 지시를 잘 지키는 모델이 필요합니다. 기본값 `anthropic/claude-opus-5-5` 레인은 둘 다 해냈고, Haiku 4.5 레인은 일은 했지만 goal과 claim을 건너뛰었습니다.
+
 omp는 세션을 새 프로세스로 재개하면 goal을 일시정지 상태로 되돌립니다. `omp --resume=<id>`로 다시 열거나 herdr가 복원한 레인은 역할과 omo 프롬프트는 유지하지만, goal은 `/goal resume`을 보내야 다시 돕니다(`references/sessions.md`).
 
 ## 설치

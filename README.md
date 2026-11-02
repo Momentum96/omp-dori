@@ -40,6 +40,8 @@ Your other omp sessions keep their prompts, tools and behavior. Two differences 
 - omp-ulw's commands (`/ulw`, `/review-work`, ...) are registered when omp loads, before the session's role is known, so they can show up in the command list of any session. Outside a Dori or lane session they only print a notice and do nothing.
 - Once an omp process has hosted a Dori or lane session, omp-dori listens for tool approval prompts until that process exits. omp turns off read speculation while anything listens for them, so a normal session reached from a Dori or lane session with `/resume` or `/new` runs without it. Processes that never host a Dori or lane session are unaffected.
 
+Lanes follow their brief's own instructions to create a goal and to run `dori claim-done`, so they need a model that keeps to them. With the default `anthropic/claude-opus-5-5` lanes did both; a Haiku 4.5 lane did the work but skipped the goal and the claim.
+
 omp pauses a goal when a session is resumed in a new process. A lane reopened with `omp --resume=<id>` or restored by herdr keeps its role and its omo prompts, but its goal waits for `/goal resume` (`references/sessions.md`).
 
 ## Install

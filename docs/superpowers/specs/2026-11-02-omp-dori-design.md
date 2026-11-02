@@ -198,6 +198,23 @@ SKILL.md와 `references/setup.md`의 "your monitor tool" 문장은 이 `monitor`
   6. 레인을 닫았다가 `omp --resume=<세션>`으로 플래그 없이 다시 연다. omo 프리셋과 goal, 상태 파일 기록이 유지되는지 본다. herdr 서버 재시작 후 자동 복원도 같은 방식으로 확인한다.
   7. 깨끗한 계정이나 다른 머신에서 README의 한 줄 설치를 처음부터 끝까지 따라 해 본다.
 
+### 4.8.1 실제 환경 확인 결과 (2026-11-02)
+
+환경: 실행 중인 omp(18.12.2)와 분리한 격리 설치. bun 1.4.4, omp 18.15.0, herdr 0.9.5, `PI_CONFIG_DIR=.dori-dev`(agent 디렉터리 분리, herdr omp 통합 v10도 그곳에 설치), omp-ulw `cbfe5ee`.
+
+| 단계 | 결과 |
+|---|---|
+| 0 평소 세션 | `/ulw test` → "`/ulw works only in Dori sessions`" 경고만. `ulw …` 입력이 goal로 바뀌지 않음. 상태 파일 없음 |
+| 1 Dori 세션 + monitor | herdr가 `omp idle`로 인식. 상태 파일 `role: dori`. 쉬고 있는 세션이 `[tick] LANE_TEST hello`에 깨어나 응답 |
+| 2 레인 시작 | `STARTUP_OK`. ULW 작동(`omo-ultrawork:state true`). `goal` 도구 노출 확인. opus 5.5 레인은 브리프를 읽고 objective를 직접 써서 goal을 만들고, 일을 끝낸 뒤 `dori claim-done`까지 실행. haiku 4.5 레인은 일은 했지만 goal 생성과 claim-done을 건너뜀(모델 문제, 도구는 노출돼 있었음) |
+| 3 pause/resume | 활성 goal: `PAUSED`(상태 파일 `paused`) → `RESUMED`(상태 파일 `active`, herdr `working`). goal 없는 레인: 원본 규칙대로 확인된 것으로 보고 턴 중단 |
+| 4 claim-done → watch | `monitor`로 건 `dori watch`가 `closeAfterMin` 뒤 증거를 다시 읽고 `LANE_CLOSED`. 레인 탭 닫힘. 그 줄이 Dori 세션을 깨움 |
+| 5 승인 창 | herdr가 omp 승인 창을 `blocked`로 보고. 상태 파일 `approvalPending: true`. `dori pause`가 입력하지 않고 `PAUSE_UNVERIFIED`. 승인 뒤 `false` |
+| 6 재개 | 새 탭에서 플래그 없이 `omp --resume=<id>`: 역할 `lane`, 같은 세션, ULW 지침 유지, goal `paused`(omp 동작, 문서화). herdr 서버 재시작: 세 pane 모두 `omp --resume=<세션 파일>`로 자동 복원되고 역할 유지 |
+| 7 설치 | 격리 HOME에서 실제 omp 18.15.0으로 install.sh 통과. 링크·고정 커밋·config 확인 |
+
+참고: 첫 haiku 레인은 20초 안에 끝나 herdr 상태가 `done`이었고, 원본 판정 그대로 `STARTUP_UNCONFIRMED`가 나왔다.
+
 ## 5. 구현자에게 맡기는 것
 
 - omp-dori 확장 내부 구조, 파일 분할, 묶음 기준, 상태 파일 쓰기 방식(원자적 쓰기 권장).
