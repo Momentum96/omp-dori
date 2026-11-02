@@ -1,0 +1,264 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
+import { paneStatePath, readPaneState, writePaneState } from "../../skills/dori-mode/scripts/src/lane-state";
+import { type FakeSession, load, useConfig } from "./fake-pi";
+import { calls } from "./fake-ulw";
+
+const FAKE_ULW = join(import.meta.dir, "fake-ulw.ts");
+const REAL_ULW = join(import.meta.dir, "../../ref/omp-ulw/index.ts");
+const PANE = "w1:p2";
+const ROLE = "omp-dori:role";
+
+const session = (id: string, entries: FakeSession["entries"] = []): FakeSession => ({ id, file: `/sessions/${id}.jsonl`, entries });
+const roleEntry = (role: string) => ({ type: "custom", customType: ROLE, data: role });
+const agentStart = { type: "before_agent_start", prompt: "ulw fix the bug", systemPrompt: ["base prompt"] };
+
+let stateDir: string;
+beforeEach(() => {
+  calls.length = 0;
+  stateDir = useConfig(FAKE_ULW);
+  process.env.HERDR_PANE_ID = PANE;
+});
+afterEach(() => {
+  delete process.env.HERDR_PANE_ID;
+});
+
+describe("role", () => {
+  test("--dori-role is recorded on session start and restored from the session without the flag", async () => {
+    const s = session("s1");
+    const first = await load({ session: s, flags: { "dori-role": "lane" } });
+    await first.emit("session_start");
+    expect(s.entries).toEqual([roleEntry("lane")]);
+
+    // a later process resumes the same session file (herdr restore, `omp --resume`) without the flag
+    calls.length = 0;
+    const resumed = await load({ session: s });
+    await resumed.emit("session_start");
+    expect(s.entries).toEqual([roleEntry("lane")]);
+    expect(readPaneState(stateDir, PANE)?.role).toBe("lane");
+    expect(await resumed.emit("before_agent_start", agentStart)).toContainEqual({ systemPrompt: ["base prompt", "<fake-ulw-policy>"] });
+  });
+
+  test("a session without a role runs no omp-ulw handler and never sends a user message", async () => {
+    const normal = await load({ session: session("plain") });
+    await normal.emit("session_start");
+    expect(await normal.emit("before_agent_start", agentStart)).toEqual([undefined]);
+    await normal.command("ulw", "do it");
+    const tool = normal.tools.get("fake_ulw_tool");
+    const result = await tool?.execute("call-1", {}, undefined, undefined, normal.ctx());
+
+    expect(calls).toEqual([]);
+    expect(normal.userMessages).toEqual([]);
+    expect(normal.notes).toEqual(["/ulw works only in Dori sessions (omp --dori-role dori|lane).", "fake_ulw_tool works only in Dori sessions (omp --dori-role dori|lane)."]);
+    expect(result?.content[0]?.text).toContain("works only in Dori sessions");
+    expect(normal.session.entries).toEqual([]);
+    expect(normal.active).toEqual(["read", "bash"]);
+    expect(existsSync(paneStatePath(stateDir, PANE))).toBe(false);
+    // approval hooks would make omp emit approval events and drop read speculation in every session
+    expect(normal.handlers.has("tool_approval_requested")).toBe(false);
+  });
+
+  test("dori -> normal -> dori switching follows each session's role", async () => {
+    const doriSession = session("dori-1");
+    const normalSession = session("plain-1");
+    const pi = await load({ session: doriSession, flags: { "dori-role": "dori" } });
+    await pi.emit("session_start");
+    expect(pi.active).toContain("monitor");
+    await pi.command("ulw", "x");
+    expect(pi.userMessages).toEqual(["ulw x"]);
+
+    pi.session = normalSession;
+    await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
+    expect(normalSession.entries).toEqual([]);
+    expect(pi.active).not.toContain("monitor");
+    expect(await pi.emit("before_agent_start", agentStart)).toEqual([undefined]);
+    await pi.command("ulw", "y");
+    expect(pi.userMessages).toEqual(["ulw x"]);
+    expect(existsSync(paneStatePath(stateDir, PANE))).toBe(false);
+
+    calls.length = 0;
+    pi.session = doriSession;
+    await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
+    expect(calls).toEqual(["restore:dori-1"]);
+    expect(pi.active).toContain("monitor");
+    expect(readPaneState(stateDir, PANE)).toMatchObject({ role: "dori", sessionId: "dori-1" });
+    await pi.command("ulw", "z");
+    expect(pi.userMessages).toEqual(["ulw x", "ulw z"]);
+  });
+
+  test("subagents inherit their parent's role; children of normal sessions stay plain", async () => {
+    const parent = await load({ session: session("lane-parent"), flags: { "dori-role": "lane" } });
+    await parent.emit("session_start");
+    const child = await load({ session: session("child"), agent: { kind: "sub", id: "0-Explore", parentId: "Main" } });
+    await child.emit("session_start");
+    expect(await child.emit("before_agent_start", agentStart)).toContainEqual({ systemPrompt: ["base prompt", "<fake-ulw-policy>"] });
+    // grandchildren resolve through the child
+    const grandchild = await load({ session: session("grandchild"), agent: { kind: "sub", id: "0-Explore.1-Task", parentId: "0-Explore" } });
+    await grandchild.emit("session_start");
+    expect(await grandchild.emit("before_agent_start", agentStart)).toContainEqual({ systemPrompt: ["base prompt", "<fake-ulw-policy>"] });
+    // children never touch the pane file or the tool set
+    expect(readPaneState(stateDir, PANE)?.sessionId).toBe("lane-parent");
+    expect(child.active).toEqual(["read", "bash"]);
+
+    const plain = await load({ session: session("plain-parent") });
+    await plain.emit("session_start");
+    calls.length = 0;
+    const plainChild = await load({ session: session("plain-child"), agent: { kind: "sub", id: "1-Task", parentId: "Main" } });
+    await plainChild.emit("session_start");
+    expect(await plainChild.emit("before_agent_start", agentStart)).toEqual([undefined]);
+    expect(calls).toEqual([]);
+  });
+
+  test("omp-ulw that fails to load warns in role sessions only", async () => {
+    stateDir = useConfig("/nonexistent/omp-ulw/index.ts");
+    const normal = await load({ session: session("plain") });
+    await normal.emit("session_start");
+    expect(normal.notes).toEqual([]);
+
+    const lane = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await lane.emit("session_start");
+    await lane.emit("session_switch", { type: "session_switch", reason: "resume" });
+    expect(lane.notes).toHaveLength(1);
+    expect(lane.notes[0]).toContain("omp-ulw not loaded from /nonexistent/omp-ulw/index.ts");
+    expect(readPaneState(stateDir, PANE)?.role).toBe("lane");
+  });
+});
+
+describe("goal tool", () => {
+  test("is activated only for lanes that have no goal yet", async () => {
+    const lane = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await lane.emit("session_start");
+    expect(lane.active).toEqual(["read", "bash", "goal"]);
+
+    const goalEntry = { type: "mode_change", mode: "goal_paused", modeData: { goal: { objective: "ship it", status: "paused" } } };
+    const laneWithGoal = await load({ session: session("lane-goal", [roleEntry("lane"), goalEntry]) });
+    await laneWithGoal.emit("session_start");
+    expect(laneWithGoal.active).toEqual(["read", "bash"]);
+
+    const dori = await load({ session: session("dori"), flags: { "dori-role": "dori" } });
+    await dori.emit("session_start");
+    expect(dori.active).toEqual(["read", "bash", "monitor"]);
+
+    const normal = await load({ session: session("plain") });
+    await normal.emit("session_start");
+    expect(normal.active).toEqual(["read", "bash"]);
+  });
+
+  test("is taken back when a goal-less lane switches to a normal session", async () => {
+    const pi = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    pi.session = session("plain");
+    await pi.emit("session_switch", { type: "session_switch", reason: "new" });
+    expect(pi.active).toEqual(["read", "bash"]);
+  });
+
+  test("is taken back from a normal session even after the lane created its goal", async () => {
+    const pi = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    await pi.emit("goal_updated", { type: "goal_updated", goal: { objective: "fix #12", status: "active" } });
+    pi.session = session("plain");
+    await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
+    expect(pi.active).toEqual(["read", "bash"]);
+  });
+
+  test("stays for a normal session whose own goal omp manages", async () => {
+    const pi = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    const goalEntry = { type: "mode_change", mode: "goal", modeData: { goal: { objective: "own goal", status: "active" } } };
+    pi.session = session("plain-goal", [goalEntry]);
+    await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
+    expect(pi.active).toEqual(["read", "bash", "goal"]);
+  });
+});
+
+describe("pane state", () => {
+  test("records the session on start, goal updates and open approvals", async () => {
+    const pi = await load({ session: session("lane-1"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    expect(readPaneState(stateDir, PANE)).toMatchObject({
+      paneId: PANE,
+      role: "lane",
+      sessionId: "lane-1",
+      sessionFile: "/sessions/lane-1.jsonl",
+      pid: process.pid,
+      goal: { status: "none" },
+      approvalPending: false,
+    });
+    const startedAt = readPaneState(stateDir, PANE)?.startedAt;
+
+    await pi.emit("goal_updated", { type: "goal_updated", goal: { objective: "fix #12", status: "active" } });
+    expect(readPaneState(stateDir, PANE)?.goal).toEqual({ status: "active", objective: "fix #12" });
+    await pi.emit("goal_updated", { type: "goal_updated", goal: { objective: "fix #12", status: "paused" } });
+    expect(readPaneState(stateDir, PANE)?.goal).toEqual({ status: "paused", objective: "fix #12" });
+    await pi.emit("goal_updated", { type: "goal_updated", goal: { objective: "fix #12", status: "budget-limited" } });
+    expect(readPaneState(stateDir, PANE)?.goal.status).toBe("blocked");
+
+    await pi.emit("tool_approval_requested", { type: "tool_approval_requested", toolCallId: "a" });
+    await pi.emit("tool_approval_requested", { type: "tool_approval_requested", toolCallId: "b" });
+    expect(readPaneState(stateDir, PANE)?.approvalPending).toBe(true);
+    await pi.emit("tool_approval_resolved", { type: "tool_approval_resolved", toolCallId: "a", approved: true });
+    expect(readPaneState(stateDir, PANE)?.approvalPending).toBe(true);
+    await pi.emit("tool_approval_resolved", { type: "tool_approval_resolved", toolCallId: "b", approved: false });
+    expect(readPaneState(stateDir, PANE)).toMatchObject({ approvalPending: false, startedAt });
+  });
+
+  test("a resumed lane reports the goal recorded in its session", async () => {
+    const goalEntry = { type: "mode_change", mode: "goal", modeData: { goal: { objective: "ship it", status: "active" } } };
+    const pi = await load({ session: session("lane-2", [roleEntry("lane"), goalEntry]) });
+    await pi.emit("session_start");
+    expect(readPaneState(stateDir, PANE)?.goal).toEqual({ status: "active", objective: "ship it" });
+  });
+
+  test("is removed at session shutdown, unless another process has taken the pane since", async () => {
+    const pi = await load({ session: session("lane-4"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    expect(existsSync(paneStatePath(stateDir, PANE))).toBe(true);
+    await pi.emit("session_shutdown");
+    expect(existsSync(paneStatePath(stateDir, PANE))).toBe(false);
+
+    const again = await load({ session: session("lane-5"), flags: { "dori-role": "lane" } });
+    await again.emit("session_start");
+    const other = readPaneState(stateDir, PANE);
+    if (!other) throw new Error("pane state missing");
+    writePaneState(stateDir, { ...other, pid: process.pid + 1, sessionId: "other" });
+    await again.emit("session_shutdown");
+    expect(readPaneState(stateDir, PANE)?.sessionId).toBe("other");
+  });
+
+  test("approvals in a normal session reached from a Dori session leave no pane file", async () => {
+    const pi = await load({ session: session("dori-2"), flags: { "dori-role": "dori" } });
+    await pi.emit("session_start");
+    pi.session = session("plain-2");
+    await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
+    await pi.emit("tool_approval_requested", { type: "tool_approval_requested", toolCallId: "a" });
+    expect(existsSync(paneStatePath(stateDir, PANE))).toBe(false);
+  });
+
+  test("is not written without HERDR_PANE_ID", async () => {
+    delete process.env.HERDR_PANE_ID;
+    const pi = await load({ session: session("lane-3"), flags: { "dori-role": "lane" } });
+    await pi.emit("session_start");
+    expect(existsSync(join(stateDir, "sessions"))).toBe(false);
+  });
+});
+
+describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
+  test("normal sessions get no ULW and /ulw sends nothing; lanes get the ULW policy", async () => {
+    useConfig(REAL_ULW);
+    const normal = await load({ session: session("plain") });
+    await normal.emit("session_start");
+    await normal.command("ulw", "fix it");
+    expect(normal.userMessages).toEqual([]);
+    expect((await normal.emit("before_agent_start", agentStart)).filter(Boolean)).toEqual([]);
+    expect(normal.session.entries).toEqual([]);
+
+    const lane = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await lane.emit("session_start");
+    const results = await lane.emit("before_agent_start", agentStart);
+    expect(JSON.stringify(results)).toContain("<omp-ulw-policy>");
+    await lane.command("ulw", "fix it");
+    expect(lane.userMessages).toEqual(["ulw fix it"]);
+  });
+});

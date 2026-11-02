@@ -1,0 +1,328 @@
+/**
+ * omp-dori: Dori mode on omp. Installed in the global extensions directory, so every omp session loads it, but only
+ * sessions with a Dori role change behaviour; every other session runs exactly as without it.
+ *
+ * - Role: `--dori-role dori|lane` is recorded in the session file on session_start and re-read from the session
+ *   branch on every session change, so `--resume` and herdr restores keep it without the flag. Subagents inherit
+ *   their spawning agent's role.
+ * - omp-ulw (config `ompUlwPath`) is applied through a gated API: its event, command and tool handlers run only in
+ *   role sessions; load-time registrations (flags, command and tool names) stay visible everywhere.
+ * - Pane state (`{stateDir}/sessions/<pane>.json`, read by the `dori` CLI): session id, goal status and open tool
+ *   approvals of the Dori/lane session running in herdr pane HERDR_PANE_ID.
+ * - Lanes without a goal get omp's `goal` tool so the agent can create its goal from the lane brief.
+ * - The Dori session gets the `monitor` tool (monitor.ts).
+ */
+import { rmSync } from "node:fs";
+import { loadConfig } from "../skills/dori-mode/scripts/src/config";
+import { type DoriRole, type GoalStatus, type PaneState, paneStatePath, readPaneState, writePaneState } from "../skills/dori-mode/scripts/src/lane-state";
+import { MONITOR_DESCRIPTION, Monitors } from "./monitor";
+
+interface SessionEntry {
+  type: string;
+  customType?: string;
+  data?: unknown;
+  mode?: string;
+  modeData?: Record<string, unknown>;
+}
+export interface DoriContext {
+  cwd: string;
+  agent: { kind: "main" | "sub"; id: string; parentId?: string };
+  sessionManager: { getSessionId(): string; getSessionFile(): string | undefined; getBranch(): SessionEntry[] };
+  ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
+}
+interface Goal {
+  objective: string;
+  status: string;
+}
+interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details?: unknown;
+}
+export interface ToolDefinition<Params = Record<string, unknown>> {
+  name: string;
+  label: string;
+  description: string;
+  parameters: unknown;
+  defaultInactive?: boolean;
+  loadMode?: "essential" | "discoverable";
+  execute(toolCallId: string, params: Params, signal: AbortSignal | undefined, onUpdate: unknown, ctx: DoriContext): Promise<ToolResult>;
+}
+export interface CommandOptions {
+  description?: string;
+  handler(args: string, ctx: DoriContext): Promise<void>;
+}
+interface Schema {
+  optional(): Schema;
+  describe(description: string): Schema;
+}
+type Handler = (event: unknown, ctx: DoriContext) => unknown;
+export interface DoriApi {
+  zod: {
+    object(shape: Record<string, Schema>): Schema;
+    string(): Schema;
+    array(element: Schema): Schema;
+    enum(values: readonly [string, ...string[]]): Schema;
+  };
+  setLabel(label: string): void;
+  registerFlag(name: string, options: { description?: string; type: "boolean" | "string"; default?: boolean | string }): void;
+  getFlag(name: string): boolean | string | undefined;
+  registerCommand(name: string, options: CommandOptions): void;
+  registerTool<Params>(tool: ToolDefinition<Params>): void;
+  on(event: "goal_updated", handler: (event: { goal: Goal | null }, ctx: DoriContext) => unknown): void;
+  on(event: "tool_approval_requested" | "tool_approval_resolved", handler: (event: { toolCallId: string }, ctx: DoriContext) => unknown): void;
+  on(event: string, handler: Handler): void;
+  appendEntry(customType: string, data?: unknown): void;
+  sendMessage(
+    message: { customType: string; content: string; display: boolean },
+    options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+  ): void;
+  getActiveTools(): string[];
+  setActiveTools(toolNames: string[]): Promise<void>;
+}
+
+const ROLE_FLAG = "dori-role";
+const ROLE_ENTRY = "omp-dori:role";
+const ONLY_IN_ROLE = "works only in Dori sessions (omp --dori-role dori|lane)";
+// budget-limited halts the goal until a person raises the budget; unknown statuses must never read as "none",
+// which `dori pause` treats as nothing-to-pause.
+const GOAL_STATUS: Record<string, GoalStatus> = { active: "active", paused: "paused", "budget-limited": "blocked", complete: "complete", dropped: "dropped" };
+
+/**
+ * Role by agent registry id. omp rebinds extension factories to every subagent session in the same process without
+ * re-evaluating this module, so a subagent finds its spawning agent's role here through `ctx.agent.parentId`.
+ */
+const agentRoles = new Map<string, DoriRole>();
+
+const parseRole = (value: unknown): DoriRole | undefined => (value === "dori" || value === "lane" ? value : undefined);
+
+const recordedRole = (branch: readonly SessionEntry[]): DoriRole | undefined => {
+  let role: DoriRole | undefined;
+  for (const entry of branch) if (entry.type === "custom" && entry.customType === ROLE_ENTRY) role = parseRole(entry.data) ?? role;
+  return role;
+};
+
+const goalOf = (goal: Goal | null | undefined): PaneState["goal"] =>
+  goal ? { status: GOAL_STATUS[goal.status] ?? "blocked", objective: goal.objective } : { status: "none" };
+
+const isGoal = (value: unknown): value is Goal =>
+  typeof value === "object" && value !== null && "status" in value && typeof value.status === "string" && "objective" in value && typeof value.objective === "string";
+
+/** omp persists goal mode as `mode_change` entries ("goal" / "goal_paused" carry the goal; any other mode ends it). */
+const recordedGoal = (branch: readonly SessionEntry[]): PaneState["goal"] => {
+  let goal: PaneState["goal"] = { status: "none" };
+  for (const entry of branch) {
+    if (entry.type !== "mode_change") continue;
+    const data = entry.modeData?.goal;
+    goal = (entry.mode === "goal" || entry.mode === "goal_paused") && isGoal(data) ? goalOf(data) : { status: "none" };
+  }
+  return goal;
+};
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+export default async function ompDori(pi: DoriApi): Promise<void> {
+  pi.registerFlag(ROLE_FLAG, { description: "Run as a Dori-mode session: dori (the messenger session) or lane; kept on resume", type: "string" });
+
+  let role: DoriRole | undefined;
+  let stateDir: string | undefined;
+  let loadError: string | undefined;
+  let warned = false;
+  let lifecycleRegistered = false;
+  let session: { id: string; startedAt: string } | undefined;
+  let goal: PaneState["goal"] = { status: "none" };
+  let goalToolAdded = false;
+  let paneWritten: string | undefined;
+  const approvals = new Set<string>();
+  const monitors = new Monitors(
+    (content) => pi.sendMessage({ customType: "dori-monitor", content, display: true }, { triggerTurn: true, deliverAs: "aside" }),
+    () => (role === "dori" ? session?.id : undefined),
+  );
+
+  // Only the file this process wrote: another process may have taken the pane since.
+  const removePane = (): void => {
+    if (paneWritten !== undefined && stateDir !== undefined && readPaneState(stateDir, paneWritten)?.pid === process.pid) {
+      rmSync(paneStatePath(stateDir, paneWritten), { force: true });
+    }
+    paneWritten = undefined;
+  };
+
+  const savePane = (ctx: DoriContext): void => {
+    const paneId = process.env.HERDR_PANE_ID;
+    if (!paneId || stateDir === undefined || !session) return;
+    // The pane now runs a session without a role: a leftover file would point `dori` at the previous session.
+    if (!role) return removePane();
+    const sessionFile = ctx.sessionManager.getSessionFile();
+    writePaneState(stateDir, {
+      paneId,
+      role,
+      sessionId: session.id,
+      ...(sessionFile ? { sessionFile } : {}),
+      cwd: ctx.cwd,
+      pid: process.pid,
+      startedAt: session.startedAt,
+      updatedAt: new Date().toISOString(),
+      goal,
+      approvalPending: approvals.size > 0,
+    });
+    paneWritten = paneId;
+  };
+
+  const syncTools = async (): Promise<void> => {
+    const active = pi.getActiveTools();
+    const next = new Set(active);
+    if (role === "dori") next.add("monitor");
+    else next.delete("monitor");
+    // A session with its own goal keeps whatever omp decided. omp does not take the tool back when the session
+    // changes, so ours is removed from any later goal-less session that is not a lane.
+    if (goal.status === "none" && role === "lane") {
+      if (!next.has("goal")) goalToolAdded = true;
+      next.add("goal");
+    } else if (goal.status === "none" && goalToolAdded) {
+      next.delete("goal");
+      goalToolAdded = false;
+    }
+    if (next.size !== active.length || active.some((name) => !next.has(name))) await pi.setActiveTools([...next]);
+  };
+
+  // Registered only once a role session appears: approval handlers make omp emit approval events and disable read
+  // speculation for the whole process, which ordinary sessions must not pay for.
+  const registerLifecycle = (): void => {
+    lifecycleRegistered = true;
+    pi.on("tool_approval_requested", (event, ctx) => {
+      if (!role) return;
+      approvals.add(event.toolCallId);
+      savePane(ctx);
+    });
+    pi.on("tool_approval_resolved", (event, ctx) => {
+      if (!approvals.delete(event.toolCallId) || !role) return;
+      savePane(ctx);
+    });
+    pi.on("session_shutdown", () => {
+      monitors.stopAll();
+      removePane();
+    });
+  };
+
+  const syncMain = async (ctx: DoriContext, branch: readonly SessionEntry[]): Promise<void> => {
+    const sessionId = ctx.sessionManager.getSessionId();
+    // Monitors belong to the Dori session that started them; their lines must not wake whatever session comes next.
+    if (session?.id !== sessionId || role !== "dori") monitors.stopAll();
+    if (session?.id !== sessionId) {
+      session = { id: sessionId, startedAt: new Date().toISOString() };
+      approvals.clear();
+    }
+    goal = recordedGoal(branch);
+    if (role && !lifecycleRegistered) registerLifecycle();
+    if (role && loadError && !warned) {
+      warned = true;
+      ctx.ui.notify(`omp-dori: ${loadError}. Running without omo presets.`, "warning");
+    }
+    await syncTools();
+    savePane(ctx);
+  };
+
+  // Registered before omp-ulw so its restore handlers see this event's role.
+  for (const eventName of ["session_start", "session_switch", "session_branch", "session_tree"] as const) {
+    pi.on(eventName, async (_event, ctx) => {
+      const branch = ctx.sessionManager.getBranch();
+      if (ctx.agent.kind === "sub") {
+        role = ctx.agent.parentId === undefined ? undefined : agentRoles.get(ctx.agent.parentId);
+      } else {
+        role = recordedRole(branch);
+        const flagged = pi.getFlag(ROLE_FLAG);
+        if (eventName === "session_start" && role === undefined && flagged !== undefined) {
+          role = parseRole(flagged);
+          if (role) pi.appendEntry(ROLE_ENTRY, role);
+          else ctx.ui.notify(`omp-dori: --${ROLE_FLAG} must be "dori" or "lane", got "${String(flagged)}"`, "error");
+        }
+      }
+      if (role) agentRoles.set(ctx.agent.id, role);
+      else agentRoles.delete(ctx.agent.id);
+      if (ctx.agent.kind === "main") await syncMain(ctx, branch);
+    });
+  }
+
+  pi.on("goal_updated", (event, ctx) => {
+    if (ctx.agent.kind !== "main" || !role) return;
+    goal = goalOf(event.goal);
+    savePane(ctx);
+  });
+
+  const z = pi.zod;
+  pi.registerTool<{ op: "start" | "stop" | "list"; name?: string; argv?: string[]; filter?: string }>({
+    name: "monitor",
+    label: "Monitor",
+    description: MONITOR_DESCRIPTION,
+    defaultInactive: true,
+    loadMode: "essential",
+    parameters: z.object({
+      op: z.enum(["start", "stop", "list"]).describe("start a monitor, stop one, or list running monitors"),
+      name: z.string().optional().describe("monitor name (start, stop)"),
+      argv: z.array(z.string()).optional().describe("command and arguments, run without a shell (start)"),
+      filter: z.string().optional().describe("regular expression; matching output lines wake the session (start)"),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (role !== "dori" || ctx.agent.kind !== "main" || !session) throw new Error("monitor works only in the Dori session (omp --dori-role dori)");
+      let text: string;
+      if (params.op === "start") {
+        if (!params.name || !params.argv || params.filter === undefined) throw new Error("start needs name, argv and filter");
+        const started = monitors.start(params.name, params.argv, params.filter, ctx.cwd, session.id);
+        text = `started monitor "${started.name}" (pid ${started.pid}): ${started.argv.join(" ")}`;
+      } else if (params.op === "stop") {
+        if (!params.name || !monitors.stop(params.name)) throw new Error(`no running monitor "${params.name ?? ""}"`);
+        text = `stopped monitor "${params.name}"`;
+      } else {
+        const running = monitors.list();
+        text = running.length === 0 ? "no monitors running" : running.map((m) => `${m.name} (pid ${m.pid}) /${m.filter}/: ${m.argv.join(" ")}`).join("\n");
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  });
+
+  // omp-ulw sees this API: every runtime entry point is a no-op outside role sessions.
+  const gated = new Proxy(pi, {
+    get(target, prop) {
+      if (prop === "on") return (event: string, handler: Handler) => target.on(event, (payload, ctx) => (role ? handler(payload, ctx) : undefined));
+      if (prop === "registerCommand") {
+        return (name: string, options: CommandOptions) =>
+          target.registerCommand(name, {
+            ...options,
+            handler: async (args, ctx) => {
+              if (role) return options.handler(args, ctx);
+              ctx.ui.notify(`/${name} ${ONLY_IN_ROLE}.`, "warning");
+            },
+          });
+      }
+      if (prop === "registerTool") {
+        return (tool: ToolDefinition) =>
+          target.registerTool<Record<string, unknown>>({
+            ...tool,
+            execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+              if (role) return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+              ctx.ui.notify(`${tool.name} ${ONLY_IN_ROLE}.`, "warning");
+              return { content: [{ type: "text", text: `${tool.name} ${ONLY_IN_ROLE}.` }] };
+            },
+          });
+      }
+      const value: unknown = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  try {
+    const config = await loadConfig();
+    stateDir = config.stateDir;
+    try {
+      // The omp-ulw checkout is user-configured (`ompUlwPath`), so the specifier only exists at runtime.
+      const module: unknown = await import(config.ompUlwPath);
+      const ulw = module && typeof module === "object" && "default" in module ? module.default : undefined;
+      if (typeof ulw !== "function") throw new Error("its default export is not a function");
+      await ulw(gated);
+    } catch (error) {
+      loadError = `omp-ulw not loaded from ${config.ompUlwPath} (${errorText(error)})`;
+    }
+  } catch (error) {
+    loadError = `Dori config not loaded (${errorText(error)}); omp-ulw and pane state are off`;
+  }
+  pi.setLabel("omp-dori");
+}
