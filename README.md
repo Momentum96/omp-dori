@@ -33,7 +33,7 @@ In a Dori or lane session the extension:
 - applies omp-ulw (omo model presets, ULW, and its workflow commands), including the presets for subagents those sessions spawn;
 - writes the pane's state file (`~/.dori/state/sessions/<pane>.json`): session id, goal state, and whether a tool approval prompt is open, so `dori` never types into an approval prompt;
 - turns on omp's `goal` tool in lanes that have no goal yet;
-- turns on the `monitor` tool in the Dori session.
+- turns on the `monitor` tool in the Dori session, and restarts the monitors that session had running when it is resumed (herdr restoring it after a restart, `omp --resume`), so the messenger poller comes back without anyone asking.
 
 Your other omp sessions keep their prompts, tools and behavior. Two differences remain, because omp lets an extension add but not remove registrations:
 

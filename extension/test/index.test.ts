@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { paneStatePath, readPaneState, writePaneState } from "../../skills/dori-mode/scripts/src/lane-state";
-import { type FakeSession, load, useConfig } from "./fake-pi";
+import { type FakePi, type FakeSession, load, until, useConfig } from "./fake-pi";
 import { calls } from "./fake-ulw";
 
 const FAKE_ULW = join(import.meta.dir, "fake-ulw.ts");
@@ -170,6 +170,54 @@ describe("goal tool", () => {
     pi.session = session("plain-goal", [goalEntry]);
     await pi.emit("session_switch", { type: "session_switch", reason: "resume" });
     expect(pi.active).toEqual(["read", "bash", "goal"]);
+  });
+});
+
+describe("monitor restore", () => {
+  const monitorCall = async (pi: FakePi, params: Record<string, unknown>): Promise<string> => {
+    const result = await pi.tools.get("monitor")?.execute("call", params, undefined, undefined, pi.ctx());
+    return result?.content[0]?.text ?? "";
+  };
+  const tick = { op: "start", name: "tick", argv: ["sh", "-c", "echo up; sleep 30"], filter: "^up" };
+
+  test("a resumed Dori session restarts the monitors it recorded and their lines wake it again", async () => {
+    const s = session("dori-r1");
+    const first = await load({ session: s, flags: { "dori-role": "dori" } });
+    await first.emit("session_start");
+    await monitorCall(first, tick);
+    await first.emit("session_shutdown"); // omp exits: the monitor process dies with it
+
+    // herdr restores the pane with `omp --resume`: a new process, no flag, nobody asks for the monitor again
+    const resumed = await load({ session: s });
+    await resumed.emit("session_start");
+    expect(resumed.messages[0]).toEqual({ content: "[monitor] restored for this resumed session: tick", options: { triggerTurn: false } });
+    await until(() => resumed.messages.some((m) => m.content === "[tick] up"));
+    expect(await monitorCall(resumed, { op: "list" })).toContain("tick (pid");
+    await resumed.emit("session_shutdown");
+  });
+
+  test("a monitor stopped by name, even after it exited on its own, is not restored", async () => {
+    const s = session("dori-r2");
+    const first = await load({ session: s, flags: { "dori-role": "dori" } });
+    await first.emit("session_start");
+    await monitorCall(first, { ...tick, name: "once", argv: ["sh", "-c", "echo up"] });
+    await until(() => first.messages.some((m) => m.content.includes("[once] monitor exited")));
+    expect(await monitorCall(first, { op: "stop", name: "once" })).toBe('stopped monitor "once"');
+    await first.emit("session_shutdown");
+
+    const resumed = await load({ session: s });
+    await resumed.emit("session_start");
+    expect(resumed.messages).toEqual([]);
+    expect(await monitorCall(resumed, { op: "list" })).toBe("no monitors running");
+  });
+
+  test("only Dori sessions restore monitors", async () => {
+    const recorded = { type: "custom", customType: "omp-dori:monitor", data: { ...tick, cwd: "/tmp" } };
+    const lane = await load({ session: session("lane-r", [roleEntry("lane"), recorded]) });
+    await lane.emit("session_start");
+    const normal = await load({ session: session("plain-r", [recorded]) });
+    await normal.emit("session_start");
+    expect([...lane.messages, ...normal.messages]).toEqual([]);
   });
 });
 

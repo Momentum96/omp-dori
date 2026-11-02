@@ -82,6 +82,7 @@ export interface DoriApi {
 
 const ROLE_FLAG = "dori-role";
 const ROLE_ENTRY = "omp-dori:role";
+const MONITOR_ENTRY = "omp-dori:monitor";
 const ONLY_IN_ROLE = "works only in Dori sessions (omp --dori-role dori|lane)";
 // budget-limited halts the goal until a person raises the budget; unknown statuses must never read as "none",
 // which `dori pause` treats as nothing-to-pause.
@@ -116,6 +117,27 @@ const recordedGoal = (branch: readonly SessionEntry[]): PaneState["goal"] => {
     goal = (entry.mode === "goal" || entry.mode === "goal_paused") && isGoal(data) ? goalOf(data) : { status: "none" };
   }
   return goal;
+};
+
+type MonitorSpec = { readonly name: string; readonly argv: readonly string[]; readonly filter: string; readonly cwd: string };
+
+/**
+ * Monitors the Dori session wants running, replayed from its `omp-dori:monitor` entries (start / stop). Monitor
+ * processes die with omp; the record is what brings the Telegram poller back after herdr or `omp --resume`
+ * restores the session, which otherwise resumes idle with nothing left to wake it.
+ */
+const recordedMonitors = (branch: readonly SessionEntry[]): Map<string, MonitorSpec> => {
+  const specs = new Map<string, MonitorSpec>();
+  for (const entry of branch) {
+    if (entry.type !== "custom" || entry.customType !== MONITOR_ENTRY || typeof entry.data !== "object" || entry.data === null) continue;
+    const data = entry.data as { op?: unknown; name?: unknown; argv?: unknown; filter?: unknown; cwd?: unknown };
+    if (typeof data.name !== "string") continue;
+    if (data.op === "stop") specs.delete(data.name);
+    else if (data.op === "start" && Array.isArray(data.argv) && typeof data.filter === "string" && typeof data.cwd === "string") {
+      specs.set(data.name, { name: data.name, argv: data.argv.map(String), filter: data.filter, cwd: data.cwd });
+    }
+  }
+  return specs;
 };
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -219,6 +241,34 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     }
     await syncTools();
     savePane(ctx);
+    if (role === "dori") restoreMonitors(ctx, branch);
+  };
+
+  // Bring the running set in line with what this branch recorded: restart what a resumed session lost, stop what a
+  // tree move or branch took back. Restored monitors are announced without starting a turn.
+  const restoreMonitors = (ctx: DoriContext, branch: readonly SessionEntry[]): void => {
+    if (!session) return;
+    const wanted = recordedMonitors(branch);
+    for (const running of monitors.list()) if (!wanted.has(running.name)) monitors.stop(running.name);
+    const running = new Set(monitors.list().map((m) => m.name));
+    const restored: string[] = [];
+    const failed: string[] = [];
+    for (const spec of wanted.values()) {
+      if (running.has(spec.name)) continue;
+      try {
+        monitors.start(spec.name, spec.argv, spec.filter, spec.cwd, session.id);
+        restored.push(spec.name);
+      } catch (error) {
+        failed.push(`${spec.name} (${errorText(error)})`);
+      }
+    }
+    if (restored.length === 0 && failed.length === 0) return;
+    const lines = [
+      ...(restored.length ? [`[monitor] restored for this resumed session: ${restored.join(", ")}`] : []),
+      ...(failed.length ? [`[monitor] could not restore: ${failed.join("; ")}`] : []),
+    ];
+    pi.sendMessage({ customType: "dori-monitor", content: lines.join("\n"), display: true }, { triggerTurn: failed.length > 0 });
+    if (failed.length) ctx.ui.notify(`omp-dori: ${lines.at(-1)}`, "warning");
   };
 
   // Registered before omp-ulw so its restore handlers see this event's role.
@@ -267,9 +317,15 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       if (params.op === "start") {
         if (!params.name || !params.argv || params.filter === undefined) throw new Error("start needs name, argv and filter");
         const started = monitors.start(params.name, params.argv, params.filter, ctx.cwd, session.id);
+        pi.appendEntry(MONITOR_ENTRY, { op: "start", name: started.name, argv: started.argv, filter: started.filter, cwd: ctx.cwd });
         text = `started monitor "${started.name}" (pid ${started.pid}): ${started.argv.join(" ")}`;
       } else if (params.op === "stop") {
-        if (!params.name || !monitors.stop(params.name)) throw new Error(`no running monitor "${params.name ?? ""}"`);
+        if (!params.name) throw new Error("stop needs name");
+        const wasRunning = monitors.stop(params.name);
+        // A monitor that exited on its own is still recorded; stopping it by name drops it from future restores.
+        const recorded = recordedMonitors(ctx.sessionManager.getBranch()).has(params.name);
+        if (!wasRunning && !recorded) throw new Error(`no monitor "${params.name}"`);
+        if (recorded) pi.appendEntry(MONITOR_ENTRY, { op: "stop", name: params.name });
         text = `stopped monitor "${params.name}"`;
       } else {
         const running = monitors.list();

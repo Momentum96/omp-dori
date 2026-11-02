@@ -109,5 +109,6 @@ export class Monitors {
 export const MONITOR_DESCRIPTION = [
   "Persistent background monitors for this Dori session.",
   'op "start" runs `argv` (an argument array, never a shell string) in the session cwd and reads its stdout and stderr line by line. Every line matching the `filter` regular expression wakes this session as a message `[name] line`; lines arriving together are delivered in one message. When a monitor process exits on its own, that is reported the same way; restarting it is your decision.',
-  'op "stop" kills the monitor `name`. op "list" shows running monitors. Names are unique: starting a running name fails. All monitors stop when the session ends.',
+  'op "stop" kills the monitor `name` and forgets it. op "list" shows running monitors. Names are unique: starting a running name fails.',
+  "Started monitors are recorded in this session. Their processes stop when omp exits, and when the session is resumed (herdr restoring it after a restart, or `omp --resume`) every monitor that was not stopped is started again and announced as `[monitor] restored ...`; you do not need to start them again.",
 ].join("\n");
