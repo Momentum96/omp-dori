@@ -213,14 +213,31 @@ try {
         await every(1, async () => console.log(`PRESENCE slack ${await p.hold()}`));
       } else if (key === "discord") {
         const token = process.env.DORI_DISCORD_TOKEN ?? die("DORI_DISCORD_TOKEN is not set");
-        discordPresence(() => {
-          const ws = new WebSocket("wss://gateway.discord.gg/?v=10&encoding=json");
-          let handler: (d: string) => void = () => {};
-          ws.addEventListener("message", (e) => handler(String(e.data)));
-          return { send: (d) => ws.send(d), close: () => ws.close(), onMessage: (cb) => { handler = cb; } };
-        }, token, realTimers);
-        console.log("PRESENCE_READY discord");
-        await new Promise(() => {});
+        // Discord closes gateway sockets routinely (op 7 reconnect, network drops). Each close opens a
+        // fresh session; without this loop the process stays alive while the bot shows offline.
+        let backoffMs = 5_000;
+        let announced = false;
+        for (;;) {
+          const closed = Promise.withResolvers<number>();
+          const openedAt = Date.now();
+          const p = discordPresence(() => {
+            const ws = new WebSocket("wss://gateway.discord.gg/?v=10&encoding=json");
+            let handler: (d: string) => void = () => {};
+            ws.addEventListener("message", (e) => handler(String(e.data)));
+            ws.addEventListener("close", (e) => closed.resolve(e.code));
+            return { send: (d) => ws.send(d), close: () => ws.close(), onMessage: (cb) => { handler = cb; } };
+          }, token, realTimers);
+          if (!announced) {
+            console.log("PRESENCE_READY discord");
+            announced = true;
+          }
+          const code = await closed.promise;
+          p.close();
+          // A session that held for a minute resets the backoff; fast failures (bad token, rate limit) grow it.
+          backoffMs = Date.now() - openedAt > 60_000 ? 5_000 : Math.min(backoffMs * 2, 300_000);
+          console.log(`PRESENCE_RECONNECT discord code=${code} retry_in=${backoffMs / 1000}s`);
+          await Bun.sleep(backoffMs);
+        }
       } else die("presence needs slack or discord");
       break;
     }
