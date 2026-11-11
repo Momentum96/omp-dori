@@ -8,7 +8,7 @@ Dein Engineer rund um die Uhr, in dem Chat, den du sowieso nutzt.
 
 [English](README.md) | [简体中文](README.zh.md) | Deutsch | [日本語](README.ja.md) | [Italiano](README.it.md)
 
-> Archivierte Übersetzung von [sisyphuslabs/dori-superagent, Stand `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.de.md). Funktionsbeschreibungen und die ursprünglichen omo-/Installationsbeispiele bleiben zur Quellenzuordnung erhalten. Aktuelle OMP-Befehle, Voraussetzungen und der ungeprüfte Quellkandidatenstatus stehen in [English](README.md) und [한국어](README.ko.md): `dori` gehört der Skill-CLI, der vollständige Harness heißt `dori harness ...` oder `bun src/cli.ts ...`. Bisher erfolgte kein Produktivwechsel und keine Aktivierung eines Produktiv-Watchers.
+> Archived translation of [sisyphuslabs/dori-superagent at `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.de.md). HISTORICAL UPSTREAM REFERENCE ONLY: the omo prerequisites and the original installation examples below are archived upstream material, not installation instructions for this OMP port. Current OMP installation and runtime requirements are in [English](README.md) and [한국어](README.ko.md); `dori` belongs to the skill CLI and the full harness is `dori harness ...` or `bun src/cli.ts ...`. This port has not replaced production Dori or enabled a production watcher.
 
 [![CI](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml)
 [![License: SUL-1.0](https://img.shields.io/badge/license-SUL--1.0-blue.svg)](LICENSE)
@@ -60,7 +60,7 @@ Beide Installationen legen einen Befehl namens `dori` in deinen PATH, installier
 Du brauchst herdr, Bun 1.4.4 oder neuer, git und die GitHub-CLI `gh`.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vntrevx/omp-dori/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
 ```
 
 Das klont dieses Repository nach `~/.dori/src`, verlinkt den Skill nach `~/.agents/skills/dori-mode`, verlinkt `dori` in deinen PATH und kopiert eine Beispielkonfiguration nach `~/.dori/config.json`. Bearbeite mindestens `leadPane` (dein eigenes herdr-Pane, aus `herdr pane current`), `laneWorkspace` und `defaultCwd`.
@@ -74,8 +74,8 @@ Der Betriebsvertrag ist [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md)
 Du brauchst Bun 1.4.4 oder neuer, herdr, omo und `gh` (für die Head-SHAs von PRs, die Checks und den Merge).
 
 ```sh
-git clone https://github.com/vntrevx/omp-dori
-cd omp-dori
+git clone https://github.com/sisyphuslabs/dori-superagent.git
+cd dori-superagent
 bun install
 bun link   # puts `dori` on your PATH
 ```
@@ -297,7 +297,7 @@ Der Harness ist die minimale Version und nicht unser Produktions-Stack. Absichtl
 
 ## Mitwirken
 
-Jeder Mitwirkende unterschreibt einmal das [Contributor License Agreement](CLA.md), mit dem Kommentar `I have read the CLA Document and I hereby sign the CLA` unter seinem ersten Pull Request; der CLA-Assistant-Check hält das fest. Die Gates, die Testbefehle und die Regeln für Pull Requests stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
+Upstream only (sisyphuslabs/dori-superagent): Jeder Mitwirkende unterschreibt einmal das [Contributor License Agreement](CLA.md), mit dem Kommentar `I have read the CLA Document and I hereby sign the CLA` unter seinem ersten Pull Request; der CLA-Assistant-Check hält das fest. This fork's CLA workflow is disabled, so no CLA signature is required for pull requests to this fork. Die Gates, die Testbefehle und die Regeln für Pull Requests stehen in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Lizenz
 

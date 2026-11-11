@@ -313,7 +313,7 @@ bun install --frozen-lockfile
 bun run ci # Biome, tsc, knip, LOC gate, harness, skill and extension suites
 ```
 
-These are verification instructions, not observed results for this candidate. MAIN runs the checks after port handoff. Unit suites use fake runtimes, gh and clocks; OMP regressions cover live-process identity, approvals, session mapping and native goal pause/resume. Real herdr/hc end-to-end tests use isolated runtime namespaces and fixture agents, and skip when their binary is absent. They do not prove model-provider behavior or messenger intake/reply; those need separate isolated QA. See [CONTRIBUTING.md](CONTRIBUTING.md) for upstream contributor conventions.
+Check results against that commit's CI and execution evidence. Unit suites use fake runtimes, gh and clocks; OMP regressions cover live-process identity, approvals, session mapping and native goal pause/resume. Real herdr/hc end-to-end tests use isolated runtime namespaces and fixture agents, and skip when their binary is absent. They do not prove model-provider behavior or messenger intake/reply; those need separate isolated QA. See [CONTRIBUTING.md](CONTRIBUTING.md) for upstream contributor conventions.
 
 ## What this is not
 
@@ -321,7 +321,7 @@ The retained harness is upstream's minimal published stack: it omits the cross-m
 
 ## Contributing
 
-Every contributor signs the [Contributor License Agreement](CLA.md) once, by commenting `I have read the CLA Document and I hereby sign the CLA` on their first pull request; the CLA Assistant check records it. The gates, the test commands and the pull request rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Upstream sisyphuslabs/dori-superagent requires every contributor to sign the [Contributor License Agreement](CLA.md) once, by commenting `I have read the CLA Document and I hereby sign the CLA` on their first pull request; the CLA Assistant check records it there. This fork's CLA workflow is disabled, so no CLA signature is required for pull requests to this fork. The gates, the test commands and the pull request rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -68,7 +68,7 @@ From the repository root, use the OMP installer:
 bash ./install.sh
 ```
 
-It checks Bun 1.4.4+ and OMP 18.14.2+, installs the skill CLI and role-gated extension, preserves the pinned omp-ulw revision, and creates an example config only when none exists. Existing non-link directories are preserved. `DORI_NO_PULL=1` installs an existing checkout as it is; `OMP_ULW_SRC` selects an existing omp-ulw checkout and updates `ompUlwPath`.
+It checks Bun 1.4.4+ and OMP 18.18.8+, installs the skill CLI and role-gated extension, preserves the pinned omp-ulw revision, and creates an example config only when none exists. Existing non-link directories are preserved. `DORI_NO_PULL=1` installs an existing checkout as it is; `OMP_ULW_SRC` selects an existing omp-ulw checkout and updates `ompUlwPath`.
 
 Edit `~/.dori/config.json`: at least `runtime` (`"herdr"` or `"hc"`), `leadPane` (the current runtime's session id), `laneWorkspace` (a herdr workspace or hc group label), `defaultCwd` and messenger hooks. Keep OMP's `agentCommand`, `sessionsDir` and `ompUlwPath`; `references/scripts.md` explains every field. Then start `omp --dori-role dori` in the selected runtime. The installer starts no messenger, monitor or harness.
 

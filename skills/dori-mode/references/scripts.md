@@ -12,7 +12,7 @@ bun test             # behavior tests with fake herdr/hc/git/gh; nothing real is
 bunx tsc --noEmit    # typecheck
 ```
 
-Needs: Bun 1.4.4+, OMP 18.14.2+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`closed` signals (npm for `published`). The `command`, `file` and `url` signals need nothing extra. The full list of signal kinds is in `sessions.md`. The host guard reads `sysctl`, `memory_pressure` and `df` on macOS; on Linux it reads `/proc/loadavg`, `/proc/meminfo` (`MemAvailable` over `MemTotal`) and `df`. Memory counts as 100% free when neither source works, and swap reads as unknown on Linux.
+Needs: Bun 1.4.4+, OMP 18.18.8+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`closed` signals (npm for `published`). The `command`, `file` and `url` signals need nothing extra. The full list of signal kinds is in `sessions.md`. The host guard reads `sysctl`, `memory_pressure` and `df` on macOS; on Linux it reads `/proc/loadavg`, `/proc/meminfo` (`MemAvailable` over `MemTotal`) and `df`. Memory counts as 100% free when neither source works, and swap reads as unknown on Linux.
 
 ## Configuration
 

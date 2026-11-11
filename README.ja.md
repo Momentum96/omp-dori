@@ -8,7 +8,7 @@
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | 日本語 | [Italiano](README.it.md)
 
-> [sisyphuslabs/dori-superagent の `97d807b` 時点](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md)の翻訳を、出典付きの upstream 資料として保存しています。以下の omo・インストール例も当時の資料です。現在の OMP コマンド、前提条件、未検証のソース候補としての状態は [English](README.md)・[한국어](README.ko.md) を参照してください。基本の `dori` は skill CLI、全 harness は `dori harness ...` または `bun src/cli.ts ...` です。この移植では本番 Dori の切り替えや本番 watcher の有効化を行っていません。
+> Archived translation of [sisyphuslabs/dori-superagent at `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md). HISTORICAL UPSTREAM REFERENCE ONLY: the omo prerequisites and the original installation examples below are archived upstream material, not installation instructions for this OMP port. Current OMP installation and runtime requirements are in [English](README.md) and [한국어](README.ko.md); `dori` belongs to the skill CLI and the full harness is `dori harness ...` or `bun src/cli.ts ...`. This port has not replaced production Dori or enabled a production watcher.
 
 [![CI](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml)
 [![License: SUL-1.0](https://img.shields.io/badge/license-SUL--1.0-blue.svg)](LICENSE)
@@ -60,7 +60,7 @@ Slackでは、Doriをどう見せるかをセットアップ時に選びます�
 herdr、Bun 1.4.4以降、git、GitHub CLIの `gh` が必要です。
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vntrevx/omp-dori/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
 ```
 
 これでこのリポジトリが `~/.dori/src` にクローンされ、スキルが `~/.agents/skills/dori-mode` にリンクされ、`dori` がPATHにリンクされ、設定例が `~/.dori/config.json` にコピーされます。少なくとも `leadPane`（`herdr pane current` で確認できる自分のherdrペイン）、`laneWorkspace`、`defaultCwd` は編集してください。
@@ -74,8 +74,8 @@ curl -fsSL https://raw.githubusercontent.com/vntrevx/omp-dori/main/install.sh | 
 Bun 1.4.4以降、herdr、omo、`gh`（PRのhead SHA、チェック、マージに使います）が必要です。
 
 ```sh
-git clone https://github.com/vntrevx/omp-dori
-cd omp-dori
+git clone https://github.com/sisyphuslabs/dori-superagent.git
+cd dori-superagent
 bun install
 bun link   # puts `dori` on your PATH
 ```
@@ -297,7 +297,7 @@ bun run ci                                        # biome, tsc, knip, the 250-li
 
 ## コントリビュート
 
-コントリビューターは最初のプルリクエストに `I have read the CLA Document and I hereby sign the CLA` とコメントして、[Contributor License Agreement](CLA.md) に一度だけ署名します。CLA Assistantのチェックがそれを記録します。ゲート、テストコマンド、プルリクエストのルールは [CONTRIBUTING.md](CONTRIBUTING.md) にあります。
+Upstream only (sisyphuslabs/dori-superagent): コントリビューターは最初のプルリクエストに `I have read the CLA Document and I hereby sign the CLA` とコメントして、[Contributor License Agreement](CLA.md) に一度だけ署名します。CLA Assistantのチェックがそれを記録します。This fork's CLA workflow is disabled, so no CLA signature is required for pull requests to this fork. ゲート、テストコマンド、プルリクエストのルールは [CONTRIBUTING.md](CONTRIBUTING.md) にあります。
 
 ## ライセンス
 
