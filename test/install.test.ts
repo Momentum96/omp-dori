@@ -69,7 +69,7 @@ function setup() {
     git(upstream, "commit", "-qam", text.trim());
   };
   const install = (env: Record<string, string> = {}) => {
-    const r = Bun.spawnSync(["bash", script], {
+    const r = Bun.spawnSync([script], {
       env: {
         ...gitEnv,
         HOME: home,
