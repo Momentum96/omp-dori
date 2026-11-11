@@ -5,7 +5,12 @@ import { join } from "node:path";
 import ompDori from "../index";
 import type { CommandOptions as Command, DoriApi, DoriContext, ToolDefinition as Tool } from "../index";
 
-export type Entry = { type: string; customType?: string; data?: unknown; mode?: string; modeData?: Record<string, unknown> };
+export type Entry = {
+  type: string;
+  customType?: string;
+  data?: unknown;
+  mode?: string;
+};
 export type FakeSession = { id: string; file?: string; entries: Entry[] };
 type Agent = DoriContext["agent"];
 export type FakeOptions = { session: FakeSession; flags?: Record<string, string>; agent?: Agent; active?: string[] };
@@ -44,7 +49,11 @@ export const fakePi = (options: FakeOptions): FakePi => {
       cwd: tmpdir(),
       mode: "print",
       agent,
-      sessionManager: { getSessionId: () => fake.session.id, getSessionFile: () => fake.session.file, getBranch: () => fake.session.entries },
+      sessionManager: {
+        getSessionId: () => fake.session.id,
+        getSessionFile: () => fake.session.file,
+        getBranch: () => fake.session.entries,
+      },
       ui: { notify: (message: string) => void fake.notes.push(message) },
     }),
     emit: async (event, payload = { type: event }) => {
@@ -72,7 +81,8 @@ export const fakePi = (options: FakeOptions): FakePi => {
         fake.handlers.set(event, list);
       },
       appendEntry: (customType, data) => void fake.session.entries.push({ type: "custom", customType, data }),
-      sendMessage: (message, sendOptions) => void fake.messages.push({ content: message.content, options: sendOptions }),
+      sendMessage: (message, sendOptions) =>
+        void fake.messages.push({ content: message.content, options: sendOptions }),
       getActiveTools: () => [...fake.active],
       setActiveTools: async (names) => {
         fake.active = [...names];
@@ -80,7 +90,10 @@ export const fakePi = (options: FakeOptions): FakePi => {
     },
   };
   // omp-ulw talks to these too; they are outside omp-dori's own API surface.
-  Object.assign(fake.api, { sendUserMessage: (text: string) => void fake.userMessages.push(text), getAllTools: () => fake.active.map((name) => ({ name })) });
+  Object.assign(fake.api, {
+    sendUserMessage: (text: string) => void fake.userMessages.push(text),
+    getAllTools: () => fake.active.map((name) => ({ name })),
+  });
   return fake;
 };
 

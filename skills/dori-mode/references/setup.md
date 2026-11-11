@@ -2,17 +2,27 @@
 
 Run these once, in order. Stop and ask the owner wherever a step needs their choice or their hand.
 
-## 1. herdr
+## 1. herdr or hc
 
-herdr is the terminal multiplexer the Dori runs in. Every lane is a herdr tab, and herdr lets you read a pane, type into it and see which process runs there.
+The Dori runs its sessions on one of two runtimes through the shared runtime abstraction. herdr gives every lane a tab, while hc (herdr-core) keeps each lane in a labelled terminal. This OMP port preserves both adapters, binds OMP session and approval records to the live agent process, and holds delivery when agent status or foreground identity is unknown.
+
+herdr:
 
 ```sh
 curl -fsSL https://herdr.dev/install.sh | sh
-herdr integration install omp       # omp reports idle/working/blocked to herdr through this
+herdr integration install omp
 herdr --skill                       # load its skill unless it is already in your context
 ```
 
-Run the Dori itself in a herdr pane as `omp --dori-role dori`. The role is stored in the session, so a resumed session (`omp --resume=<id>`, or herdr restoring it after a restart) keeps it without the flag. Lanes get `--dori-role lane` from `agentCommand`.
+hc:
+
+```sh
+curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+mkdir -p ~/.config/herdr-core && echo 'notes = false' >> ~/.config/herdr-core/config.toml
+hc --skill                          # load its skill unless it is already in your context
+```
+
+`notes = false` stops hc from typing notes into a parent agent on its own, so the Dori's own sends are the only text that reaches a lane. With both installed, the Dori runs on hc unless `"runtime": "herdr"` is set in step 4; with only one on PATH, it uses that one.
 
 ## 2. Messenger
 
@@ -50,18 +60,23 @@ Finish every login in the browser. Create the bot with agent-messenger and finis
 
 Greet the owner through the bot before doing anything else.
 
-## 4. Scripts
+## 4. OMP extension and scripts
+
+From the repository root, use the OMP installer:
 
 ```sh
-cd skills/dori-mode/scripts && bun install && bun link    # puts `dori` on PATH
-mkdir -p ~/.dori && cp ../references/config.example.json ~/.dori/config.json
+bash ./install.sh
 ```
 
-Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from `herdr pane current`), `laneWorkspace`, `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
+It checks Bun 1.4.4+ and OMP 18.14.2+, installs the skill CLI and role-gated extension, preserves the pinned omp-ulw revision, and creates an example config only when none exists. Existing non-link directories are preserved. `DORI_NO_PULL=1` installs an existing checkout as it is; `OMP_ULW_SRC` selects an existing omp-ulw checkout and updates `ompUlwPath`.
+
+Edit `~/.dori/config.json`: at least `runtime` (`"herdr"` or `"hc"`), `leadPane` (the current runtime's session id), `laneWorkspace` (a herdr workspace or hc group label), `defaultCwd` and messenger hooks. Keep OMP's `agentCommand`, `sessionsDir` and `ompUlwPath`; `references/scripts.md` explains every field. Then start `omp --dori-role dori` in the selected runtime. The installer starts no messenger, monitor or harness.
+
+The installed `dori` command remains the messenger/lane CLI. The complete upstream harness is available through `dori harness <args>` or `bun src/cli.ts`; linking the root package separately exposes `dori-harness`.
 
 ## 5. Monitors
 
-Arm these with the `monitor` tool in your own session: `monitor` start with a name, the command as an argv array and the filter regex. Every output line that matches the filter wakes the session as a `[name] line` message; a monitor whose process exits says so, and you decide whether to start it again. `monitor` list shows what runs; all of them stop when the session ends or switches. Started monitors are recorded in the session: when herdr restores the Dori after a restart, or it is resumed with `omp --resume`, every monitor that was not stopped by name starts again by itself (`[monitor] restored ...`), so arm them once. Calls look like `{op:"start", name:"watch", argv:["dori","watch"], filter:"^LANE_"}`, `{op:"stop", name:"watch"}`, `{op:"list"}`. Give the command itself as argv, not a wrapper script that starts children: stopping a monitor ends its own process only. Unless omp runs without approvals, each `monitor` call asks for approval like any command.
+Arm these as persistent monitors with the OMP Dori extension's `monitor` tool in the owning session. The extension records start/stop intent and restores it when that session resumes. Its boot metadata mirror contains monitor specifications, so `dori boot` can recommend cleanup without reading private transcripts; it stops nothing itself.
 
 | Monitor | Command | Filter |
 |---|---|---|
@@ -69,8 +84,9 @@ Arm these with the `monitor` tool in your own session: `monitor` start with a na
 | done flow | `dori watch` | `^LANE_` |
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD_PANE\|UNRECOGNISED_PANE)` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
-| freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT)` |
+| freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT\|STALLED\|JOURNAL-ERROR\|WORKING-WHILE-PAUSED)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
+| Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
 
 ## 6. First look around

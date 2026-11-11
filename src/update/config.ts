@@ -1,0 +1,19 @@
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+
+export class UpdateError extends Error {}
+/** The controller cannot prove a child/model run ended cleanly; the candidate is held for explicit recovery. */
+export class UpdateInterrupted extends UpdateError {}
+
+export const object = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Resolve existing ancestors too: a symlink must not turn a dedicated output into the live source. */
+export function canonical(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  const parent = dirname(path);
+  return parent === path ? path : join(canonical(parent), relative(parent, path));
+}
+
+export const contains = (parent: string, child: string): boolean =>
+  parent === sep || child === parent || child.startsWith(`${parent}${sep}`);
