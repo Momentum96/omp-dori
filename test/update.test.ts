@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, symlinkSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { DoriUpdater } from "../src/update/controller.ts";
@@ -158,5 +158,37 @@ describe("Dori staged updater", () => {
     const corruptOutput = join(f.directory, "corrupt-restored");
     expect(() => restoreUpdate(f.updater.context, snapshot, corruptOutput)).toThrow();
     expect(existsSync(corruptOutput)).toBe(false);
+  });
+
+  test("recovery protects the real live source behind a lexical source symlink before creating output", async () => {
+    const f = fixture();
+    const job = (await f.updater.once("stage")).job!;
+    const release = join(f.directory, "live-release");
+    renameSync(f.localSource, release);
+    symlinkSync(release, f.localSource, "dir");
+    const config = structuredClone(f.config);
+    const source = join(release, "src/behavior.ts");
+    const bytes = readFileSync(source);
+    const before = sourceManifest(release).hash;
+    const candidate = sourceManifest(job.candidate).hash;
+    const snapshot = snapshotUpdate(f.updater.context, job.id, join(f.directory, "snapshot"));
+    expect(sourceManifest(join(snapshot, "source")).hash).toBe(candidate);
+    for (const operation of ["snapshot", "restore"] as const) {
+      const output = join(release, `${operation}-output`);
+      expect(() =>
+        operation === "snapshot"
+          ? snapshotUpdate(f.updater.context, job.id, output)
+          : restoreUpdate(f.updater.context, snapshot, output),
+      ).toThrow("recovery output must be a fresh directory separate");
+      expect(existsSync(output)).toBe(false);
+      expect(readFileSync(source)).toEqual(bytes);
+      expect(sourceManifest(release).hash).toBe(before);
+      expect(f.updater.context.config).toEqual(config);
+    }
+    const restored = restoreUpdate(f.updater.context, snapshot, join(f.directory, "restored"));
+    expect(sourceManifest(join(restored, "candidate")).hash).toBe(candidate);
+    expect(readFileSync(source)).toEqual(bytes);
+    expect(sourceManifest(release).hash).toBe(before);
+    expect(f.updater.context.config.localSource).toBe(f.localSource);
   });
 });

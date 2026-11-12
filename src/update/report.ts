@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { UpdateError } from "./config.ts";
 import { runCommand } from "./process.ts";
+import type { PublicationRecord } from "./publish-types.ts";
 import { assertSource } from "./source.ts";
 import { persistJob, saveJson } from "./state.ts";
 import type { CommandReceipt, UpdateCommand, UpdateContext, UpdateJob } from "./types.ts";
@@ -35,12 +36,48 @@ export function candidateReport(ctx: UpdateContext, job: UpdateJob) {
   ) {
     throw new UpdateError("ready candidate lacks passed checks and a fresh review bound to its source");
   }
-  if (job.phase === "ready") assertSource(job);
+  let sourceProblem: string | null = null;
+  if (job.phase === "ready") {
+    try {
+      assertSource(job);
+    } catch (error) {
+      if (!ctx.config.promotion) throw error;
+      sourceProblem = error instanceof Error ? error.message : "candidate source identity changed";
+    }
+  }
+  const published = job.promotion?.publication?.status === "published";
+  const deployed = job.promotion?.deployment?.status === "healthy" && job.promotion.status === "complete";
+  const basis = job.promotion?.publication?.basis;
+  const publicationBasis: PublicationRecord["basis"] | null =
+    basis?.kind === "initial-source"
+      ? {
+          kind: basis.kind,
+          pins: {
+            main: basis.pins.main,
+            sourceHash: basis.pins.sourceHash,
+            exportHash: basis.pins.exportHash,
+            baseUpstream: basis.pins.baseUpstream,
+            upstream: basis.pins.upstream,
+          },
+        }
+      : basis?.kind === "matched-main"
+        ? { kind: basis.kind }
+        : null;
   return {
     version: 1,
     target: "dori",
-    candidateOnly: true,
-    activationRequiresNewOwnerApproval: true,
+    candidateOnly: !published,
+    ready: job.phase === "ready" && sourceProblem === null,
+    sourceCurrent: job.phase === "ready" ? sourceProblem === null : null,
+    sourceProblem,
+    published,
+    deployed,
+    publicationBasis,
+    publicationLabel: publicationBasis?.kind === "initial-source" ? "historical-replay initial-source" : null,
+    promotion: job.promotion ?? null,
+    publicationRequested: ctx.config.promotion !== undefined,
+    deploymentRequested: ctx.config.promotion?.deployment !== undefined,
+    activationRequiresNewOwnerApproval: ctx.config.promotion === undefined,
     job: job.id,
     phase: job.phase,
     createdAt: job.createdAt,
@@ -60,6 +97,7 @@ export function candidateReport(ctx: UpdateContext, job: UpdateJob) {
     port: job.port ?? null,
     problem: job.problem ?? null,
     notification: job.notification ?? null,
+    preActionNotices: job.preActionNotices ?? null,
     rollback: {
       frozenLocalSource: join(job.directory, "inputs", "local"),
       frozenBaseUpstream: join(job.directory, "inputs", "base"),
@@ -67,7 +105,7 @@ export function candidateReport(ctx: UpdateContext, job: UpdateJob) {
     },
     limitations: [
       "Environment and path isolation is not an OS sandbox.",
-      "No installation or live activation was performed.",
+      ...(deployed ? [] : ["No healthy live activation has been observed for this candidate."]),
       "Readiness covers only the configured verification commands and the fresh review's stated limits.",
     ],
   };
@@ -91,24 +129,46 @@ function deliveryOf(receipt: CommandReceipt | undefined): NonNullable<UpdateJob[
  * reporter. Intent is durable before the external write; a failed or ambiguous send is retained, never resent.
  */
 export async function reportCandidate(ctx: UpdateContext, job: UpdateJob): Promise<void> {
+  const report = candidateReport(ctx, job);
   persistReport(ctx, job);
+  // Retryable promotion progress retains private evidence without consuming a terminal notification.
+  if (job.promotion && job.promotion.status !== "held" && job.promotion.status !== "complete") return;
+  const outcome = report.deployed
+    ? "deployed"
+    : job.promotion?.status === "complete"
+      ? "promoted"
+      : job.promotion
+        ? "promotion-held"
+        : "candidate";
+  if (job.promotion ? job.promotion.notifications?.[outcome] !== undefined : job.notification !== undefined) return;
   ctx.emit({
     type: "DORI_UPDATE",
     target: "dori",
-    event: "candidate",
+    event: outcome,
     job: job.id,
     phase: job.phase,
     upstream: job.upstream,
   });
-  if (!ctx.config.reporter || job.notification !== undefined || ctx.signal?.aborted) return;
+  if (!ctx.config.reporter || ctx.signal?.aborted) return;
+  if (job.promotion) job.promotion.notifications ??= {};
   job.notification = { state: "sending" };
+  if (job.promotion) job.promotion.notifications![outcome] = job.notification;
   persistJob(job);
   persistReport(ctx, job);
-  const report = candidateReport(ctx, job);
   const text = JSON.stringify({
     type: "DORI_UPDATE",
     target: "dori",
-    candidateOnly: true,
+    candidateOnly: report.candidateOnly,
+    outcome,
+    published: report.published,
+    deployed: report.deployed,
+    publicationCommit: job.promotion?.publication?.commit ?? null,
+    publicationBasis: report.publicationBasis,
+    publicationLabel: report.publicationLabel,
+    promotionStatus: job.promotion?.status ?? null,
+    publicationStatus: job.promotion?.publication?.status ?? null,
+    publicationDeadline: job.promotion?.publication?.ciWait?.deadlineAt ?? null,
+    deploymentStatus: job.promotion?.deployment?.status ?? null,
     job: job.id,
     phase: job.phase,
     upstream: job.upstream,
@@ -118,7 +178,7 @@ export async function reportCandidate(ctx: UpdateContext, job: UpdateJob): Promi
     checkExits: report.checks.map((item) => item.exitCode),
     reviewer: job.review?.verdict ?? "unavailable",
     limitationCount: job.review?.limitations.length ?? 0,
-    activationRequiresNewOwnerApproval: true,
+    activationRequiresNewOwnerApproval: report.activationRequiresNewOwnerApproval,
   });
   const before = job.commands.length;
   try {
@@ -141,6 +201,7 @@ export async function reportCandidate(ctx: UpdateContext, job: UpdateJob): Promi
       upstream: job.upstream,
     });
   }
+  if (job.promotion) job.promotion.notifications![outcome] = job.notification;
   persistJob(job);
   persistReport(ctx, job);
 }

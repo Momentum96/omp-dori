@@ -14,6 +14,7 @@ type Running = {
   readonly name: string;
   readonly argv: readonly string[];
   readonly filter: RegExp;
+  readonly cwd: string;
   readonly proc: Subprocess<"ignore", "pipe", "pipe">;
   /** Session the monitor was started in; its lines are delivered only while that session is current. */
   readonly session: string;
@@ -25,6 +26,7 @@ export type MonitorInfo = {
   readonly argv: readonly string[];
   readonly filter: string;
   readonly pid: number;
+  readonly cwd: string;
 };
 
 export class Monitors {
@@ -47,7 +49,7 @@ export class Monitors {
     if (argv.length === 0) throw new Error("argv must name the command to run");
     const pattern = new RegExp(filter);
     const proc = Bun.spawn([...argv], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    const entry: Running = { name, argv: [...argv], filter: pattern, proc, session, stopped: false };
+    const entry: Running = { name, argv: [...argv], filter: pattern, cwd, proc, session, stopped: false };
     this.#running.set(name, entry);
     void Promise.all([this.#pump(entry, proc.stdout), this.#pump(entry, proc.stderr), proc.exited]).then(
       ([, , code]) => {
@@ -59,7 +61,7 @@ export class Monitors {
         );
       },
     );
-    return { name, argv: entry.argv, filter, pid: proc.pid };
+    return { name, argv: entry.argv, filter, cwd, pid: proc.pid };
   }
 
   stop(name: string): boolean {
@@ -77,6 +79,7 @@ export class Monitors {
       argv: entry.argv,
       filter: entry.filter.source,
       pid: entry.proc.pid,
+      cwd: entry.cwd,
     }));
   }
 

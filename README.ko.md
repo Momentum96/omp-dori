@@ -91,6 +91,12 @@ dori harness status
 
 [`examples/container/`](examples/container/)는 현재 checkout을 build context로 사용하는 container 예제입니다. OMP와 확장, pinned omp-ulw를 포함하며, `.dori`/`.omp`/GitHub·messenger 인증/프로젝트를 격리 named volume에 보존하도록 구성합니다. 검증된 설치 경로는 native 설치 스크립트이며, container 예제는 게시되거나 독립 검증된 이미지가 아닙니다. 기본 시작은 runtime server와 idle 명령뿐입니다. [container 문서](docs/container.md)에 버전·checksum 출처, herdr/hc build 선택과 acceptance 절차가 있습니다.
 
+## 명시적 상시 자동 업데이트
+
+`dori update`의 기본 동작은 격리 포팅·검사·새 리뷰 후 후보 생성입니다. 소유자가 별도 `promotion` 정책을 승인하고 설정하면, 검증된 정확한 소스만 자체 저장소 branch에 커밋·푸시하고 해당 head의 GitHub CI 통과 후 main을 fast-forward합니다. Linux/herdr용 managed 배포는 기존 작업·세션 참조·커서·모델 정책을 유지하며 운영 소스를 교체하고 monitor·수신 heartbeat까지 확인합니다. 실패 시 안전하게 가능한 범위에서 이전 실행본을 복원하며, 승인 창·새 작업·불명확한 프로세스에는 강제로 개입하지 않습니다.
+
+상시 배포 controller는 교체 대상 Dori의 자식 monitor가 아니라 외부 supervisor로 실행해야 합니다. [설정·검증·원복 계약](skills/dori-mode/references/scripts.md#staged-dori-updates)과 [systemd user unit](examples/update-supervisor.service)을 따르세요. 설치 자체는 이 정책을 켜지 않으며 global Bun·모델 설정·ULW는 변경하지 않습니다. GitHub main 발행과 실제 운영 교체는 서로 다른 기록입니다. 과거 실제 커밋 재생 실증을 미래 upstream 업데이트가 발생한 것으로 표현하면 안 됩니다.
+
 ## 개발과 검증 상태
 
 ```sh

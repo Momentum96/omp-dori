@@ -17,7 +17,7 @@ The extension records the current session, goal status and open approvals under 
 
 The installed `dori` command remains the messenger/lane CLI. `dori harness <args>` reaches the complete upstream harness, also available as `bun src/cli.ts` or the distinct `dori-harness` bin. Installation starts no harness, watcher or messenger. Existing configuration and operational helper import paths remain valid.
 
-`dori update check|stage|watch|status --config FILE` is the Dori-only candidate updater. Read `references/scripts.md#staged-dori-updates` for the dedicated configuration, real worker/check/fresh-review contracts, machine-readable monitor reports and isolated recovery commands. `stage` explicitly exercises the current pinned head; `check` skips the configured baseline. No updater is started during setup/boot, no ULW update is included, and a ready report grants no live activation.
+`dori update check|stage|watch|status --config FILE` is the Dori-only updater. Read `references/scripts.md#staged-dori-updates` for source-bound port/check/fresh-review, recovery, and optional owner-authorized automatic publication/deployment. Without `promotion` it only stages candidates. Explicit standing approval in a configured promotion policy permits verified branch/CI/main publication and optional managed herdr replacement without asking again for each accepted SHA; a bare ready report grants no such authority. Continuous deployment must use the outside-Dori supervisor so restarting Dori cannot kill its controller. Setup/boot activates nothing, and ULW stays pinned.
 
 ## First: your name
 
@@ -108,7 +108,7 @@ Real work runs in its own session, called a lane: a herdr tab, or a labelled ter
 | `dori launch` / `dori adopt` | open a lane in a new tab, or register one already running |
 | `dori sync [--write]` | rebuild the registry from live panes, report drift |
 | `dori boot` | after a restart or compaction: vanished panes, lane journals, open worklog items, watches left on finished lanes; read-only |
-| `dori update` | stage Dori-only source candidates with dedicated config, real checks and independent review; status and source/state recovery |
+| `dori update` | stage and review Dori-only candidates; optional explicitly authorized publication/managed rollout, restart, status and recovery |
 | `dori report` | a lane records a milestone, blocker, question, halt or done in its `reports.jsonl` and prints the `[REPORT]` line |
 | `dori checkpoint` / `dori checkpoints` | a lane records each completed step and its remote receipts once, and reads them back on resume |
 | `dori verify-pr <owner/repo> <num>` | before a PR is called done: commit emails match the repo's identity, fixes come with a test or a `No test:` reason |
