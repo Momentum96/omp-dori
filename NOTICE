@@ -6,6 +6,8 @@ It incorporates the OMP-specific adaptations from omp-dori source
 75a1b28de8caddb6d30b2e3d72ef3dec09450b47 and additional OMP compatibility
 changes for sessions, goals, approvals, monitors, runtime adapters,
 configuration, packaging and documentation.
+This copy also integrates upstream 49fba4dc081c9238f01e617b2fd17f548438e624,
+preserving those local adaptations and the separately pinned omp-ulw source.
 
 The upstream Sustainable Use License and original notices are preserved in
 LICENSE and the imported source. LICENSE permits own internal business use

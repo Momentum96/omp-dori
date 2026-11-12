@@ -14,6 +14,10 @@ test("the session id is read from --session, then a child's environment, then th
     const hit = Object.entries(extra).find(([k]) => line.startsWith(k));
     return { code: hit ? 0 : 1, out: hit?.[1] ?? "", err: "" };
   };
+  const deps = (extra: Record<string, string>) => {
+    const run = fake(extra);
+    return { run, sessionsDir: "/s", rts: runtimesFor({ runtime: "herdr" }, {}, run) };
+  };
   const table = [
     { pid: 10, ppid: 1, cmd: "zsh" },
     { pid: 11, ppid: 10, cmd: "/bin/bun /x/senpi/dist/bundle/cli.js --extension /x/plugin" },
@@ -23,12 +27,11 @@ test("the session id is read from --session, then a child's environment, then th
     { pid: 10, ppid: 1, cmd: "zsh" },
     { pid: 11, ppid: 10, cmd: "omo --session 01a0e129-23ce-7329-bbd1-fc0c1e7a6b8b" },
   ];
-  expect((await resolveSession(P1, "/repo", flagged, { run: fake({}), sessionsDir: "/s" })).via).toBe("argv");
+  expect((await resolveSession(P1, "/repo", flagged, deps({}))).via).toBe("argv");
   expect(
     (
       await resolveSession(P1, "/repo", table, {
-        run: fake({ "ps eww -o command= -p 12": "bun mcp PI_SESSION_ID=01a11440-ee81-7f90-b2ed-dcc7d51a0adf X=1" }),
-        sessionsDir: "/s",
+        ...deps({ "ps eww -o command= -p 12": "bun mcp PI_SESSION_ID=01a11440-ee81-7f90-b2ed-dcc7d51a0adf X=1" }),
       })
     ).id,
   ).toBe("01a11440-ee81-7f90-b2ed-dcc7d51a0adf");
@@ -37,8 +40,7 @@ test("the session id is read from --session, then a child's environment, then th
     "2026-01-01T12-00-02-113Z_01a11440-ee81-7f90-b2ed-dcc7d51a0adf.jsonl",
   ];
   const byStart = await resolveSession(P1, "/repo", table, {
-    run: fake({ "ps eww": "bun mcp X=1", "ps -o lstart=": "Thu Jan  1 12:00:01 2026 GMT" }),
-    sessionsDir: "/s",
+    ...deps({ "ps eww": "bun mcp X=1", "ps -o lstart=": "Thu Jan  1 12:00:01 2026 GMT" }),
     listDir,
   });
   expect(byStart).toEqual({ id: "01a11440-ee81-7f90-b2ed-dcc7d51a0adf", via: "start-time", pid: 11 });

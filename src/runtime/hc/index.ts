@@ -8,6 +8,7 @@ import type {
   DeliverOutcome,
   Key,
   Probe,
+  ReadOptions,
   SessionInfo,
   SessionRef,
   SessionRuntime,
@@ -67,8 +68,8 @@ export class HcRuntime implements SessionRuntime {
     return probe(this.exec, ref.id, this.stateDir);
   }
 
-  read(ref: SessionRef, lines: number): Promise<string> {
-    return read(this.exec, ref.id, lines);
+  read(ref: SessionRef, lines: number, opts?: ReadOptions): Promise<string> {
+    return read(this.exec, ref.id, lines, opts?.unwrapped ?? false);
   }
 
   deliver(ref: SessionRef, text: string, opts?: DeliverOptions): Promise<DeliverOutcome> {

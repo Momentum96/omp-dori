@@ -8,6 +8,7 @@ import type {
   Key,
   Probe,
   SessionInfo,
+  ReadOptions,
   SessionRef,
   SessionRuntime,
   SubmitResult,
@@ -66,8 +67,8 @@ export class HerdrRuntime implements SessionRuntime {
     return probe(this.cli, ref.id, true, undefined, this.stateDir);
   }
 
-  read(ref: SessionRef, lines: number): Promise<string> {
-    return this.cli.read(ref.id, lines);
+  read(ref: SessionRef, lines: number, opts?: ReadOptions): Promise<string> {
+    return this.cli.read(ref.id, lines, opts?.unwrapped ? "recent-unwrapped" : "recent");
   }
 
   /** Native herdr delivery keeps its status semantics; OMP approvals always hold delivery. */

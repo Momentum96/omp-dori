@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import type { PaneState } from "../src/lane-state.ts";
 import { launchLane } from "../src/launch.ts";
+import { Reports } from "../src/reports.ts";
 import { sessionDirFor } from "../src/session-id.ts";
 import { agentIn, depsFor, fakeClock, laneState, newWorld, withState, type TestState, type World } from "./fakes.ts";
 
@@ -29,6 +30,10 @@ const start = async (
     model?: string;
     startDelay?: number;
     suspended?: boolean;
+    unreportedUntil?: number;
+    startupWaitSeconds?: number;
+    goalMarker?: string;
+    finish?: { after: number; kind: "closed" | "verified-done" | "journal"; readFailure?: string };
   } = {},
 ) => {
   const brief = join(state.dir, `${key}.md`);
@@ -62,16 +67,28 @@ const start = async (
   world = newWorld();
   world.screen = options.screen ?? "Working (12s)\nprompt\nGoal: ...";
   world.panes = [{ pane_id: "w:p9", workspace_id: "w", agent: "omp", agent_status: "working" }];
+  if (options.unreportedUntil && world.panes[0]) world.panes[0].agent_status = "unknown";
   if (options.suspended && world.panes[0]) world.panes[0].foreground = "zsh";
   agentIn(world, "w:p9");
   laneState(state.dir, "w:p9", { sessionId: id, sessionFile, ...patch });
   const clock = fakeClock(T0);
+  let finished = false;
   const base = depsFor(
     world,
     {
       ...clock,
       sleep: async (ms) => {
         clock.at += ms;
+        if (options.unreportedUntil && clock.at >= T0 + options.unreportedUntil && world.panes[0])
+          world.panes[0].agent_status = "working";
+        if (options.finish && !finished && clock.at >= T0 + options.finish.after) {
+          const current = await base.registry.read(key);
+          if (!current) throw new Error("lane not registered before startup check");
+          if (options.finish.kind === "journal") new Reports(state.dir).report(key, "done", "finished", clock.at);
+          else await base.registry.write({ ...current, status: options.finish.kind });
+          world.panes = [];
+          finished = true;
+        }
         if (options.slow && ms === 10_000)
           laneState(state.dir, "w:p9", { sessionId: id, sessionFile, goal: { status: "active" } });
       },
@@ -79,6 +96,8 @@ const start = async (
     state.dir,
     {
       sessionsDir,
+      ...(options.startupWaitSeconds === undefined ? {} : { startupWaitSeconds: options.startupWaitSeconds }),
+      ...(options.goalMarker === undefined ? {} : { goalMarker: options.goalMarker }),
       ...(options.packageCommand
         ? {
             agentCommand: [
@@ -97,6 +116,8 @@ const start = async (
   const deps = {
     ...base,
     run: async (argv: readonly string[]) => {
+      if (finished && options.finish?.readFailure && argv[0] === "herdr" && argv[2] === "read")
+        return { code: 1, out: "", err: options.finish.readFailure };
       if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create")
         return {
           code: 0,
@@ -164,4 +185,37 @@ test("OMP extension, flag and model failures retain STARTUP_ERROR classification
   ];
   for (const [key = "", screen = "", phrase = ""] of failures)
     expect((await start(key, {}, { screen })).startup).toBe(`STARTUP_ERROR ${key} w:p9: ${phrase}`);
+});
+
+test("slow OMP readiness is waited for even with an active goal; neither goals nor opt-out bypass readiness", async () => {
+  expect((await start("slow-status", {}, { unreportedUntil: 100_000 })).startup).toBe("STARTUP_OK slow-status w:p9");
+  const reads = world.calls.filter((argv) => argv[2] === "read" && argv[5] === "40");
+  expect(reads).toHaveLength(9);
+  expect(reads.every((argv) => argv.at(-1) === "recent-unwrapped")).toBe(true);
+  for (const goalMarker of ["Pursuing goal", ""]) {
+    const key = `unready-${goalMarker ? "goal" : "optout"}`;
+    const result = await start(key, {}, { unreportedUntil: 999_000, startupWaitSeconds: 60, goalMarker });
+    expect(result.startup).toStartWith(`STARTUP_UNCONFIRMED ${key} w:p9: no ready agent status (unknown) after 60 s;`);
+  }
+  expect((await start("late-no-goal", { goal: { status: "none" } }, { unreportedUntil: 100_000 })).startup).toStartWith(
+    "STARTUP_NO_GOAL late-no-goal w:p9: the agent is running but shows no goal after 180 s;",
+  );
+});
+
+test("finished OMP lanes disappearing during either startup check are done, not failed or relaunched", async () => {
+  for (const after of [20_000, 30_000])
+    for (const kind of ["closed", "verified-done", "journal"] as const)
+      for (const readFailure of ["", "pane_not_found"]) {
+        const key = `finished-${after}-${kind}-${readFailure ? "read" : "probe"}`;
+        expect((await start(key, { goal: { status: "none" } }, { finish: { after, kind, readFailure } })).startup).toBe(
+          `STARTUP_DONE ${key}`,
+        );
+        expect(world.calls.filter((argv) => argv[2] === "run")).toHaveLength(1);
+      }
+});
+
+test("a completed lane does not hide a real runtime read failure", async () => {
+  await expect(
+    start("broken-read", {}, { finish: { after: 20_000, kind: "closed", readFailure: "server unavailable" } }),
+  ).rejects.toThrow("server unavailable");
 });

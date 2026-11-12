@@ -1,15 +1,17 @@
-import { fill, isOmpCommand } from "./config.ts";
+import { configPath, fill, isOmpCommand } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
 import { BRIEF_START, footer, originalBrief, quoteForPane } from "./launch-footer.ts";
 import { parseRef, type SessionRef } from "../../../../src/runtime/types.ts";
 import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields, upgradeLane } from "./registry.ts";
 import { iso, runtimesOf } from "./run.ts";
-import { readScreen, statusLookup } from "./sessions.ts";
 import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 import { Lessons, renderLessons } from "./lessons.ts";
+import { laneLaunchEnv, TokenFileError } from "./slack-token.ts";
+import { startupFailure } from "./startup-screen.ts";
+import { launchFinished, launchScreen, launchStatus } from "./launch-finished.ts";
 
 export type LaunchInput = {
   readonly key: string;
@@ -25,11 +27,13 @@ export type LaunchInput = {
 
 export class LaunchError extends Error {}
 
-const STARTUP_FAILURE =
-  /Cannot find module|All fallback models failed|No API key|model_not_available|usage limit|rate limit|quota|Session crashed|unknown provider|Failed to load extension|Trusted extension failed to load|unknown flags?: |Model \S+ not found|No models available/i;
-// OMP goals are read from its current live session record. A custom agent may use its configured footer marker;
-// neither path accepts status text quoted earlier in the agent's output.
-const GOAL_CHECKS = 6;
+// The first check is 20 s after start, then the screen and status are re-read every 10 s until `startupWaitSeconds`.
+const FIRST_CHECK_MS = 20_000;
+const RECHECK_MS = 10_000;
+const ready = (s: string | undefined): boolean => s === "idle" || s === "working";
+const unreported = (s: string | undefined): boolean => s === undefined || s === "unknown";
+// OMP goals come from its trusted current-session record, never quoted screen text. Custom agents may use their
+// footer marker or omo goal record. An empty marker opts out of the goal check, not the ready-status check.
 const goalShown = (screen: string, marker: string): boolean =>
   screen
     .split("\n")
@@ -123,9 +127,15 @@ const startLane = async (
   await Bun.write(input.brief, preamble);
   const rts = runtimesOf(deps);
   const group = deps.config.laneWorkspace || undefined;
+  let env: Record<string, string>;
+  try {
+    env = laneLaunchEnv(process.env, configPath());
+  } catch (e) {
+    throw e instanceof TokenFileError ? new LaunchError(`token file refused: ${e.message}`) : e;
+  }
   let ref: SessionRef;
   try {
-    const spec = { name: input.key, role: "lane", container: "tab", cwd, env: {} } as const;
+    const spec = { name: input.key, role: "lane", container: "tab", cwd, env } as const;
     ref = await rts.default.create(group === undefined ? spec : { ...spec, group });
   } catch (e) {
     throw new LaunchError(`session create failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -144,45 +154,54 @@ const startLane = async (
     text: `lane launched in ${pane}`,
   });
   const prompt = `${deps.config.launchKeywords}. Read and execute the lane brief at ${input.brief} in full. You are the ${input.key} lane; report as the brief's footer says.`;
-  const started = deps.clock.now();
+  // The session can be written while start is still returning; its goal must belong to this invocation.
+  const launchedAt = deps.clock.now();
   try {
     await rts.for(ref).start(ref, fill(deps.config.agentCommand, { model, prompt }).map(quoteForPane).join(" "));
   } catch (e) {
     return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: start failed: ${lastLines(String(e))}` };
   }
-  await deps.clock.sleep(20_000);
-  const screen = await readScreen(rts, ref, 40);
-  const bad = STARTUP_FAILURE.exec(screen);
-  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad[0]}` };
+  const started = deps.clock.now();
+  await deps.clock.sleep(FIRST_CHECK_MS);
+  const screen = await launchScreen(deps, rts, ref, input.key);
+  if (screen === null) return { lane, startup: `STARTUP_DONE ${input.key}` };
   const ompAgent = isOmpCommand(deps.config.agentCommand);
-  const startupStatus = async (): Promise<{ readonly status?: string; readonly error?: string }> => {
-    if (!ompAgent) return statusLookup(rts, ref);
-    try {
-      const probe = await rts.for(ref).probe(ref);
-      return { status: probe.shellInFront ? "shell" : probe.status };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
-  };
-  const { status, error } = await startupStatus();
-  if (status === "idle" || status === "working") {
+  const bad = startupFailure(screen, ompAgent);
+  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad}` };
+  const { status, error } = await launchStatus(rts, ref, ompAgent);
+  if (status === "gone" && (await launchFinished(deps, input.key)))
+    return { lane, startup: `STARTUP_DONE ${input.key}` };
+  // No status and no lookup error is an agent still starting (a slow host can take minutes, #202): it is waited for in
+  // the goal wait. A lookup error, a `shell` or any other status ends the launch below at once.
+  if (ready(status) || (unreported(status) && !error)) {
     const marker = deps.config.goalMarker;
     const omp = ompAgent ? { run: deps.run, rts, stateDir: deps.config.stateDir, ref } : undefined;
     const hasGoal = async (shown: string): Promise<boolean> =>
       (!omp && goalShown(shown, marker)) ||
-      (await laneGoalActive(deps.config.sessionsDir, cwd, input.key, started, omp));
+      (await laneGoalActive(deps.config.sessionsDir, cwd, input.key, launchedAt, omp));
+    const rechecks = Math.max(0, Math.ceil((deps.config.startupWaitSeconds * 1000 - FIRST_CHECK_MS) / RECHECK_MS));
     let shown = screen;
-    for (let check = 0; marker && !(await hasGoal(shown)); check++) {
-      if (check === GOAL_CHECKS)
+    let current = status;
+    for (let check = 0; !ready(current) || (marker && !(await hasGoal(shown))); check++) {
+      if (check >= rechecks) {
+        const waited = Math.round((deps.clock.now() - started) / 1000);
         return {
           lane,
-          startup: `STARTUP_NO_GOAL ${input.key} ${pane}: the agent is running but shows no goal after ${Math.round((deps.clock.now() - started) / 1000)} s; last lines: ${lastLines(shown)}`,
+          startup: ready(current)
+            ? `STARTUP_NO_GOAL ${input.key} ${pane}: the agent is running but shows no goal after ${waited} s; last lines: ${lastLines(shown)}`
+            : `STARTUP_UNCONFIRMED ${input.key} ${pane}: no ready agent status (${current ?? "none"}) after ${waited} s; last lines: ${lastLines(shown)}`,
         };
-      await deps.clock.sleep(10_000);
-      shown = await readScreen(rts, ref, 40);
+      }
+      await deps.clock.sleep(RECHECK_MS);
+      const nextScreen = await launchScreen(deps, rts, ref, input.key);
+      if (nextScreen === null) return { lane, startup: `STARTUP_DONE ${input.key}` };
+      shown = nextScreen;
       // The goal is only good news while the agent is still running: re-check the status on every re-read.
-      const again = await startupStatus();
-      if (again.status !== "idle" && again.status !== "working") {
+      const again = await launchStatus(rts, ref, ompAgent);
+      current = again.status;
+      if (current === "gone" && (await launchFinished(deps, input.key)))
+        return { lane, startup: `STARTUP_DONE ${input.key}` };
+      if (again.error || !(ready(current) || unreported(current))) {
         const lost = again.error
           ? `status lookup failed: ${again.error}`
           : `agent status became ${again.status ?? "none"}`;
@@ -192,9 +211,9 @@ const startLane = async (
         };
       }
       // A late failure stops the agent. A working agent's own output may quote these phrases (a file or log it reads),
-      // so only an idle agent with no goal is checked for one.
-      const failed = again.status === "idle" && !(await hasGoal(shown)) ? STARTUP_FAILURE.exec(shown) : null;
-      if (failed) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${failed[0]}` };
+      // so only a non-working agent with no goal is checked for one, including a still-unreported slow start.
+      const failed = current !== "working" && !(await hasGoal(shown)) ? startupFailure(shown, ompAgent) : null;
+      if (failed) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${failed}` };
     }
     return { lane, startup: `STARTUP_OK ${input.key} ${pane}` };
   }
