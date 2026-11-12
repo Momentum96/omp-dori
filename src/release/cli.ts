@@ -5,6 +5,7 @@ import { acquireConsumerLock, consumerPaths, initialize, pointer, realDirectory 
 import { installBundle, preflightInstallation, rollbackRelease } from "./install.ts";
 import { prerequisites } from "./provision.ts";
 import { hasConsumerState, loadInstalled, recoverInstalled, verifyRelease } from "./state.ts";
+import type { ReleaseManifest } from "./types.ts";
 
 const USAGE = `dori update <check|install|status|rollback> [--version vX.Y.Z] [--from DIST]
   check       verify an available public release without activating it
@@ -14,6 +15,13 @@ const USAGE = `dori update <check|install|status|rollback> [--version vX.Y.Z] [-
 Default check/install selects the latest stable GitHub release. Explicit tags also allow previews.
 --from reads local release assets; first installation may still fetch the exact public omp-ulw pin.
 Activation holds while Dori is live. Stop Dori yourself before installing or rolling back.`;
+
+const identity = (manifest: ReleaseManifest) => ({
+  tag: manifest.tag,
+  commit: manifest.commit,
+  sourceHash: manifest.source.hash,
+  prerelease: manifest.prerelease,
+});
 
 export async function runConsumerUpdate(argv: string[]): Promise<number> {
   let releaseLock: (() => void) | undefined;
@@ -79,7 +87,16 @@ export async function runConsumerUpdate(argv: string[]): Promise<number> {
     if (command === "status") {
       if (before) verifyRelease(paths, before.current);
       if (before?.previous) verifyRelease(paths, before.previous);
-      console.log(JSON.stringify({ installed: before ?? null }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            installed: before ? identity(before.current) : null,
+            previous: before?.previous ? identity(before.previous) : null,
+          },
+          null,
+          2,
+        ),
+      );
       return 0;
     }
     preflightInstallation(paths);

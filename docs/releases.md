@@ -6,10 +6,10 @@ The first public release, `v0.1.0`, is a GitHub **prerelease** for **Linux x64, 
 
 | Component | Minimum requirement | Tested preview baseline |
 |---|---|---|
-| OS / architecture | Linux x64 | Linux x64 |
+| OS / architecture | Linux x64 | Ubuntu 24.04 x64, clean non-root consumer home |
 | Bun | 1.4.4 | 1.4.4 |
 | Native OMP | 18.18.8 | 18.18.8 |
-| Session runtime | herdr, with its OMP integration | herdr |
+| Session runtime | herdr, with its OMP integration | herdr 0.9.5 |
 | Messenger | Discord, using your own bot | Discord |
 
 Newer Bun or OMP versions meeting the minimum are not automatically tested combinations. macOS and hc have CI coverage and retained adapters, rather than a first-release live consumer support promise. Slack and Telegram remain source features. The maintainer source-container recipe is separate from the public release installer; it is not a published consumer image.

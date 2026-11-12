@@ -2,7 +2,7 @@
 
 ## 0.1.0 — Linux x64 preview (`v0.1.0`, prerelease)
 
-This is the first public-release interface for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord, with Bun 1.4.4 and native OMP 18.18.8 as the tested baseline and minimum versions. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
+This is the first public-release interface for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
 
 ### Release installation and recovery
 
