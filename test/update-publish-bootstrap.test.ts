@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { loadUpdateConfig } from "../src/update/load.ts";
@@ -37,37 +37,45 @@ test("owner content missing from frozen local input holds before any durable pub
   expect(readState(f.updater.context).baseline).toBeUndefined();
 });
 
-test.each([
-  "exact",
-  "source-mismatch",
-  "main-mismatch",
-  "export-mismatch",
-  "base-mismatch",
-  "upstream-mismatch",
-] as const)("initial source publication requires all five exact approved pins: %s", async (binding) => {
-  const f = await bootstrapFixture(binding);
-  const result = await f.updater.once();
-  if (binding === "exact") {
-    expect(result.outcome).toBe("promoted");
-    const publication = result.job!.promotion!.publication!;
-    const commit = publication.commit!;
-    expect(publication.basis).toEqual({ kind: "initial-source", pins: f.config.promotion!.publish.initialSource! });
-    expect(readState(f.updater.context).initialSourceJob).toBe(result.job!.id);
-    expect(git(f.target, "rev-parse", "main")).toBe(commit);
-    expect(git(f.target, "show", "--format=%P", "--no-patch", commit)).toBe(f.expectedMain);
-    expect(git(f.target, "show", "--format=%B", "--no-patch", commit)).toContain(
-      "Initial-Source-Basis: historical-replay",
-    );
-    expect(git(f.target, "show", "main:src/behavior.ts")).toBe("export const behavior = 2;");
-  } else {
-    expect(result.outcome).toBe("held");
-    expect(result.job?.promotion?.status).toBe("held");
-    expect(result.job?.promotion?.publication).toBeUndefined();
-    expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
-    expect(git(f.target, "for-each-ref", "--format=%(refname)", "refs/heads/dori-update/")).toBe("");
-    expect(readState(f.updater.context).baseline).toBeUndefined();
-    expect(readState(f.updater.context).initialSourceJob).toBeUndefined();
-  }
+describe("initial-source pin binding", () => {
+  let exportHash: string;
+  beforeAll(async () => {
+    // Share only the checked export hash; every binding still prepares its own isolated candidate.
+    exportHash = publicSource((await publicationFixture()).job).hash;
+  });
+  test.each([
+    "exact",
+    "source-mismatch",
+    "main-mismatch",
+    "export-mismatch",
+    "base-mismatch",
+    "upstream-mismatch",
+  ] as const)("initial source publication requires all five exact approved pins: %s", async (binding) => {
+    const f = await bootstrapFixture(binding, false, exportHash);
+    expect(publicSource(f.job).hash).toBe(exportHash);
+    const result = await f.updater.once();
+    if (binding === "exact") {
+      expect(result.outcome).toBe("promoted");
+      const publication = result.job!.promotion!.publication!;
+      const commit = publication.commit!;
+      expect(publication.basis).toEqual({ kind: "initial-source", pins: f.config.promotion!.publish.initialSource! });
+      expect(readState(f.updater.context).initialSourceJob).toBe(result.job!.id);
+      expect(git(f.target, "rev-parse", "main")).toBe(commit);
+      expect(git(f.target, "show", "--format=%P", "--no-patch", commit)).toBe(f.expectedMain);
+      expect(git(f.target, "show", "--format=%B", "--no-patch", commit)).toContain(
+        "Initial-Source-Basis: historical-replay",
+      );
+      expect(git(f.target, "show", "main:src/behavior.ts")).toBe("export const behavior = 2;");
+    } else {
+      expect(result.outcome).toBe("held");
+      expect(result.job?.promotion?.status).toBe("held");
+      expect(result.job?.promotion?.publication).toBeUndefined();
+      expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
+      expect(git(f.target, "for-each-ref", "--format=%(refname)", "refs/heads/dori-update/")).toBe("");
+      expect(readState(f.updater.context).baseline).toBeUndefined();
+      expect(readState(f.updater.context).initialSourceJob).toBeUndefined();
+    }
+  });
 });
 
 test("an initial-source approval never covers owner main movement before publication intent", async () => {

@@ -12,9 +12,8 @@ type Binding =
   | "base-mismatch"
   | "upstream-mismatch";
 
-export async function bootstrapFixture(binding: Binding = "exact", reporter = false) {
-  const reference = await publicationFixture();
-  const exportHash = publicSource(reference.job).hash;
+export async function bootstrapFixture(binding: Binding = "exact", reporter = false, referenceExportHash?: string) {
+  const exportHash = referenceExportHash ?? publicSource((await publicationFixture()).job).hash;
   return publicationFixture(({ directory, localSource }) => {
     // Model an older local replay input and an exact separately approved final export.
     writeFileSync(join(localSource, "src/behavior.ts"), "export const behavior = 0;\n");

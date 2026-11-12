@@ -213,23 +213,15 @@ describe("Dori candidate boundaries", () => {
     const env = isolatedEnv(f.updater.context, directory, "check");
     const tmp = env["TMPDIR"]!;
     expect(git(tmp, "rev-parse", "--show-toplevel")).toBe(realpathSync(f.remote));
-    const outside = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
-      cwd: tmp,
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const discover = (cwd: string) =>
+      Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], { cwd, env, stdout: "pipe", stderr: "pipe" });
+    const outside = discover(tmp);
     expect(outside.exitCode).toBe(128);
     const nested = join(tmp, "nested");
     const subdirectory = join(nested, "subdirectory");
     mkdirSync(subdirectory, { recursive: true });
     git(nested, "init", "-b", "main");
-    const inside = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
-      cwd: subdirectory,
-      env,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const inside = discover(subdirectory);
     expect(inside.exitCode).toBe(0);
     expect(inside.stdout.toString().trim()).toBe(realpathSync(nested));
   });
