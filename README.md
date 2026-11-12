@@ -76,6 +76,28 @@ Edit `runtime`, `leadPane`, `laneWorkspace`, `defaultCwd`, the provider-qualifie
 
 The operating contract is [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md); setup, sessions, the done protocol and every command are in its [`references/`](skills/dori-mode/references/).
 
+### Next to an existing Dori
+
+If `$HOME/.dori` already belongs to another Dori (for example an upstream dori-superagent install), the installer does not touch it unless you choose so. In a terminal it asks; without one it stops and changes nothing. Choose up front with `DORI_INSTALL_MODE`:
+
+```sh
+git clone https://github.com/vntrevx/omp-dori.git "$HOME/.omp-dori/src"
+DORI_INSTALL_MODE=side bash "$HOME/.omp-dori/src/install.sh"
+```
+
+- `primary` installs into `$HOME/.dori` as above. It takes over the `dori` command, the `dori-mode` skill link and `$HOME/.dori/config.json`; the previous config and link targets are copied to `$HOME/.dori/backups/omp-dori-install-*` first. A `$HOME/.dori/src` that checks out another repository stops the install.
+- `side` installs into `OMP_DORI_HOME` (default `$HOME/.omp-dori`): its own `config.json`, `state/`, checkout and omp-ulw. Nothing under `$HOME/.dori`, the `dori` command, the `dori-mode` link or `$HOME/.omp/agent/extensions` changes. The only global entry is the `omp-dori` command (in `OMP_DORI_BIN_DIR`, default `$BUN_INSTALL/bin`).
+
+In a side install:
+
+- `omp-dori <command>` is this installation's `dori`, `omp-dori omp ...` its OMP, and `omp-dori hc ...` its hc. Each sets `DORI_HOME`, `DORI_CONFIG`, `DORI_STATE_DIR`, `DORI_AGENT_CMD` and `HC_SESSION` (default `omp-dori`, set with `OMP_DORI_HC_SESSION`), and puts the installation's `bin/` first on `PATH`, so lanes and their `dori` calls stay on this installation.
+- `omp-dori omp` runs OMP with `--no-extensions`, the omp-dori extension and a generated `omp.yml` overlay. Globally discovered OMP extensions, including a standalone omp-ulw, are not loaded there, so the pinned omp-ulw is loaded once.
+- The skill is a generated copy named `omp-dori-mode`, and the overlay hides `dori-mode`. Ask the lead for "omp-dori mode" or use `/skill:omp-dori-mode`.
+- New lanes use `bin/omp` from the installation through `agentCommand`, and hc terminals live in their own hc session, so the other Dori's pane checks never see them.
+- Use a separate messenger bot and channel: two Doris on one bot token both answer every message.
+
+Start the lead in that hc session: `omp-dori hc run --name omp-dori-lead -- omp-dori omp --dori-role dori`. The hc server for that session starts from the process that first runs `omp-dori hc`; on macOS its privacy permissions follow that process. Later runs of the side `install.sh` stay side installs without asking.
+
 ### The harness
 
 Use the same prerequisites and extension/omp-ulw installation as Dori mode. `gh` supplies PR head SHAs, checks and merges. The following commands start real sessions and loops; do not start a second harness against an existing installation's runtime and state.
