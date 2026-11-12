@@ -68,7 +68,7 @@ From the repository root, use the OMP installer:
 bash ./install.sh
 ```
 
-It checks Bun 1.4.4+ and OMP 18.18.8+, installs the skill CLI and role-gated extension, preserves the pinned omp-ulw revision, and creates an example config only when none exists. Existing non-link directories are preserved. `DORI_NO_PULL=1` installs an existing checkout as it is; `OMP_ULW_SRC` selects an existing omp-ulw checkout and updates `ompUlwPath`.
+It checks Bun 1.4.4+ and OMP 18.18.8+, installs the skill CLI and role-gated extension, moves omp-ulw to its latest `main` (`OMP_ULW_REF=lock` keeps the `omp-ulw.lock` revision) and installs it as an OMP extension (a standalone omp-ulw extension is reused instead; `ompUlwPath` is set to `""`), and creates an example config only when none exists. Existing non-link directories are preserved. `DORI_NO_PULL=1` installs an existing checkout as it is; `OMP_ULW_SRC` selects an existing omp-ulw checkout and updates `ompUlwPath`.
 
 When `~/.dori` belongs to another Dori, the installer asks in a terminal and otherwise stops without changes. `DORI_INSTALL_MODE=side` installs into `~/.omp-dori` next to it and is used through `omp-dori` (`omp-dori omp --dori-role dori` for the lead, `omp-dori <command>` for every `dori` command, its own config, state, `omp-dori-mode` skill and hc session); `DORI_INSTALL_MODE=primary` takes over `~/.dori` after backing up its config and links. The README's "Next to an existing Dori" section lists what each mode changes.
 

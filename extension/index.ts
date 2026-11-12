@@ -528,14 +528,18 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   try {
     const config = await loadConfig();
     stateDir = config.stateDir;
-    try {
-      // The omp-ulw checkout is user-configured (`ompUlwPath`), so the specifier only exists at runtime.
-      const module: unknown = await import(config.ompUlwPath);
-      const ulw = module && typeof module === "object" && "default" in module ? module.default : undefined;
-      if (typeof ulw !== "function") throw new Error("its default export is not a function");
-      await ulw(gated);
-    } catch (error) {
-      loadError = `omp-ulw not loaded from ${config.ompUlwPath} (${errorText(error)})`;
+    // An empty ompUlwPath means a standalone omp-ulw extension already serves every session; importing it again
+    // would register its commands and handlers twice.
+    if (config.ompUlwPath) {
+      try {
+        // The omp-ulw checkout is user-configured (`ompUlwPath`), so the specifier only exists at runtime.
+        const module: unknown = await import(config.ompUlwPath);
+        const ulw = module && typeof module === "object" && "default" in module ? module.default : undefined;
+        if (typeof ulw !== "function") throw new Error("its default export is not a function");
+        await ulw(gated);
+      } catch (error) {
+        loadError = `omp-ulw not loaded from ${config.ompUlwPath} (${errorText(error)})`;
+      }
     }
   } catch (error) {
     loadError = `Dori config not loaded (${errorText(error)}); omp-ulw and pane state are off`;

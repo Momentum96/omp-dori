@@ -56,7 +56,9 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
   const config = JSON.parse(readFileSync(join(side, "config.json"), "utf8"));
   expect(config.stateDir).toBe(join(side, "state"));
   expect(config.agentCommand).toEqual([join(side, "bin/omp"), "--dori-role", "lane", "--model", "{model}", "{prompt}"]);
-  expect(config.ompUlwPath).toBe(join(ulw, "index.ts"));
+  // omp-ulw loads as an OMP extension of omp-dori omp, so the omp-dori extension imports no second copy.
+  expect(config.ompUlwPath).toBe("");
+  expect(existsSync(join(ulw, "index.ts"))).toBe(true);
   // And its skill is a renamed copy whose description differs from dori-mode's, so omp lists both apart.
   const skill = readFileSync(join(side, "skills/omp-dori-mode/SKILL.md"), "utf8");
   expect(skill).toContain("\nname: omp-dori-mode\n");
@@ -66,17 +68,17 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
 
 test("omp-dori runs the real omp with only the omp-dori extension, its overlay, its config and its hc session", () => {
   // Given a side install next to another Dori.
-  const { home, src, env, install } = setup();
+  const { home, src, ulw, env, install } = setup();
   withOtherDori(home);
   expect(install({ DORI_INSTALL_MODE: "side" }).code).toBe(0);
   const side = join(home, ".omp-dori");
   // When the installed command starts omp.
   const r = Bun.spawnSync([join(home, "global-bin/omp-dori"), "omp", "--dori-role", "dori"], { env: env() });
-  // Then the stub omp (not the wrapper again) gets no discovered extensions, the omp-dori extension and the overlay.
+  // Then the stub omp (not the wrapper again) gets no discovered extensions, omp-dori and omp-ulw, and the overlay.
   const out = r.stdout.toString();
   expect(r.exitCode).toBe(0);
   expect(out).toContain(
-    `OMP_ARGS --no-extensions -e ${join(src, "extension")} --config ${join(side, "omp.yml")} --dori-role dori`,
+    `OMP_ARGS --no-extensions -e ${join(src, "extension")} -e ${ulw} --config ${join(side, "omp.yml")} --dori-role dori`,
   );
   expect(out).toContain(`OMP_ENV ${join(side, "config.json")} omp-dori`);
   // And the overlay hides the other Dori's skill and adds the side skill directory.

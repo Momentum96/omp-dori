@@ -29,7 +29,7 @@ Needs: Bun 1.4.4+, OMP 18.18.8+, herdr or hc, git, and the GitHub CLI (`gh`) for
 | `agentCommand`, `defaultModel`, `launchKeywords` | `omp --dori-role lane --model {model} {prompt}`, `anthropic/claude-opus-5-5`, `ulw set goal and work` | `launch`; explicit configuration remains authoritative |
 | `goalMarker` | `Pursuing goal` | launch goal-check policy; OMP activity is confirmed from the trusted extension goal record, while an explicitly empty marker keeps upstream's opt-out |
 | `sessionsDir` | `~/.omp/agent/sessions` | OMP session-id lookup |
-| `ompUlwPath` | `~/.dori/omp-ulw/index.ts` | role-gated extension loading; the pin is recorded in `omp-ulw.lock` |
+| `ompUlwPath` | `~/.dori/omp-ulw/index.ts` | role-gated import of omp-ulw; the installer sets `""` because it installs omp-ulw as an OMP extension; the CI-tested revision is in `omp-ulw.lock` |
 | `nudgeAfterMin`, `postAfterMin` | 15, 20 | `freshness` |
 | `closeAfterMin` | 5 | `watch` |
 | `heavySlots`, `heavyMaxLoad` | 1, 80 | `heavy` |
