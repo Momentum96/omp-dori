@@ -39,7 +39,9 @@ test("per-channel cursors persist atomically in owned private files without temp
     });
     expect(statSync(root).mode & 0o777).toBe(0o700);
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(path).uid).toBe(process.getuid?.());
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("POSIX user identity is required for cursor ownership checks");
+    expect(statSync(path).uid).toBe(uid);
     expect(readdirSync(root)).toEqual(["20.json"]);
     const other = fileDiscordInboundStore(state.dir, "21");
     expect(other.load()).toBeUndefined();

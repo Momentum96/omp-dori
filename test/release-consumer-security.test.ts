@@ -55,6 +55,10 @@ test("tar traversal, absolute paths, duplicate files, links and device entries a
     { name: `${root}/device`, kind: "3" },
     { name: `${root}/fifo`, kind: "6" },
     { name: `${root}/metadata`, kind: "x" },
+    { name: `${root}/bad${String.fromCharCode(1)}name`, bytes: "control" },
+    { name: `${root}/bad${String.fromCharCode(127)}name`, bytes: "delete" },
+    { name: `${root}/bad name`, bytes: "space" },
+    { name: `${root}/bad\\name`, bytes: "backslash" },
     release.entries[0]!,
   ];
   for (const entry of unsafe) {
@@ -105,20 +109,20 @@ test("existing source directories, stable non-link collisions and unsafe ancesto
   const f = fixture();
   const release = f.release("public\n");
   const extension = join(f.paths.home, ".omp/agent/extensions/omp-dori");
-  mkdirSync(extension, { recursive: true });
-  writeFileSync(join(extension, "owner.txt"), "keep\n");
+  mkdirSync(extension, { recursive: true, mode: 0o700 });
+  writeFileSync(join(extension, "owner.txt"), "keep\n", { mode: 0o600 });
   await expect(installBundle(f.paths, release.bundle, undefined)).rejects.toThrow("Unmanaged source/path");
   expect(readFileSync(join(extension, "owner.txt"), "utf8")).toBe("keep\n");
   expect(loadInstalled(f.paths)).toBeUndefined();
   const g = fixture();
   const other = join(g.root, "owner-source");
-  mkdirSync(other);
+  mkdirSync(other, { mode: 0o700 });
   symlinkSync(other, join(g.paths.home, ".agents"));
   await expect(installBundle(g.paths, g.release("public\n").bundle, undefined)).rejects.toThrow("Unsafe directory");
   expect(readlinkSync(join(g.paths.home, ".agents"))).toBe(other);
   const h = fixture();
-  mkdirSync(h.paths.live);
-  writeFileSync(join(h.paths.live, "owner.txt"), "checkout work\n");
+  mkdirSync(h.paths.live, { mode: 0o700 });
+  writeFileSync(join(h.paths.live, "owner.txt"), "checkout work\n", { mode: 0o600 });
   await expect(installBundle(h.paths, h.release("public\n").bundle, undefined)).rejects.toThrow(
     "Unmanaged source/path",
   );

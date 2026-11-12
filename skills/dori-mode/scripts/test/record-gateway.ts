@@ -49,7 +49,7 @@ class Gateway {
         this.close(4014);
         return;
       }
-      if (sockets.length === 1) {
+      if (sockets[0] === this) {
         this.message({
           op: 0,
           t: "READY",

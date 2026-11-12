@@ -8,13 +8,15 @@ import { recoverInstalled, releasePath } from "../src/release/state.ts";
 import { processIdentity } from "../src/update/deployment-process.ts";
 import { fixture } from "./release-consumer-setup.ts";
 
+const linux = test.skipIf(process.platform !== "linux");
+
 test("local release installation preserves config/auth/work and updates every stable reference through one source pointer", async () => {
   const f = fixture();
   const config = '{"stateDir":"~/.dori/state","ompUlwPath":"/owner/custom.ts","defaultModel":"owner/model"}\n';
-  writeFileSync(f.paths.config, config);
-  writeFileSync(join(f.paths.dori, "auth.json"), "owner authentication\n");
-  mkdirSync(join(f.paths.dori, "work"));
-  writeFileSync(join(f.paths.dori, "work", "owner.txt"), "owner work\n");
+  writeFileSync(f.paths.config, config, { mode: 0o600 });
+  writeFileSync(join(f.paths.dori, "auth.json"), "owner authentication\n", { mode: 0o600 });
+  mkdirSync(join(f.paths.dori, "work"), { mode: 0o700 });
+  writeFileSync(join(f.paths.dori, "work", "owner.txt"), "owner work\n", { mode: 0o600 });
   const first = f.release("first\n");
   const before = await installBundle(f.paths, await acquireBundle({ from: first.dist }), undefined);
   const old = readlinkSync(f.paths.live);
@@ -47,14 +49,14 @@ test("rollback verifies and restores the exact previous release while retaining 
   expect(existsSync(releasePath(f.paths, two.current))).toBe(true);
 });
 
-test("a live identity-bound Dori receipt holds both install and rollback without signalling the process", async () => {
+linux("a live identity-bound Dori receipt holds both install and rollback without signalling the process", async () => {
   const f = fixture();
   const one = await installBundle(f.paths, f.release("first\n").bundle, undefined);
   const two = await installBundle(f.paths, f.release("second\n").bundle, one);
   const pointer = readlinkSync(f.paths.live);
   const state = readFileSync(f.paths.state);
   const runtime = join(f.paths.dori, "state/runtime");
-  mkdirSync(runtime, { recursive: true });
+  mkdirSync(runtime, { recursive: true, mode: 0o700 });
   saveJson(join(runtime, "owned-pane.json"), { ...processIdentity(process.pid), role: "dori", sessionId: "isolated" });
   await expect(installBundle(f.paths, f.release("third\n").bundle, two)).rejects.toThrow("Live Dori PID");
   await expect(rollbackRelease(f.paths, two)).rejects.toThrow("Live Dori PID");
@@ -102,7 +104,7 @@ test("interruption before the pointer switch retains the old source and state an
 
 test("consumer status works before user configuration parsing and performs no runtime launch", () => {
   const f = fixture();
-  writeFileSync(f.paths.config, "invalid user config\n");
+  writeFileSync(f.paths.config, "invalid user config\n", { mode: 0o600 });
   const cli = resolve(import.meta.dir, "../skills/dori-mode/scripts/src/cli.ts");
   const result = Bun.spawnSync([process.execPath, cli, "update", "status"], {
     env: { HOME: f.paths.home, PATH: process.env["PATH"], DORI_TELEMETRY: "0", DO_NOT_TRACK: "1" },

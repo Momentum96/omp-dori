@@ -2,7 +2,6 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
     "scripts/update-supervisor.ts",
-    "scripts/release.ts",
     "src/update/deployment-launcher.ts",
     "skills/dori-mode/scripts/src/cli.ts",
     "src/update/reviewer-guard.ts",
@@ -13,6 +12,7 @@
     "test/**/*.test.ts",
     "skills/dori-mode/scripts/test/**/*.test.ts",
     "skills/dori-mode/scripts/test/record-gateway.ts",
+    "skills/dori-mode/scripts/test/record-discord-inbound.ts",
     "skills/dori-mode/scripts/test/record-fetch.ts"
   ],
   "project": [

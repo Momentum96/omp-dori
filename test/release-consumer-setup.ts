@@ -94,8 +94,8 @@ export function fixture() {
   const paths = consumerPaths(join(root, "home"));
   initialize(paths);
   const dependency = join(root, "public-dependency-fixture");
-  mkdirSync(dependency);
-  writeFileSync(join(dependency, "index.ts"), "export default {};\n");
+  mkdirSync(dependency, { mode: 0o700 });
+  writeFileSync(join(dependency, "index.ts"), "export default {};\n", { mode: 0o600 });
   git(dependency, "init", "--quiet");
   git(dependency, "add", "index.ts");
   git(dependency, "commit", "--quiet", "-m", "Isolated public dependency fixture");
@@ -112,7 +112,7 @@ export function fixture() {
     serial++;
     const releaseVersion = `1.2.${serial}`;
     const source = join(root, `source-${serial}`);
-    mkdirSync(source);
+    mkdirSync(source, { mode: 0o700 });
     const contents: Record<string, string> = {
       "omp-ulw.lock": `${pin}\n`,
       "payload.txt": payload,
@@ -120,8 +120,8 @@ export function fixture() {
       "skills/dori-mode/references/config.example.json": '{"runtime":"herdr","stateDir":"~/.dori/state"}\n',
     };
     for (const [path, bytes] of Object.entries(contents)) {
-      mkdirSync(dirname(join(source, path)), { recursive: true });
-      writeFileSync(join(source, path), bytes);
+      mkdirSync(dirname(join(source, path)), { recursive: true, mode: 0o700 });
+      writeFileSync(join(source, path), bytes, { mode: 0o600 });
     }
     chmodSync(join(source, "bin-entry.sh"), 0o755);
     const manifestSource = sourceManifest(source);
@@ -158,13 +158,14 @@ export function fixture() {
       ompUlw: { repository: "https://github.com/dbc-hbin/omp-ulw.git", commit: pin },
     });
     const dist = join(root, `dist-${serial}`);
-    mkdirSync(dist);
-    writeFileSync(join(dist, manifest.archive.name), bytes);
+    mkdirSync(dist, { mode: 0o700 });
+    writeFileSync(join(dist, manifest.archive.name), bytes, { mode: 0o600 });
     const metadata = `${JSON.stringify(manifest, null, 2)}\n`;
-    writeFileSync(join(dist, "release-manifest.json"), metadata);
+    writeFileSync(join(dist, "release-manifest.json"), metadata, { mode: 0o600 });
     writeFileSync(
       join(dist, "SHA256SUMS"),
       `${digest(bytes)}  ${manifest.archive.name}\n${digest(metadata)}  release-manifest.json\n`,
+      { mode: 0o600 },
     );
     return { bundle: { manifest, files: readArchive(bytes, manifest) }, bytes, entries, dist };
   };

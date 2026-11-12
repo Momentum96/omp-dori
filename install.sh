@@ -157,9 +157,9 @@ try {
     const path = join(source, file.path); mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, file.bytes, { flag: "wx", mode: 0o600 }); chmodSync(path, file.executable ? 0o755 : 0o644);
   }
-  writeFileSync(join(dist, "release-manifest.json"), metadata, { flag: "wx" });
-  writeFileSync(join(dist, "SHA256SUMS"), sumsBytes, { flag: "wx" });
-  writeFileSync(join(dist, manifest.archive.name), archive, { flag: "wx" });
+  writeFileSync(join(dist, "release-manifest.json"), metadata, { flag: "wx", mode: 0o600 });
+  writeFileSync(join(dist, "SHA256SUMS"), sumsBytes, { flag: "wx", mode: 0o600 });
+  writeFileSync(join(dist, manifest.archive.name), archive, { flag: "wx", mode: 0o600 });
   const child = Bun.spawn([process.execPath, join(source, "src/release/cli.ts"), "install", "--from", dist, "--version", manifest.tag],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
   process.exitCode = await child.exited;

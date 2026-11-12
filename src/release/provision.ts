@@ -1,4 +1,4 @@
-import { lstatSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ConsumerPaths } from "./files.ts";
 import { owned, readJson, realDirectory, regularFile, saveJson } from "./files.ts";
@@ -26,8 +26,22 @@ export function prerequisites(): void {
 }
 
 async function git(args: readonly string[], cwd: string, home: string): Promise<string> {
+  // Limit only this child's creation mask; never chmod or change the caller's existing checkout.
   const proc = Bun.spawn(
-    ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", ...args],
+    [
+      "/bin/sh",
+      "-c",
+      'umask 077; exec "$@"',
+      "dori-dependency-git",
+      "git",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "gc.auto=0",
+      ...args,
+    ],
     {
       cwd,
       env: {
@@ -78,6 +92,7 @@ export async function provisionDependency(paths: ConsumerPaths, manifest: Releas
   const stage = mkdtempSync(join(paths.staging, "dependency-"));
   const checkout = join(stage, "checkout");
   try {
+    mkdirSync(checkout, { mode: 0o700 });
     await git(["init", "--quiet", checkout], stage, stage);
     await git(["fetch", "--quiet", "--depth=1", "--no-tags", "--", repository, commit], checkout, stage);
     await git(["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit], checkout, stage);

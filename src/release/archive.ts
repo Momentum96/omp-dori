@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { hasControl } from "../update/config.ts";
 import { assertSourceAdmission, digest, sameManifest, sourceManifest } from "../update/source.ts";
 import type { ReleaseManifest } from "./types.ts";
 
@@ -60,7 +61,9 @@ export function readArchive(archive: Uint8Array, manifest: ReleaseManifest): rea
     if (directory && name.endsWith("/")) name = name.slice(0, -1);
     if (
       !name ||
-      /[\x00-\x20\x7f\\]/.test(name) ||
+      hasControl(name, true) ||
+      name.includes(" ") ||
+      name.includes("\\") ||
       name.startsWith("/") ||
       name.split("/").some((part) => !part || part === "." || part === "..") ||
       (name !== manifest.archive.root && !name.startsWith(`${manifest.archive.root}/`)) ||
