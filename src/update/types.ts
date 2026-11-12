@@ -1,3 +1,4 @@
+import type { PromotionConfig, PromotionRecord } from "./publish-types.ts";
 import type { ReviewScope } from "./reviewer-guard.ts";
 import type { WorkerScope } from "./worker-guard.ts";
 
@@ -37,6 +38,8 @@ export type UpdateConfig = {
   readonly modelAgentDir?: string;
   readonly reporter?: UpdateCommand;
   readonly reporterEnv: readonly string[];
+  /** Omitted means staging only. Standing publication/deployment authority is explicit and hash-bound. */
+  readonly promotion?: PromotionConfig;
 };
 export type SourceEntry = { readonly path: string; readonly sha256: string; readonly executable: boolean };
 export type SourceManifest = {
@@ -109,6 +112,14 @@ export type PortResult = {
     readonly evidence: string;
   }[];
 };
+export type PreActionNotice = {
+  readonly job: string;
+  readonly action: "main-publication" | "dori-replacement";
+  readonly intentHash: string;
+  readonly commandIndex: number;
+  state: "sending" | "accepted" | "failed" | "ambiguous";
+  exitCode?: number;
+};
 export type UpdateJob = {
   readonly version: 1;
   readonly id: string;
@@ -127,14 +138,20 @@ export type UpdateJob = {
   readonly commands: CommandReceipt[];
   readonly history: { readonly phase: UpdatePhase; readonly at: string }[];
   problem?: string;
+  promotion?: PromotionRecord;
   notification?: { readonly state: "sending" | "sent" | "failed" | "ambiguous"; readonly exitCode?: number };
+  preActionNotices?: Partial<Record<PreActionNotice["action"], PreActionNotice>>;
 };
 export type UpdateState = {
   readonly version: 1;
   readonly configHash: string;
   observed?: string;
   processed?: string;
+  /** Effective upstream baseline advances only after all configured publication/deployment readbacks succeed. */
+  baseline?: string;
   active?: string;
+  /** Write-once ownership of the explicitly reviewed initial-source exception, retained after failure or rollback. */
+  initialSourceJob?: string;
   readonly jobs: Record<string, string>;
 };
 export type UpdateEvent = {

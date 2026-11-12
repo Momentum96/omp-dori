@@ -77,6 +77,7 @@ export function isolatedEnv(
   saveJson(config, { runtime: "herdr", stateDir: state, sessionsDir: sessions, defaultCwd: directory, hooks: {} });
   // OMP 18.18.8 filters these discovery providers before MCP startup; model auth/settings remain referenced.
   saveJson(join(runtime, "omp.json"), {
+    update: { auto: false },
     disabledProviders: [
       "native",
       "mcp-json",

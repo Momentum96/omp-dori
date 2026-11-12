@@ -23,6 +23,8 @@ import {
   readPaneState,
   writePaneState,
 } from "../skills/dori-mode/scripts/src/lane-state";
+import { bootstrapMonitors, MONITOR_BOOTSTRAP_FLAG, recordedIntake } from "./bootstrap.ts";
+import { RuntimeHealthWriter } from "./deployment-health.ts";
 import { MONITOR_DESCRIPTION, Monitors } from "./monitor";
 
 interface SessionEntry {
@@ -195,6 +197,10 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     description: "Run as a Dori-mode session: dori (the messenger session) or lane; kept on resume",
     type: "string",
   });
+  pi.registerFlag(MONITOR_BOOTSTRAP_FLAG, {
+    description: "Private session-bound monitor bootstrap for an explicit managed legacy handoff",
+    type: "string",
+  });
 
   let role: DoriRole | undefined;
   let stateDir: string | undefined;
@@ -207,14 +213,17 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   let goalToolAdded = false;
   let paneWritten: string | undefined;
   const approvals = new Set<string>();
+  let managedRestorePending = process.env.DORI_MANAGED_STARTUP === "1";
   const monitors = new Monitors(
     (content) =>
       pi.sendMessage({ customType: "dori-monitor", content, display: true }, { triggerTurn: true, deliverAs: "aside" }),
     () => (role === "dori" ? session?.id : undefined),
   );
+  const runtimeHealth = new RuntimeHealthWriter(monitors);
 
   // Only the file this process wrote: another process may have taken the pane since.
   const removePane = (): void => {
+    runtimeHealth.stop();
     if (
       paneWritten !== undefined &&
       stateDir !== undefined &&
@@ -248,6 +257,17 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       agentStatus,
       approvalPending: approvals.size > 0,
     });
+    if (role === "dori")
+      runtimeHealth.update({
+        stateDir,
+        paneId,
+        role,
+        sessionId: session.id,
+        startedAt: session.startedAt,
+        wanted: recordedMonitors(ctx.sessionManager.getBranch()),
+        presetLoaded: loadError === undefined,
+      });
+    else runtimeHealth.stop();
     paneWritten = paneId;
     if (process.env.HC_TERMINAL_ID) {
       const status = approvals.size > 0 ? "blocked" : agentStatus;
@@ -256,15 +276,28 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   };
 
   // Boot reads this desired-state mirror instead of opening private session transcripts.
-  const saveMonitorSpecs = (specs: ReadonlyMap<string, MonitorSpec>): void => {
+  const saveMonitorSpecs = (specs: ReadonlyMap<string, MonitorSpec>, branch: readonly SessionEntry[]): void => {
     if (!session || !stateDir) return;
     const dir = join(stateDir, "monitors");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const path = join(dir, `${encodeURIComponent(session.id)}.json`);
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ version: 1, sessionId: session.id, monitors: [...specs.values()] }, null, 2), {
-      mode: 0o600,
-    });
+    writeFileSync(
+      tmp,
+      JSON.stringify(
+        {
+          version: 1,
+          sessionId: session.id,
+          monitors: [...specs.values()],
+          intake: recordedIntake(branch),
+        },
+        null,
+        2,
+      ),
+      {
+        mode: 0o600,
+      },
+    );
     renameSync(tmp, path);
   };
 
@@ -304,7 +337,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     });
   };
 
-  const syncMain = async (ctx: DoriContext, branch: readonly SessionEntry[]): Promise<void> => {
+  const syncMain = async (ctx: DoriContext, branch: readonly SessionEntry[], bootstrap = false): Promise<void> => {
     const sessionId = ctx.sessionManager.getSessionId();
     // Monitors belong to the Dori session that started them; their lines must not wake whatever session comes next.
     if (session?.id !== sessionId || role !== "dori") monitors.stopAll();
@@ -313,6 +346,8 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       approvals.clear();
       agentStatus = "idle";
     }
+    if (bootstrap && role === "dori" && bootstrapMonitors(pi, branch, sessionId, recordedMonitors(branch)))
+      branch = ctx.sessionManager.getBranch();
     goal = recordedGoal(branch);
     if (role && !lifecycleRegistered) registerLifecycle();
     if (role && loadError && !warned) {
@@ -321,15 +356,27 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     }
     await syncTools();
     savePane(ctx);
-    if (role === "dori") restoreMonitors(ctx, branch);
+    if (role === "dori") {
+      restoreMonitors(ctx, branch, managedRestorePending);
+      managedRestorePending = false;
+    }
   };
 
   // Bring the running set in line with what this branch recorded: restart what a resumed session lost, stop what a
   // tree move or branch took back. Restored monitors are announced without starting a turn.
-  const restoreMonitors = (ctx: DoriContext, branch: readonly SessionEntry[]): void => {
+  const restoreMonitors = (ctx: DoriContext, branch: readonly SessionEntry[], managedStartup = false): void => {
     if (!session) return;
     const wanted = recordedMonitors(branch);
-    for (const running of monitors.list()) if (!wanted.has(running.name)) monitors.stop(running.name);
+    for (const running of monitors.list()) {
+      const spec = wanted.get(running.name);
+      if (
+        !spec ||
+        JSON.stringify(spec.argv) !== JSON.stringify(running.argv) ||
+        new RegExp(spec.filter).source !== running.filter ||
+        spec.cwd !== running.cwd
+      )
+        monitors.stop(running.name);
+    }
     const running = new Set(monitors.list().map((m) => m.name));
     const restored: string[] = [];
     const failed: string[] = [];
@@ -342,7 +389,8 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
         failed.push(`${spec.name} (${errorText(error)})`);
       }
     }
-    saveMonitorSpecs(wanted);
+    saveMonitorSpecs(wanted, branch);
+    savePane(ctx);
     if (restored.length === 0 && failed.length === 0) return;
     const lines = [
       ...(restored.length ? [`[monitor] restored for this resumed session: ${restored.join(", ")}`] : []),
@@ -350,7 +398,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     ];
     pi.sendMessage(
       { customType: "dori-monitor", content: lines.join("\n"), display: true },
-      { triggerTurn: failed.length > 0 },
+      { triggerTurn: failed.length > 0 && !managedStartup },
     );
     if (failed.length) ctx.ui.notify(`omp-dori: ${lines.at(-1)}`, "warning");
   };
@@ -372,7 +420,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       }
       if (role) agentRoles.set(ctx.agent.id, role);
       else agentRoles.delete(ctx.agent.id);
-      if (ctx.agent.kind === "main") await syncMain(ctx, branch);
+      if (ctx.agent.kind === "main") await syncMain(ctx, branch, eventName === "session_start");
     });
   }
 
@@ -421,7 +469,8 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
           filter: started.filter,
           cwd: ctx.cwd,
         });
-        saveMonitorSpecs(recordedMonitors(ctx.sessionManager.getBranch()));
+        saveMonitorSpecs(recordedMonitors(ctx.sessionManager.getBranch()), ctx.sessionManager.getBranch());
+        savePane(ctx);
         text = `started monitor "${started.name}" (pid ${started.pid}): ${started.argv.join(" ")}`;
       } else if (params.op === "stop") {
         if (!params.name) throw new Error("stop needs name");
@@ -430,7 +479,8 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
         const recorded = recordedMonitors(ctx.sessionManager.getBranch()).has(params.name);
         if (!wasRunning && !recorded) throw new Error(`no monitor "${params.name}"`);
         if (recorded) pi.appendEntry(MONITOR_ENTRY, { op: "stop", name: params.name });
-        saveMonitorSpecs(recordedMonitors(ctx.sessionManager.getBranch()));
+        saveMonitorSpecs(recordedMonitors(ctx.sessionManager.getBranch()), ctx.sessionManager.getBranch());
+        savePane(ctx);
         text = `stopped monitor "${params.name}"`;
       } else {
         const running = monitors.list();

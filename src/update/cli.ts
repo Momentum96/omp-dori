@@ -1,25 +1,27 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { UpdateError } from "./config.ts";
+import { UpdateDetectionUnavailable, UpdateError } from "./config.ts";
 import { DoriUpdater } from "./controller.ts";
+import { restartDeployment } from "./deployment.ts";
 import { loadUpdateConfig } from "./load.ts";
 import { acknowledgeStopped, restoreUpdate, snapshotUpdate } from "./recovery.ts";
 import { persistReport } from "./report.ts";
 import { saveJson } from "./state.ts";
 
-const COMMANDS = ["check", "stage", "watch", "status", "snapshot", "restore", "recover"];
-const USAGE = `dori update <check|stage|watch|status|snapshot|restore|recover> --config FILE
-  check       detect a changed configured Dori ref and stage it once (the configured baseline is skipped)
-  stage       explicitly stage the current pinned ref, including the configured baseline (deduplicated)
-  watch       keep checking; stop and retain ambiguous/interrupted work
-  status      print private local JSON state and candidate reports
+const COMMANDS = ["check", "stage", "watch", "status", "snapshot", "restore", "recover", "restart"];
+const USAGE = `dori update <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE
+  check       detect a changed Dori ref once; resume ready promotion before detection
+  stage       explicitly stage the current pinned ref, including the effective baseline (deduplicated)
+  watch       keep checking; resume pending exact-head CI, stop on held/interrupted work
+  status      print private local JSON candidate, publication and deployment state
   snapshot    --job ID --output NEW_DIR [--app-state DIR]: freeze code, control evidence and explicit candidate app data
   restore     --input SNAPSHOT_DIR --output NEW_DIR: restore an isolated recovery copy, never readiness
-  recover     --ack-stopped ID|none: acknowledge every old child stopped; clear the active job or idle controller lock
-No installation, commit, push, global upgrade, ULW update or live cutover.`;
+  recover     --ack-stopped ID|none: acknowledge every old child stopped; clear ambiguous model ownership
+  restart     restart only the configured managed deployment through its identity-bound lock and health readback
+Default is staging only. Explicit promotion config enables verified publication and optional running Dori replacement.`;
 
-/** Exit codes: 0 ok/unchanged/ready, 3 held/failed/rejected candidate or failed report, 2 operator error, 130 interrupted. */
+/** Exit codes: 0 ok/unchanged/ready, 3 held/failed candidate, 4 detector unavailable (retryable), 2 operator error, 130 interrupted. */
 export async function runUpdate(argv: readonly string[]): Promise<number> {
   let updater: DoriUpdater | undefined;
   const stop = new AbortController();
@@ -77,14 +79,29 @@ export async function runUpdate(argv: readonly string[]): Promise<number> {
       if (job) persistReport(ctx, job);
       return 0;
     }
+    if (command === "restart") {
+      const deployment = ctx.config.promotion?.deployment;
+      if (!deployment) throw new UpdateError("update restart requires configured promotion.deployment");
+      const record = await restartDeployment(deployment, stop.signal);
+      console.log(
+        JSON.stringify({ type: "DORI_UPDATE", target: "dori", event: "managed-restart", status: record.status }),
+      );
+      return stop.signal.aborted ? 130 : record.status === "healthy" ? 0 : 3;
+    }
     if (command === "watch") {
       const outcome = await updater.watch();
       return stop.signal.aborted ? 130 : outcome === "held" ? 3 : 0;
     }
     const result = await updater.once(command === "stage" ? "stage" : "check");
     const sent = result.job?.notification?.state;
-    const unfinished = result.job !== undefined && result.job.phase !== "ready";
-    return result.outcome === "held" || unfinished || sent === "failed" || sent === "ambiguous" ? 3 : 0;
+    const unfinished =
+      result.job !== undefined &&
+      (result.job.phase !== "ready" ||
+        result.job.problem !== undefined ||
+        (ctx.config.promotion !== undefined && result.job.promotion?.status !== "complete"));
+    return result.outcome === "held" || unfinished || sent === "failed" || sent === "ambiguous" || sent === "sending"
+      ? 3
+      : 0;
   } catch (error) {
     if (updater && existsSync(updater.context.config.root)) {
       // Diagnostics are private and must never hide the original failure.
@@ -104,7 +121,7 @@ export async function runUpdate(argv: readonly string[]): Promise<number> {
           visible && error instanceof Error ? error.message : "operation failed; inspect dedicated updater artifacts",
       }),
     );
-    return stop.signal.aborted ? 130 : 2;
+    return stop.signal.aborted ? 130 : error instanceof UpdateDetectionUnavailable ? 4 : 2;
   } finally {
     process.removeListener("SIGTERM", interrupt);
     process.removeListener("SIGINT", interrupt);

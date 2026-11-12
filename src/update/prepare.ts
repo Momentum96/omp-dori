@@ -1,19 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Subprocess } from "bun";
-import { recordCommandOutput } from "./command-output.ts";
-import { UpdateError, UpdateInterrupted } from "./config.ts";
+import { UpdateDetectionUnavailable, UpdateError, UpdateInterrupted } from "./config.ts";
+import { type DetectionReceipt, runDetectorProcess } from "./detection-process.ts";
 import { isolatedEnv } from "./environment.ts";
 import { runCommand } from "./process.ts";
 import { carryDoriPin, changedPaths, digest, freezeSource, sourceManifest } from "./source.ts";
 import { persistJob, saveJson } from "./state.ts";
-import type { CommandReceipt, UpdateContext, UpdateJob } from "./types.ts";
+import type { UpdateContext, UpdateJob } from "./types.ts";
 
 const SHA = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/;
 
 /** Only this configured full ref is observed; never an implicit HEAD, another repository or a live installation. */
-export async function detectHead(ctx: UpdateContext): Promise<string> {
+export async function detectHead(ctx: UpdateContext, timeoutMs = 60_000): Promise<string> {
   if (ctx.signal?.aborted) throw new UpdateInterrupted("detector interrupted before launch");
   const directory = join(ctx.config.root, "detector");
   const env = isolatedEnv(ctx, directory, "check");
@@ -21,6 +20,10 @@ export async function detectHead(ctx: UpdateContext): Promise<string> {
     "git",
     "-c",
     "core.hooksPath=/dev/null",
+    "-c",
+    "http.lowSpeedLimit=1",
+    "-c",
+    "http.lowSpeedTime=30",
     "ls-remote",
     "--exit-code",
     "--refs",
@@ -30,7 +33,7 @@ export async function detectHead(ctx: UpdateContext): Promise<string> {
   ];
   const invocation = randomUUID();
   const receiptPath = join(directory, `${invocation}.json`);
-  const localCommandReceipt: CommandReceipt = {
+  const localCommandReceipt: DetectionReceipt = {
     name: "detect-head",
     argvHash: digest(JSON.stringify(argv)),
     startedAt: new Date().toISOString(),
@@ -38,21 +41,27 @@ export async function detectHead(ctx: UpdateContext): Promise<string> {
     stderr: join(directory, `${invocation}.stderr`),
   };
   saveJson(receiptPath, localCommandReceipt);
-  let proc: Subprocess<"ignore", "pipe", "pipe"> | undefined;
   let interrupted = false;
   try {
-    proc = Bun.spawn(argv, { env, cwd: directory, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-    localCommandReceipt.pid = proc.pid;
-    saveJson(receiptPath, localCommandReceipt);
-    saveJson(join(directory, "detection-started.json"), {
-      at: localCommandReceipt.startedAt,
-      pid: proc.pid,
-      receiptPath,
-    });
-    await recordCommandOutput(proc, localCommandReceipt, [], 60_000, ctx.signal);
+    await runDetectorProcess(
+      argv,
+      directory,
+      env,
+      localCommandReceipt,
+      (pid) => {
+        localCommandReceipt.pid = pid;
+        saveJson(receiptPath, localCommandReceipt);
+        saveJson(join(directory, "detection-started.json"), {
+          at: localCommandReceipt.startedAt,
+          pid,
+          receiptPath,
+        });
+      },
+      timeoutMs,
+      ctx.signal,
+    );
   } catch (error) {
-    if (proc?.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
-    interrupted = proc !== undefined;
+    interrupted = error instanceof UpdateInterrupted;
     localCommandReceipt.error = error instanceof Error ? error.message : String(error);
   } finally {
     localCommandReceipt.finishedAt = new Date().toISOString();
@@ -69,7 +78,7 @@ export async function detectHead(ctx: UpdateContext): Promise<string> {
     localCommandReceipt.exitCode !== 0 ||
     localCommandReceipt.signal !== undefined
   ) {
-    throw new UpdateError("Dori ref detection failed; inspect detector/last-detection.json");
+    throw new UpdateDetectionUnavailable("Dori ref detection unavailable; inspect detector/last-detection.json");
   }
   const stdout = readFileSync(localCommandReceipt.stdout, "utf8");
   const rows = stdout

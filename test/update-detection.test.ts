@@ -1,133 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { runUpdate } from "../src/update/cli.ts";
 import { UpdateInterrupted } from "../src/update/config.ts";
 import { DoriUpdater } from "../src/update/controller.ts";
+import { loadUpdateConfig } from "../src/update/load.ts";
 import { detectHead } from "../src/update/prepare.ts";
-import type { CommandReceipt, UpdateState } from "../src/update/types.ts";
+import type { UpdateState } from "../src/update/types.ts";
+import { detectionReceipt, detectorFixture, waitFor } from "./update-detection-setup.ts";
 import { fixture } from "./update-setup.ts";
 
-type DetectionReceipt = CommandReceipt & { readonly receiptPath: string };
-const detectionReceipt = (root: string): DetectionReceipt =>
-  JSON.parse(readFileSync(join(root, "detector", "last-detection.json"), "utf8")) as DetectionReceipt;
-
-// Real inherited descriptors require subprocess handshakes; fake time cannot drive pipe EOF or child exit.
-async function waitFor(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 8_000;
-  while (!check()) {
-    if (Date.now() > deadline) throw new Error("detector fixture did not reach its handshake");
-    await Bun.sleep(20);
-  }
-}
-
-function inheritedStderr(mode: "exit" | "abort") {
-  const f = fixture();
-  const bin = join(f.directory, "bin");
-  mkdirSync(bin, { mode: 0o700 });
-  const identity = join(f.directory, "descendant.json");
-  const ready = join(f.directory, "git-ready.json");
-  const stop = join(f.directory, "stop-descendant");
-  const stopped = join(f.directory, "descendant-stopped.json");
-  const result = join(f.directory, "detector-result.json");
-  const token = randomUUID();
-  f.write(
-    f.directory,
-    "descendant.ts",
-    `
-import { existsSync, writeFileSync, writeSync } from "node:fs";
-const [identity, stop, stopped, token] = process.argv.slice(2);
-const evidence = JSON.stringify({ pid: process.pid, token });
-writeSync(2, "detector stderr before inherited hold\\n");
-writeFileSync(identity, evidence);
-const finish = () => {
-  try { writeSync(2, "late descendant stderr\\n"); } catch {}
-  writeFileSync(stopped, evidence);
-  process.exit(0);
-};
-setTimeout(finish, 15_000);
-while (!existsSync(stop)) await Bun.sleep(20);
-finish();
-`,
-  );
-  writeFileSync(
-    join(bin, "git"),
-    `#!${process.execPath}
-import { existsSync, writeFileSync, writeSync } from "node:fs";
-if (!process.argv.includes("ls-remote")) throw new Error("only the detector may invoke fixture git");
-const descendant = Bun.spawn(${JSON.stringify([
-      process.execPath,
-      join(f.directory, "descendant.ts"),
-      identity,
-      stop,
-      stopped,
-      token,
-    ])}, { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
-descendant.unref();
-while (!existsSync(${JSON.stringify(identity)})) await Bun.sleep(20);
-writeSync(1, ${JSON.stringify(`${f.config.baseUpstream}\t${f.config.ref}\n`)});
-writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));
-if (${JSON.stringify(mode)} === "exit") process.exit(0);
-await Bun.sleep(20_000);
-`,
-    { mode: 0o700 },
-  );
-  f.write(
-    f.directory,
-    "detector.ts",
-    `
-import { existsSync, writeFileSync } from "node:fs";
-import { DoriUpdater } from ${JSON.stringify(new URL("../src/update/controller.ts", import.meta.url).href)};
-import { UpdateInterrupted } from ${JSON.stringify(new URL("../src/update/config.ts", import.meta.url).href)};
-const controller = new AbortController();
-const updater = new DoriUpdater(${JSON.stringify(f.config)}, () => {}, controller.signal);
-const pending = updater.once("stage").then(
-  (value) => ({ interrupted: false, outcome: value.outcome }),
-  (error) => ({ interrupted: error instanceof UpdateInterrupted }),
-);
-if (${JSON.stringify(mode)} === "abort") {
-  const deadline = Date.now() + 8_000;
-  while (!existsSync(${JSON.stringify(ready)})) {
-    if (Date.now() > deadline) throw new Error("fixture git never became ready");
-    await Bun.sleep(20);
-  }
-  controller.abort();
-}
-writeFileSync(${JSON.stringify(result)}, JSON.stringify({ ...await pending, state: updater.status().state }));
-`,
-  );
-  const proc = Bun.spawn([process.execPath, join(f.directory, "detector.ts")], {
-    cwd: f.directory,
-    env: { PATH: `${bin}:${process.env["PATH"] ?? "/usr/bin:/bin"}` },
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "pipe",
-    timeout: 20_000,
-  });
-  const stderr = new Response(proc.stderr).text();
-  return {
-    ...f,
-    proc,
-    stderr,
-    ready,
-    result,
-    stopped,
-    cleanup: async () => {
-      writeFileSync(stop, "release only this fixture's descendant");
-      await proc.exited;
-      await stderr;
-      if (existsSync(identity)) {
-        await waitFor(() => existsSync(stopped));
-        const started = JSON.parse(readFileSync(identity, "utf8")) as { pid: number; token: string };
-        expect(started.pid).toBeGreaterThan(0);
-        expect(started.token).toBe(token);
-        expect(JSON.parse(readFileSync(stopped, "utf8"))).toEqual(started);
-      }
-    },
-  };
-}
-
 describe("bounded configured ref detection", () => {
+  test("a completed unavailable ref check is retryable and the next check recovers without candidate work", async () => {
+    const f = fixture();
+    const config = join(f.directory, "config.json");
+    f.write(f.directory, "config.json", JSON.stringify(f.config));
+    const updater = new DoriUpdater(loadUpdateConfig(config), () => {});
+    renameSync(join(f.remote, ".git"), join(f.remote, ".git.offline"));
+    try {
+      expect(await runUpdate(["check", "--config", config])).toBe(4);
+      expect(detectionReceipt(f.config.root).exitCode).not.toBe(0);
+      expect(updater.status().state.jobs).toEqual({});
+      expect(updater.status().state.active).toBeUndefined();
+      expect(updater.status().state.observed).toBeUndefined();
+    } finally {
+      renameSync(join(f.remote, ".git.offline"), join(f.remote, ".git"));
+    }
+    expect(await runUpdate(["check", "--config", config])).toBe(0);
+    expect(detectionReceipt(f.config.root).exitCode).toBe(0);
+    expect(updater.status().state.observed).toBe(f.config.baseUpstream);
+    expect(updater.status().state.jobs).toEqual({});
+  });
+
   test("resolves the configured head and retains separate private invocation receipts", async () => {
     const f = fixture();
     expect(await detectHead(f.updater.context)).toBe(f.config.baseUpstream);
@@ -164,10 +68,10 @@ describe("bounded configured ref detection", () => {
     expect(existsSync(join(f.config.root, "jobs"))).toBe(false);
   });
 
-  test.each(["exit", "abort"] as const)(
-    "%s with a surviving inherited stderr is interrupted before parsing or staging",
+  test.each(["exit", "abort", "escape"] as const)(
+    "%s preserves interruption unless the owned group and output are proven stopped",
     async (mode) => {
-      const f = inheritedStderr(mode);
+      const f = detectorFixture(mode);
       let paths: string[] = [];
       let before: string[] = [];
       try {
@@ -176,19 +80,34 @@ describe("bounded configured ref detection", () => {
         expect(await f.stderr).toBe("");
         const result = JSON.parse(readFileSync(f.result, "utf8")) as {
           interrupted: boolean;
+          unavailable: boolean;
           state: UpdateState;
         };
-        expect(result.interrupted).toBe(true);
+        expect(result.interrupted).toBe(mode !== "exit");
+        expect(result.unavailable).toBe(mode === "exit");
         expect(result.state.jobs).toEqual({});
         expect(result.state.observed).toBeUndefined();
         expect(result.state.active).toBeUndefined();
         expect(existsSync(join(f.config.root, "jobs"))).toBe(false);
         const receipt = detectionReceipt(f.config.root);
-        const direct = JSON.parse(readFileSync(f.ready, "utf8")) as { pid: number };
+        const direct = JSON.parse(readFileSync(f.ready, "utf8")) as { pid: number; group: number };
+        expect(direct.group).toBe(direct.pid);
         expect(receipt.pid).toBe(direct.pid);
         expect(receipt.finishedAt).toBeDefined();
-        expect(receipt.error).toContain("output is incomplete");
-        expect(receipt.error).toContain("descendants may still be running");
+        expect(receipt.detector?.group).toBe(direct.pid);
+        expect(receipt.detector?.groupVerified).toBe(true);
+        expect(receipt.detector?.outputComplete).toBe(mode !== "escape");
+        expect(receipt.detector?.stopped).toBe(mode !== "escape");
+        if (mode === "escape") {
+          expect(receipt.error).toContain("descendants may still be running");
+          const descendant = JSON.parse(readFileSync(f.identity, "utf8")) as { pid: number; group: number };
+          expect(descendant.group).toBe(descendant.pid);
+          expect(receipt.detector?.escaped).toContain(descendant.pid);
+          const effects = statSync(f.effects).size;
+          await waitFor(() => statSync(f.effects).size > effects);
+        } else {
+          expect(receipt.detector?.escaped).toEqual([]);
+        }
         if (mode === "exit") expect(receipt.exitCode).toBe(0);
         else expect(receipt.signal).toBe("SIGKILL");
         const { receiptPath, ...local } = receipt;

@@ -1,6 +1,8 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
+    "scripts/update-supervisor.ts",
+    "src/update/deployment-launcher.ts",
     "skills/dori-mode/scripts/src/cli.ts",
     "src/update/reviewer-guard.ts",
     "src/update/worker-guard.ts",

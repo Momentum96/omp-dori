@@ -22,10 +22,7 @@ type RecoveryManifest = {
 const FINISHED = ["ready", "failed", "rejected"] as const;
 const CONTROL_FILE = /^(?:task-state\/(?:state|job|report|inputs)\.json|receipts\/\d+\.(?:json|stdout|stderr))$/;
 
-/**
- * The operator's explicit statement that every old child of this root has stopped. It never guesses from lock age,
- * kills an unknown PID or resumes work; it only clears ownership so the exact SHA stays deduplicated.
- */
+/** Explicit stopped-child acknowledgement clears ownership while retaining exact-SHA dedup and promotion intent. */
 export function acknowledgeStopped(ctx: UpdateContext, id: string): UpdateJob | undefined {
   const lock = readLock(ctx.config.root);
   if (lock && (lock.host !== hostname() || alive(lock.pid))) {
@@ -49,6 +46,9 @@ export function acknowledgeStopped(ctx: UpdateContext, id: string): UpdateJob | 
   if (state.active !== id) throw new UpdateError("acknowledgement must name the exact active job");
   const job = readJob(ctx.config.root, id);
   if (job.notification?.state === "sending") job.notification = { state: "ambiguous" };
+  for (const [outcome, notification] of Object.entries(job.promotion?.notifications ?? {})) {
+    if (notification.state === "sending") job.promotion!.notifications![outcome] = { state: "ambiguous" };
+  }
   if (FINISHED.some((phase) => phase === job.phase)) {
     // The controller stopped after a complete verdict: keep it, unless a ready verdict no longer matches its source.
     try {
@@ -56,7 +56,12 @@ export function acknowledgeStopped(ctx: UpdateContext, id: string): UpdateJob | 
       persistJob(job);
     } catch (error) {
       job.problem = error instanceof Error ? error.message : String(error);
-      transition(ctx, job, "failed");
+      if (ctx.config.promotion && job.phase === "ready") {
+        job.promotion ??= { version: 1, status: "held" };
+        job.promotion.status = "held";
+        job.promotion.problem = job.problem;
+        persistJob(job);
+      } else transition(ctx, job, "failed");
     }
   } else {
     job.problem = "operator acknowledged all old child processes stopped; no automatic retry or readiness restored";
@@ -71,7 +76,7 @@ export function acknowledgeStopped(ctx: UpdateContext, id: string): UpdateJob | 
 
 function newDestination(ctx: UpdateContext, value: string, ...inputs: readonly string[]): string {
   const path = canonical(resolve(value));
-  for (const protectedPath of [ctx.config.root, ctx.config.localSource, ...inputs]) {
+  for (const protectedPath of [ctx.config.root, canonical(ctx.config.localSource), ...inputs]) {
     if (contains(path, protectedPath) || contains(protectedPath, path)) {
       throw new UpdateError(
         "recovery output must be a fresh directory separate from source, state and snapshot inputs",

@@ -3,6 +3,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { expandHome, isOmpCommand } from "../../skills/dori-mode/scripts/src/config.ts";
 import { canonical, contains, object, UpdateError } from "./config.ts";
 import { checkNativeArgv } from "./native-argv.ts";
+import { parsePromotionConfig } from "./publish-config.ts";
 import type { UpdateCommand, UpdateConfig } from "./types.ts";
 
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -26,9 +27,10 @@ const CONFIG_KEYS = [
   "modelAgentDir",
   "reporter",
   "reporterEnv",
+  "promotion",
 ] as const;
 const RESERVED_ENV =
-  /^(?:HOME|PATH|TMP.*|TEMP|XDG_.*|DORI_.*|PI_.*|OMP_.*|BUN_.*|NODE_.*|GIT_.*|HERDR_.*|HC_.*|DO_NOT_TRACK)$/;
+  /^(?:HOME|PATH|TMP.*|TEMP|XDG_.*|DORI_.*|PI_.*|OMP_.*|BUN_.*|NODE_.*|GIT_.*|GH_.*|GITHUB_.*|SSH_.*|HERDR_.*|HC_.*|DO_NOT_TRACK)$/;
 const MESSENGER_ENV = /^DORI_(?:SLACK_TOKEN|SLACK_COOKIE|TELEGRAM_TOKEN|DISCORD_TOKEN)$/;
 const REPORTER_TOKENS = /\{(?!text\}|job\}|upstream\}|phase\})\w+\}/;
 
@@ -148,11 +150,12 @@ export function loadUpdateConfig(path: string): UpdateConfig {
     throw new UpdateError('update requires version:1, target:"dori", runtime:"herdr"');
   }
   const root = canonical(resolve(base, text(raw["root"], "root")));
-  const localSource = canonical(resolve(base, text(raw["localSource"], "localSource")));
-  if (!existsSync(localSource) || !lstatSync(localSource).isDirectory()) {
-    throw new UpdateError("localSource must be an existing source directory");
+  const localSource = resolve(base, text(raw["localSource"], "localSource"));
+  const sourceTarget = canonical(localSource);
+  if (!existsSync(sourceTarget) || !lstatSync(sourceTarget).isDirectory()) {
+    throw new UpdateError("localSource must resolve to an existing source directory");
   }
-  if (contains(root, localSource) || contains(localSource, root)) {
+  if (contains(root, sourceTarget) || contains(sourceTarget, root)) {
     throw new UpdateError("root and localSource must be separate, nonoverlapping directories");
   }
   const ref = text(raw["ref"], "ref");
@@ -192,13 +195,15 @@ export function loadUpdateConfig(path: string): UpdateConfig {
     }
     if (
       contains(root, modelAgentDir) ||
-      contains(localSource, modelAgentDir) ||
+      contains(sourceTarget, modelAgentDir) ||
       contains(modelAgentDir, root) ||
-      contains(modelAgentDir, localSource)
+      contains(modelAgentDir, sourceTarget)
     ) {
       throw new UpdateError("modelAgentDir must be outside candidate/source snapshots");
     }
   }
+  const promotion =
+    raw["promotion"] === undefined ? undefined : parsePromotionConfig(raw["promotion"], base, root, sourceTarget);
   return {
     version: 1,
     target: "dori",
@@ -217,5 +222,6 @@ export function loadUpdateConfig(path: string): UpdateConfig {
     reporterEnv: envNames(raw["reporterEnv"], "reporterEnv"),
     ...(modelAgentDir === undefined ? {} : { modelAgentDir }),
     ...(reporter === undefined ? {} : { reporter }),
+    ...(promotion === undefined ? {} : { promotion }),
   };
 }

@@ -5,9 +5,24 @@ import type { CommandReceipt } from "./types.ts";
 
 const OUTPUT_DRAIN_MS = 1_000;
 type Recording = { readonly done: Promise<void>; cancel(): void };
+// Node and Bun differ on BYOB and Bun-only reader methods; recording uses only this shared default-reader contract.
+type OutputStream = {
+  getReader(): {
+    read(): Promise<{ done: false; value: Uint8Array } | { done: true; value?: unknown }>;
+    cancel(): Promise<void>;
+    releaseLock(): void;
+  };
+};
+export type OutputProcess = Pick<
+  Subprocess<"ignore", "pipe", "pipe">,
+  "exited" | "exitCode" | "signalCode" | "kill"
+> & {
+  readonly stdout: OutputStream;
+  readonly stderr: OutputStream;
+};
 
 /** Retains a secret-sized tail so secrets split across reads never reach the private log. */
-function recordStream(stream: ReadableStream<Uint8Array>, path: string, secrets: readonly string[]): Recording {
+function recordStream(stream: OutputStream, path: string, secrets: readonly string[]): Recording {
   const fd = openSync(path, "wx", 0o600);
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -83,11 +98,12 @@ function recordStream(stream: ReadableStream<Uint8Array>, path: string, secrets:
 
 /** A direct child's exit is not pipe EOF: descendants may retain either inherited output descriptor. */
 export async function recordCommandOutput(
-  proc: Subprocess<"ignore", "pipe", "pipe">,
+  proc: OutputProcess,
   receipt: CommandReceipt,
   secrets: readonly string[],
   timeoutMs: number,
   signal?: AbortSignal,
+  onComplete?: () => void,
 ): Promise<void> {
   const recordings: Recording[] = [];
   let reason: string | undefined;
@@ -122,6 +138,7 @@ export async function recordCommandOutput(
         `${reason ? `${reason}; ` : ""}output drain exceeded ${OUTPUT_DRAIN_MS}ms; output is incomplete; ${recovery}`,
       );
     }
+    onComplete?.();
     if (reason !== undefined || receipt.signal !== undefined) {
       throw new UpdateInterrupted(`${reason ?? "direct child terminated by signal"}; ${recovery}`);
     }
