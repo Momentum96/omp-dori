@@ -10,7 +10,7 @@ import { candidateReport } from "../src/update/report.ts";
 import { parseReview, readPortResult } from "../src/update/review.ts";
 import { assertDoriScope, assertSource, sourceManifest } from "../src/update/source.ts";
 import { REVIEW_ITEMS } from "../src/update/types.ts";
-import { fixture } from "./update-setup.ts";
+import { fixture, git } from "./update-setup.ts";
 
 const hash = "a".repeat(64);
 const structuredReview = () => ({
@@ -205,6 +205,33 @@ describe("Dori candidate boundaries", () => {
     } finally {
       unlinkSync(alias);
     }
+  });
+
+  test("runtime Git discovery stops at the real sandbox boundary through its short alias", () => {
+    const f = fixture();
+    const directory = join(f.remote, "jobs", "runtime", "000");
+    const env = isolatedEnv(f.updater.context, directory, "check");
+    const tmp = env["TMPDIR"]!;
+    expect(git(tmp, "rev-parse", "--show-toplevel")).toBe(realpathSync(f.remote));
+    const outside = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
+      cwd: tmp,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(outside.exitCode).toBe(128);
+    const nested = join(tmp, "nested");
+    const subdirectory = join(nested, "subdirectory");
+    mkdirSync(subdirectory, { recursive: true });
+    git(nested, "init", "-b", "main");
+    const inside = Bun.spawnSync(["git", "rev-parse", "--show-toplevel"], {
+      cwd: subdirectory,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(inside.exitCode).toBe(0);
+    expect(inside.stdout.toString().trim()).toBe(realpathSync(nested));
   });
 
   test("dedicated config rejects live/source overlap, absent real checks, resume and reporter path interpolation", () => {

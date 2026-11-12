@@ -26,10 +26,8 @@ function ownedLink(path: string, target: string): void {
 }
 
 /** Short aliases preserve Unix socket budgets; all actual data and the ownership receipt remain in the job. */
-function runtimeAlias(ctx: UpdateContext, directory: string, cache: string): string {
-  privateDirectory(directory);
+function runtimeAlias(ctx: UpdateContext, target: string, cache: string): string {
   privateDirectory(cache);
-  const target = realpathSync(directory);
   const sharedCache = realpathSync(cache);
   const alias = `/tmp/du-${digest(`${uid}\0${ctx.configHash}\0${target}`).slice(0, 16)}`;
   const ownership = { version: 1, uid, configHash: ctx.configHash, directory: target, alias, cache: sharedCache };
@@ -63,7 +61,9 @@ export function isolatedEnv(
   capability: Capability,
   cache: string = join(directory, "cache"),
 ): Record<string, string> {
-  const runtime = runtimeAlias(ctx, directory, cache);
+  privateDirectory(directory);
+  const target = realpathSync(directory);
+  const runtime = runtimeAlias(ctx, target, cache);
   const home = join(runtime, "home");
   const state = join(runtime, "state");
   const sessions = join(runtime, "sessions");
@@ -118,6 +118,7 @@ export function isolatedEnv(
     npm_config_cache: join(shortCache, "npm"),
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CEILING_DIRECTORIES: target,
     GIT_TERMINAL_PROMPT: "0",
   };
   if (capability === "model") {
