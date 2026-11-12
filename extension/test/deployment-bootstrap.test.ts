@@ -1,10 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { processIdentity } from "../../src/update/deployment-process.ts";
 import type { RuntimeHealth } from "../../src/update/deployment-types.ts";
 import { type FakePi, load, until, useConfig } from "./fake-pi.ts";
+
+const linux = test.skipIf(process.platform !== "linux");
 
 const previousPane = process.env.HERDR_PANE_ID;
 const previousTerminal = process.env.HC_TERMINAL_ID;
@@ -25,7 +27,7 @@ function fixture(sessionId = "legacy-session") {
   delete process.env.HC_TERMINAL_ID;
   const bootstrap = join(stateDir, "..", "trusted-bootstrap.json");
   const intake = { path: join(stateDir, "heartbeat"), monitor: "inbound", maxAgeMs: 120_000 };
-  // A real owned Linux process supplies PID/start identity; its duration is never awaited.
+  // The real child is portable; only deployment health's kernel start-tick attestation requires Linux.
   const monitor = { name: "inbound", argv: ["sleep", "60"], filter: "^INBOUND", cwd: tmpdir() };
   writeFileSync(bootstrap, JSON.stringify({ version: 1, sessionId, monitors: [monitor], intake }), { mode: 0o600 });
   return { stateDir, bootstrap, monitor, intake, healthPath: join(stateDir, "runtime", "w1%3Ap7.json") };
@@ -34,7 +36,63 @@ function fixture(sessionId = "legacy-session") {
 const run = (pi: FakePi, params: Record<string, unknown>) =>
   pi.tools.get("monitor")!.execute("call", params, undefined, undefined, pi.ctx());
 
-test("trusted first handoff replaces legacy specifications, observes real monitor identities and resumes without the file", async () => {
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+linux(
+  "trusted first handoff replaces legacy specifications, observes real monitor identities and resumes without the file",
+  async () => {
+    const f = fixture();
+    const session = {
+      id: "legacy-session",
+      entries: [
+        {
+          type: "custom",
+          customType: "omp-dori:monitor",
+          data: {
+            op: "start",
+            name: "incompatible-legacy",
+            argv: ["missing-command-fixture"],
+            filter: ".",
+            cwd: tmpdir(),
+          },
+        },
+      ],
+    };
+    const first = await load({ session, flags: { "dori-role": "dori", "dori-monitor-bootstrap": f.bootstrap } });
+    sessions.push(first);
+    await first.emit("session_start");
+    await until(() => JSON.parse(readFileSync(f.healthPath, "utf8")).monitors.length === 1);
+    const health = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
+    expect(health).toMatchObject({ role: "dori", paneId: "w1:p7", pid: process.pid, sessionId: session.id });
+    expect(health.presetLoaded).toBe(true);
+    expect(health.monitors[0]).toMatchObject(f.monitor);
+    expect(processIdentity(health.monitors[0]!.pid)?.startTicks).toBe(health.monitors[0]!.startTicks);
+    expect(JSON.parse(readFileSync(join(f.stateDir, "monitors", `${session.id}.json`), "utf8"))).toMatchObject({
+      intake: f.intake,
+    });
+    expect((await run(first, { op: "list" })).content[0]?.text).toContain("inbound");
+    expect((await run(first, { op: "list" })).content[0]?.text).not.toContain("incompatible-legacy");
+    const oldPid = health.monitors[0]!.pid;
+    await first.emit("session_shutdown");
+    await until(() => processIdentity(oldPid) === undefined);
+    const resumed = await load({ session });
+    sessions.push(resumed);
+    await resumed.emit("session_start");
+    const after = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
+    expect(after.monitors[0]?.pid).not.toBe(oldPid);
+    expect(after.monitors[0]?.argv).toEqual(f.monitor.argv);
+    expect(session.entries.filter((entry) => entry.customType === "omp-dori:monitor-bootstrap")).toHaveLength(1);
+  },
+);
+
+test("ordinary bootstrap replaces legacy monitors and restores real children without the bootstrap file", async () => {
   const f = fixture();
   const session = {
     id: "legacy-session",
@@ -42,39 +100,36 @@ test("trusted first handoff replaces legacy specifications, observes real monito
       {
         type: "custom",
         customType: "omp-dori:monitor",
-        data: {
-          op: "start",
-          name: "incompatible-legacy",
-          argv: ["missing-command-fixture"],
-          filter: ".",
-          cwd: tmpdir(),
-        },
+        data: { op: "start", ...f.monitor, name: "incompatible-legacy", argv: ["missing-command-fixture"] },
       },
     ],
   };
   const first = await load({ session, flags: { "dori-role": "dori", "dori-monitor-bootstrap": f.bootstrap } });
   sessions.push(first);
   await first.emit("session_start");
-  await until(() => JSON.parse(readFileSync(f.healthPath, "utf8")).monitors.length === 1);
+  const listed = (await run(first, { op: "list" })).content[0]?.text ?? "";
+  const oldPid = Number(/pid (\d+)/.exec(listed)?.[1]);
+  expect(alive(oldPid)).toBe(true);
+  expect(listed).toContain("inbound");
+  expect(listed).not.toContain("incompatible-legacy");
+  const metadata = join(f.stateDir, "monitors", `${session.id}.json`);
+  expect(JSON.parse(readFileSync(metadata, "utf8"))).toMatchObject({ monitors: [f.monitor], intake: f.intake });
   const health = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
   expect(health).toMatchObject({ role: "dori", paneId: "w1:p7", pid: process.pid, sessionId: session.id });
   expect(health.presetLoaded).toBe(true);
-  expect(health.monitors[0]).toMatchObject(f.monitor);
-  expect(processIdentity(health.monitors[0]!.pid)?.startTicks).toBe(health.monitors[0]!.startTicks);
-  expect(JSON.parse(readFileSync(join(f.stateDir, "monitors", `${session.id}.json`), "utf8"))).toMatchObject({
-    intake: f.intake,
-  });
-  expect((await run(first, { op: "list" })).content[0]?.text).toContain("inbound");
-  expect((await run(first, { op: "list" })).content[0]?.text).not.toContain("incompatible-legacy");
-  const oldPid = health.monitors[0]!.pid;
+  if (process.platform === "darwin") expect(health.monitors).toEqual([]);
   await first.emit("session_shutdown");
-  await until(() => processIdentity(oldPid) === undefined);
+  await until(() => !alive(oldPid));
+  unlinkSync(f.bootstrap);
   const resumed = await load({ session });
   sessions.push(resumed);
   await resumed.emit("session_start");
-  const after = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
-  expect(after.monitors[0]?.pid).not.toBe(oldPid);
-  expect(after.monitors[0]?.argv).toEqual(f.monitor.argv);
+  const restored = (await run(resumed, { op: "list" })).content[0]?.text ?? "";
+  const newPid = Number(/pid (\d+)/.exec(restored)?.[1]);
+  expect(alive(newPid)).toBe(true);
+  expect(newPid).not.toBe(oldPid);
+  expect(restored).toContain(f.monitor.argv.join(" "));
+  expect(JSON.parse(readFileSync(metadata, "utf8"))).toMatchObject({ monitors: [f.monitor], intake: f.intake });
   expect(session.entries.filter((entry) => entry.customType === "omp-dori:monitor-bootstrap")).toHaveLength(1);
 });
 
@@ -110,8 +165,9 @@ test("branch movement replaces a changed specification under the same monitor na
   sessions.push(dori);
   await dori.emit("session_start");
   await run(dori, { op: "start", name: "inbound", argv: ["sleep", "60"], filter: "." });
-  const before = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
-  const oldPid = before.monitors[0]!.pid;
+  const before = (await run(dori, { op: "list" })).content[0]?.text ?? "";
+  const oldPid = Number(/pid (\d+)/.exec(before)?.[1]);
+  expect(alive(oldPid)).toBe(true);
   dori.api.appendEntry("omp-dori:monitor", {
     op: "start",
     name: "inbound",
@@ -120,11 +176,16 @@ test("branch movement replaces a changed specification under the same monitor na
     cwd: tmpdir(),
   });
   await dori.emit("session_tree");
-  await until(() => processIdentity(oldPid) === undefined);
-  const after = JSON.parse(readFileSync(f.healthPath, "utf8")) as RuntimeHealth;
-  expect(after.monitors[0]?.argv).toEqual(["sleep", "61"]);
-  expect(after.monitors[0]?.filter).toBe("^changed");
-  expect(after.monitors[0]?.pid).not.toBe(oldPid);
+  await until(() => !alive(oldPid));
+  const after = (await run(dori, { op: "list" })).content[0]?.text ?? "";
+  const newPid = Number(/pid (\d+)/.exec(after)?.[1]);
+  expect(alive(newPid)).toBe(true);
+  expect(newPid).not.toBe(oldPid);
+  expect(after).toContain("sleep 61");
+  expect(after).toContain("^changed");
+  expect(JSON.parse(readFileSync(join(f.stateDir, "monitors", "legacy-session.json"), "utf8"))).toMatchObject({
+    monitors: [{ name: "inbound", argv: ["sleep", "61"], filter: "^changed", cwd: tmpdir() }],
+  });
 });
 
 test("a managed initial restore reports failure without starting model work, then ordinary restore keeps its repair behavior", async () => {
