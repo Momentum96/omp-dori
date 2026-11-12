@@ -78,7 +78,7 @@ The operating contract is [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.m
 
 ### Next to an existing Dori
 
-If `$HOME/.dori` already belongs to another Dori (for example an upstream dori-superagent install), the installer does not touch it unless you choose so. In a terminal it asks; without one it stops and changes nothing. Choose up front with `DORI_INSTALL_MODE`:
+If `$HOME/.dori` already belongs to another Dori (for example an upstream dori-superagent install), the installer does not touch it unless you choose so. "Another Dori" means `$HOME/.dori/config.json` exists, or `$HOME/.dori/src` is a checkout of something else; a `$HOME/.dori` that only holds `omp-ulw/` or `state/` is not one. An earlier omp-dori install is recognized by its `$HOME/.dori/src` files (`omp-ulw.lock` and the skill CLI, whatever the remote is named), by the `omp-dori` extension link it made, or by its marker, and is updated in place. In a terminal it asks; without one it stops and changes nothing. Choose up front with `DORI_INSTALL_MODE`:
 
 ```sh
 git clone https://github.com/vntrevx/omp-dori.git "$HOME/.omp-dori/src"

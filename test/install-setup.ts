@@ -43,6 +43,7 @@ export function setup() {
   mkdirSync(ulw);
   writeFileSync(join(ulw, "index.ts"), "export default () => {};\n");
   writeFileSync(join(upstream, cli), "v1\n");
+  writeFileSync(join(upstream, "omp-ulw.lock"), "0000000000000000000000000000000000000000\n");
   writeFileSync(join(upstream, "skills/dori-mode/SKILL.md"), skillFixture);
   writeFileSync(join(upstream, "skills/dori-mode/references/config.example.json"), "{}\n");
   git(upstream, "init", "-q", "-b", "main");

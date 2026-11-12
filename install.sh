@@ -30,15 +30,17 @@ at_least "$min_omp" "$omp_version" || fail "omp $omp_version is older than $min_
 
 # Every install of this repository leaves a marker in its home. Installs that predate it are known by the
 # omp-dori checkout in ~/.dori/src or by the omp-dori extension link every earlier install.sh created.
+# A checkout is omp-dori by its files, whatever its remote is named; other Doris ship no omp-ulw.lock.
 marked() { [ -e "$1/.omp-dori" ]; }
 earlier_extension_link="$(absolute "${OMP_EXTENSIONS_DIR:-$HOME/.omp/agent/extensions}")/omp-dori"
-is_omp_dori() { case "$(git -C "$1" remote get-url origin 2>/dev/null)" in */omp-dori | */omp-dori.git) return 0 ;; esac; return 1; }
+is_omp_dori() { [ -f "$1/omp-ulw.lock" ] && [ -f "$1/skills/dori-mode/scripts/src/cli.ts" ]; }
 other_dori() {
-  [ -d "$primary_home" ] && [ -n "$(ls -A "$primary_home")" ] || return 1
   marked "$primary_home" && return 1
-  [ -d "$primary_home/src/.git" ] && is_omp_dori "$primary_home/src" && return 1
   [ -L "$earlier_extension_link" ] && return 1
-  return 0
+  [ -d "$primary_home/src/.git" ] && is_omp_dori "$primary_home/src" && return 1
+  [ -f "$primary_home/config.json" ] && return 0
+  [ -d "$primary_home/src/.git" ] && return 0
+  return 1
 }
 other=""
 other_dori && other=1
@@ -58,7 +60,7 @@ $primary_home belongs to another Dori installation.
   2) side     install omp-dori into $side_home, next to it. $primary_home, the dori command and the
               dori-mode skill stay as they are; this installation is used through the omp-dori command.
 EOF
-    read -r -p "Install as 1 or 2 [2]: " answer
+    read -r -p "Install as 1 or 2 [2]: " answer || fail "no answer; nothing was changed"
     case "${answer:-2}" in
       1 | primary) mode=primary ;;
       2 | side) mode=side ;;
@@ -80,16 +82,6 @@ if [ -z "${DORI_SRC:-}" ] && [ -d "$src/.git" ] && ! is_omp_dori "$src"; then
   fail "$src is a checkout of $(git -C "$src" remote get-url origin 2>/dev/null || echo 'another repository'), not omp-dori; nothing was changed. Move it aside, set DORI_SRC, or install with DORI_INSTALL_MODE=side."
 fi
 
-if [ "$mode" = primary ] && [ -n "$other" ]; then
-  backup="$primary_home/backups/omp-dori-install-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$backup"
-  [ -f "$primary_home/config.json" ] && cp -p "$primary_home/config.json" "$backup/config.json"
-  for path in "$skills/dori-mode" "$bin_dir/dori"; do
-    printf '%s -> %s\n' "$path" "$(readlink "$path" 2>/dev/null || echo '(not a link)')"
-  done > "$backup/links.txt"
-  echo "The previous config.json and link targets are kept in $backup" >&2
-fi
-
 if [ ! -d "$src/.git" ]; then
   git clone --quiet --depth 1 "$repo" "$src"
 elif [[ "${DORI_NO_PULL:-}" =~ ^(1|true|yes)$ ]]; then
@@ -108,6 +100,16 @@ elif ! git -C "$src" merge --ff-only --quiet '@{u}'; then
     echo "Could not update $src; git's message above says why." >&2
   fi
   exit 1
+fi
+
+if [ "$mode" = primary ] && [ -n "$other" ]; then
+  backup="$primary_home/backups/omp-dori-install-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$backup"
+  [ -f "$primary_home/config.json" ] && cp -p "$primary_home/config.json" "$backup/config.json"
+  for path in "$skills/dori-mode" "$bin_dir/dori" "$(command -v dori || echo "$bin_dir/dori")"; do
+    printf '%s -> %s\n' "$path" "$(readlink "$path" 2>/dev/null || echo '(not a link)')"
+  done | sort -u > "$backup/links.txt"
+  echo "The previous config.json and link targets are kept in $backup" >&2
 fi
 
 if [ -n "${OMP_ULW_SRC:-}" ]; then
