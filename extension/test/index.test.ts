@@ -254,6 +254,26 @@ describe("monitor restore", () => {
 });
 
 describe("pane state", () => {
+  test("a nested run that inherited the pane id leaves the live session's record alone", async () => {
+    // The lead owns the pane. A child process (a `-p` check, a subagent's session) inherits HERDR_PANE_ID; it must
+    // neither overwrite that record nor delete it on shutdown, or the watchdog reads the lead as dead and restarts
+    // it every tick while the lead is still running.
+    const lead = await load({ session: session("lead"), flags: { "dori-role": "dori" } });
+    await lead.emit("session_start");
+    const owned = readPaneState(stateDir, PANE);
+    if (owned === null) throw new Error("the lead session did not record its pane");
+    expect(owned).toMatchObject({ pid: process.pid, sessionId: "lead", role: "dori" });
+
+    // Same pid in this test runner, so stand in for the child with a record naming a live but different process.
+    writePaneState(stateDir, { ...owned, pid: process.ppid, sessionId: "lead" });
+    const child = await load({ session: session("nested"), flags: { "dori-role": "lane" } });
+    await child.emit("session_start");
+    expect(readPaneState(stateDir, PANE)).toMatchObject({ pid: process.ppid, sessionId: "lead", role: "dori" });
+
+    await child.emit("session_shutdown");
+    expect(readPaneState(stateDir, PANE)).toMatchObject({ pid: process.ppid, sessionId: "lead" });
+  });
+
   test("records the session on start, goal updates and open approvals", async () => {
     const pi = await load({ session: session("lane-1"), flags: { "dori-role": "lane" } });
     await pi.emit("session_start");
