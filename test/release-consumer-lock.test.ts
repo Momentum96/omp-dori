@@ -44,6 +44,8 @@ linux("a delayed stale contender preserves the winner's live lock and retained t
     expect(scheduled).toBe(true);
     expect(releaseA).toBeDefined();
     expect(releaseB).toBeUndefined();
+    if (releaseA === undefined || ownerA === undefined || inodeA === undefined)
+      throw new Error("The winning acquisition did not record its lock ownership");
     const currentOwner = fs.readFileSync(owner, "utf8");
     expect(currentOwner).toBe(ownerA);
     expect(JSON.parse(currentOwner)).toEqual(identity);
@@ -55,7 +57,7 @@ linux("a delayed stale contender preserves the winner's live lock and retained t
     const tombstoneOwner = join(paths.root, tombstones[0]!, "owner.json");
     expect(fs.readFileSync(tombstoneOwner, "utf8")).toBe(staleOwner);
 
-    releaseA!();
+    releaseA();
     releaseA = undefined;
     expect(fs.existsSync(lock)).toBe(false);
     expect(fs.readFileSync(tombstoneOwner, "utf8")).toBe(staleOwner);

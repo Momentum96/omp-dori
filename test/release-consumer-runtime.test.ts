@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
 import { extractArchive, readArchive } from "../src/release/archive.ts";
@@ -24,7 +24,9 @@ test("managed dependency resolution follows each loaded release across update an
   expect(git(dirname(effective(sourceOne)), "rev-parse", "HEAD")).toBe(f.pin);
 
   const checkout = join(f.root, "next-dependency");
+  mkdirSync(checkout, { mode: 0o700 });
   git(f.root, "clone", "--quiet", "--no-hardlinks", f.ownedDependency, checkout);
+  chmodSync(join(checkout, "index.ts"), 0o600);
   git(
     checkout,
     "-c",
