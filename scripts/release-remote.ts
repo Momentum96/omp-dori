@@ -14,7 +14,9 @@ export function notes(manifest: ReleaseManifest): string {
     `Requires existing Bun ${manifest.requirements.bun}, OMP ${manifest.requirements.omp}, git and herdr.`,
     `Commit: \`${manifest.commit}\`. SourceManifest: \`${manifest.source.hash}\`.`,
     `Pinned external omp-ulw: \`${manifest.ompUlw.commit}\`; dependency bodies are not bundled.`,
-    `Install this exact release: \`sh install.sh --version ${manifest.tag}\` after downloading its install.sh asset.`,
+    `Verify all files in \`SHA256SUMS\` before running \`bash install.sh --version ${manifest.tag}\` from this release.`,
+    `Installation, prerequisites and support limits: https://github.com/${RELEASE_REPOSITORY}/blob/${manifest.commit}/docs/releases.md`,
+    `Publication requires all four trusted own-main CI jobs at this exact commit: https://github.com/${RELEASE_REPOSITORY}/commit/${manifest.commit}/checks`,
     "Installation starts no messenger, watcher, service or model work. Existing user configuration remains user-owned.",
     "Stop Dori before install/update/rollback; activation holds while a live actor is detected.",
   ].join("\n\n");
