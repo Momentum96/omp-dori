@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
@@ -180,7 +180,12 @@ export function acquireConsumerLock(paths: ConsumerPaths): () => void {
       (!processIdentity(holder.pid!) && lstatSync(`/proc/${holder.pid}`, { throwIfNoEntry: false }) !== undefined)
     )
       throw new Error("Consumer release lock is held; let its owner finish");
-    renameSync(lock, `${lock}.stale-${randomUUID()}`);
+    const stale = createHash("sha256")
+      .update(JSON.stringify([holder.pid, holder.startTicks, holder.bootId, holder.executable]))
+      .digest("hex");
+    // Never delete, rename, or reuse this nonempty tombstone: it reserves the observed identity
+    // so a delayed contender cannot move a newer live lock over it.
+    renameSync(lock, `${lock}.stale-${stale}`);
     claim();
   }
   return () => {

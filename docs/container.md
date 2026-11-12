@@ -80,6 +80,8 @@ if command -v herdr >/dev/null 2>&1; then herdr integration install omp; fi
 
 Edit `runtime`, `leadPane`, `laneWorkspace`, `defaultCwd`, model settings and hooks for this container. Set messenger hooks only to the isolated QA destination when that QA stage starts. The image links the skill at `~/.agents/skills/dori-mode`, the extension at `~/.omp/agent/extensions/omp-dori`, and pinned omp-ulw at `~/.dori/omp-ulw`. The extension's default `ompUlwPath` resolves through that link; an explicit config override remains the operator's choice.
 
+This source-container layout keeps configured dependency paths unchanged. Verified consumer releases resolve their managed `~/.dori/releases/consumer-dependencies/omp-ulw-<commit>` paths against the loaded source's own lock; explicit external paths remain user-owned. See [consumer installation layout](releases.md#installation-layout-and-preserved-data).
+
 Clone work repositories into `~/projects`. For the primary messenger workflow, start `omp --dori-role dori` inside the runtime and follow the skill's onboarding. For a deliberate harness evaluation, from the desired project directory:
 
 ```sh

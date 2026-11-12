@@ -111,6 +111,8 @@ The API is `dori update <check|install|status|rollback> [--version TAG] [--from 
 
 Plan downtime before installation, update or rollback: activation holds while a live Dori is detected, including an idle one. Explicitly stop its monitors and end its owning session using your normal runtime controls, inspect status, then retry. The release command does not kill or restart Dori. Failed verification leaves the previous source active; rollback verifies the retained previous release and switches source without rewriting user config or resuming monitors. See [update limits and recovery](docs/releases.md#updates-and-rollback).
 
+Consumer-managed `ompUlwPath` values under `~/.dori/releases/consumer-dependencies/omp-ulw-<commit>` follow the loaded release's own lock pin across update and rollback without config writes. Explicit paths outside that cache shape remain user choices; source checkouts and the maintainer source container keep their configured paths.
+
 ### The harness
 
 Use the same prerequisites and extension/omp-ulw installation as Dori mode. `gh` supplies PR head SHAs, checks and merges. The following commands start real sessions and loops; do not start a second harness against an existing installation's runtime and state.
@@ -160,7 +162,7 @@ dori harness done fix-flaky-login          # closes only a READY harness lane
 - Goal-less lanes get OMP's native `goal` tool. Goals remain agent-owned: a brief tells the lane to create one; the port does not fabricate one. Active, paused, complete and dropped remain distinct; budget-limited and unknown goal states are held as blocked rather than treated as no goal. Skill `dori pause`/`resume` read back the native goal state and print an unverified result (exit 3) when it is not confirmed. A resumed OMP goal may be paused; inspect it and use `/goal resume` when appropriate.
 - Role `dori` gets the retained `monitor` tool. Monitor argv/filter/cwd are recorded in its session branch and mirrored at `<stateDir>/monitors/<encodeURIComponent(sessionId)>.json` as `{version:1,sessionId,monitors:[{name,argv,filter,cwd}]}`. `dori boot` inspects that desired state read-only without private transcript reads. Resuming that Dori session restores recorded monitors; switching away stops its live monitors. A fresh install or container creates no receiver or watcher. Reusing a previously active session/volume can restore what that session recorded.
 
-Skill lanes default to `anthropic/claude-opus-5-5`, with argv `["omp","--dori-role","lane","--model","{model}","{prompt}"]`. An explicit `dori launch --model` wins over `defaultModel`; configured `agentCommand`, session paths and `ompUlwPath` remain overrides. The harness defaults to `DORI_AGENT_CMD=omp`, adds the appropriate role only when it is not already explicit, and otherwise preserves the command and its model arguments. Without a model argument it uses OMP's configured model; `review --model` remains available.
+Skill lanes default to `anthropic/claude-opus-5-5`, with argv `["omp","--dori-role","lane","--model","{model}","{prompt}"]`. An explicit `dori launch --model` wins over `defaultModel`; configured `agentCommand`, session paths and explicit external `ompUlwPath` values remain overrides. The harness defaults to `DORI_AGENT_CMD=omp`, adds the appropriate role only when it is not already explicit, and otherwise preserves the command and its model arguments. Without a model argument it uses OMP's configured model; `review --model` remains available.
 
 ## How the harness works
 

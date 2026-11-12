@@ -65,12 +65,15 @@ The consumer installation uses:
 - `~/.dori/bin/dori`: the stable launcher.
 - `~/.dori/src`: the single active source pointer.
 - `~/.dori/releases/releases/<commit>-<public-source-hash-prefix>`: verified retained release directories; the hash prefix has 16 hexadecimal characters.
+- `~/.dori/releases/consumer-dependencies/omp-ulw-<commit>`: owned dependency caches for each retained release's public pin.
 - `~/.agents/skills/dori-mode` and `~/.omp/agent/extensions/omp-dori`: stable references through the active source pointer.
 - `~/.dori/config.json`: an example is created only if this file is absent.
 
 The consumer keeps its own installed-state and activation journal under the release root, separately from maintainer managed-deployment journals. It stages and verifies a candidate before switching the source pointer and retains the previous source for rollback. Treat a release directory as frozen: edit your configuration or use a separate source checkout rather than changing installed product files.
 
-Existing config, authentication, work records, sessions, history and explicit model choices are preserved. The installer does not copy another user's authentication or replace global model settings. Retain generated dependency paths such as `ompUlwPath`; an existing custom configuration remains your responsibility.
+Existing config, authentication, work records, sessions, history and explicit model choices are preserved. The installer does not copy another user's authentication or replace global model settings.
+
+For code loaded from a retained consumer release, an `ompUlwPath` naming exactly `~/.dori/releases/consumer-dependencies/omp-ulw-<40-hex-commit>` (optionally followed by `/index.ts`) uses that loaded source's own `omp-ulw.lock` pin. Update and rollback therefore select the matching dependency without rewriting config bytes; already loaded code stays bound to its own release if the active pointer moves. Paths outside this managed cache shape remain explicit user choices. Ordinary source checkouts and the maintainer source-container layout keep their configured paths unchanged.
 
 An existing real directory at `~/.dori/src`, an unmanaged pointer, or a conflicting non-link skill/extension/launcher destination holds installation rather than overwriting it. Keep the old installation and its data intact. Continue its source-checkout workflow or plan an explicit stopped migration with backups; the first preview does not silently convert arbitrary legacy layouts. Do not delete an existing installation to bypass a hold.
 
