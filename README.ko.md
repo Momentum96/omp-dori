@@ -41,7 +41,7 @@ Dori는 Slack, Discord, Telegram에서 요청을 받아 일마다 별도의 코�
 
 lead와 duty는 `omp --dori-role dori`, 구현 레인과 기본 reviewer는 `omp --dori-role lane`으로 시작합니다. 확장은 역할을 세션 branch의 `omp-dori:role`에 저장하고 resume·세션 전환 때 복원합니다. 서브에이전트는 부모 역할을 이어받습니다. 플래그 없는 일반 세션에서는 Dori handler나 추가 goal/monitor가 활성화되지 않습니다.
 
-- `ompUlwPath`의 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)를 역할 세션에만 적용합니다. 현재 public pin은 [`omp-ulw.lock`](omp-ulw.lock)의 `cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d`입니다. 명령·도구 이름은 확장 로드 시 등록되므로 일반 세션 목록에도 보일 수 있지만 실행 handler는 역할로 제한됩니다.
+- `ompUlwPath`의 [omp-ulw](https://github.com/dbc-hbin/omp-ulw)를 역할 세션에만 적용합니다. 현재 public pin은 [`omp-ulw.lock`](omp-ulw.lock)의 `d69ad5fbe032c8aa49098c1d599c20df232bc474`입니다. 명령·도구 이름은 확장 로드 시 등록되므로 일반 세션 목록에도 보일 수 있지만 실행 handler는 역할로 제한됩니다.
 - `<stateDir>/sessions/<encodeURIComponent(id)>.json`에 pane/terminal ID, 역할, 세션 ID/파일, cwd, writer pid, 시각, goal, `approvalPending`과 선택 필드 `agentStatus`(idle/working)를 씁니다. ID는 `HC_TERMINAL_ID`, 그다음 `HERDR_PANE_ID`입니다. runtime은 현재 terminal의 살아 있는 OMP 프로세스·foreground·시작 시각과 기록을 대조합니다. 오래되거나 다른 프로세스의 기록을 신뢰하지 않으며 승인 창에는 force 전송도 입력하지 않습니다.
 - hc 역할 세션에서는 확장이 native OSC 7501에 `app=omp`를 넣어 보고합니다. 세션 시작·agent_end는 idle, agent_start는 working, 열린 승인은 blocked입니다. 자신이 쓴 역할 기록을 해제하면 보고도 unknown으로 무효화합니다. runtime의 unknown은 계속 보류하며 hc의 `--if` gate도 유지합니다. 파일 기록만으로 native status를 대체하지 않습니다.
 - goal 없는 레인에는 OMP의 native `goal` 도구를 켭니다. 브리프를 읽고 goal을 만드는 일은 레인의 몫입니다. active/paused/complete/dropped를 구별하고, budget-limited와 알 수 없는 상태는 blocked로 유지합니다. `dori pause`/`resume`은 native goal을 읽어 확인하며, 확인 실패는 exit 3과 unverified 결과로 남깁니다. OMP 재개 시 goal이 paused일 수 있으므로 기록을 확인하고 `/goal resume`으로 재개합니다.
