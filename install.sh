@@ -31,6 +31,11 @@ omp_version="$(omp --version)"
 [[ "$omp_version" =~ ([0-9]+(\.[0-9]+){2}) ]] || fail "could not read omp version: $omp_version"
 omp_version="${BASH_REMATCH[1]}"
 at_least "$min_omp" "$omp_version" || fail "omp $omp_version is older than $min_omp"
+ulw_main_omp="18.19.0"
+if [ -z "${OMP_ULW_REF:-}" ] && ! at_least "$ulw_main_omp" "$omp_version"; then
+  ulw_ref=lock
+  echo "omp-ulw: its main needs OMP $ulw_main_omp+, this OMP is $omp_version, so omp-ulw.lock is used; update OMP or set OMP_ULW_REF to choose." >&2
+fi
 
 # Every install of this repository leaves a marker in its home. Installs that predate it are known by the
 # omp-dori checkout in ~/.dori/src or by the omp-dori extension link every earlier install.sh created.

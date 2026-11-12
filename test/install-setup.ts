@@ -60,7 +60,7 @@ export function setup() {
   chmodSync(join(bin, "bun"), 0o755);
   writeFileSync(
     join(bin, "omp"),
-    `#!/bin/sh\ncase "$1" in\n--version) echo 'omp 18.18.8' ;;\n*) echo "OMP_ARGS $*"; echo "OMP_ENV $DORI_CONFIG $HC_SESSION" ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1" in\n--version) echo "omp \${INSTALL_TEST_OMP_VERSION:-18.19.0}" ;;\n*) echo "OMP_ARGS $*"; echo "OMP_ENV $DORI_CONFIG $HC_SESSION" ;;\nesac\n`,
   );
   chmodSync(join(bin, "omp"), 0o755);
   const upstreamCommit = (text: string) => {

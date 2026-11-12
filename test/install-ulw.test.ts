@@ -56,6 +56,20 @@ test("OMP_ULW_REF=lock keeps the revision in omp-ulw.lock", () => {
   expect(ulwHead()).toBe(first);
 });
 
+test("an OMP older than omp-ulw main needs gets the lock revision unless OMP_ULW_REF says otherwise", () => {
+  // Given an omp-ulw remote whose main is past the lock, and OMP 18.18.9.
+  const { first, commit, ulwHead, install } = withUlwRemote();
+  const latest = commit("u2");
+  // When install.sh runs without OMP_ULW_REF; then omp-ulw stays at the lock and the reason is printed.
+  const r = install({ INSTALL_TEST_OMP_VERSION: "18.18.9" });
+  expect(r.code).toBe(0);
+  expect(r.err).toContain("omp-ulw.lock is used");
+  expect(ulwHead()).toBe(first);
+  // And an explicit OMP_ULW_REF=main is followed on that OMP.
+  expect(install({ INSTALL_TEST_OMP_VERSION: "18.18.9", OMP_ULW_REF: "main" }).code).toBe(0);
+  expect(ulwHead()).toBe(latest);
+});
+
 test("a standalone omp-ulw extension is reused: no second checkout and no second import", () => {
   // Given an omp-ulw package already installed as an OMP extension.
   const { home, config, install } = withUlwRemote();
