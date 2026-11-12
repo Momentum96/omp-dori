@@ -11,6 +11,12 @@ import { persistJob, persistState, readJob, readState, saveJson } from "../src/u
 import { git, publicationFixture } from "./update-setup.ts";
 import { bootstrapFixture } from "./update-publish-setup.ts";
 
+let exportHash: string;
+beforeAll(async () => {
+  // Share only the checked export hash; every case still prepares its own isolated candidate.
+  exportHash = publicSource((await publicationFixture()).job).hash;
+});
+
 test("owner content missing from frozen local input holds before any durable publication intent", async () => {
   const f = await publicationFixture();
   const commands = structuredClone(f.job.commands);
@@ -38,11 +44,6 @@ test("owner content missing from frozen local input holds before any durable pub
 });
 
 describe("initial-source pin binding", () => {
-  let exportHash: string;
-  beforeAll(async () => {
-    // Share only the checked export hash; every binding still prepares its own isolated candidate.
-    exportHash = publicSource((await publicationFixture()).job).hash;
-  });
   test.each([
     "exact",
     "source-mismatch",
@@ -79,7 +80,7 @@ describe("initial-source pin binding", () => {
 });
 
 test("an initial-source approval never covers owner main movement before publication intent", async () => {
-  const f = await bootstrapFixture();
+  const f = await bootstrapFixture("exact", false, exportHash);
   f.write(f.seed, "owner-history.txt", "later owner work outside the initial-source approval\n");
   git(f.seed, "add", ".");
   git(f.seed, "commit", "-m", "Owner main advances after explicit source approval");
@@ -95,7 +96,7 @@ test("an initial-source approval never covers owner main movement before publica
 });
 
 test("initial-source resume retains its frozen basis when the live local source changes", async () => {
-  const f = await bootstrapFixture();
+  const f = await bootstrapFixture("exact", false, exportHash);
   const interrupted = new Error("fixture stops after durable initial-source preparation");
   await expect(
     publishRelease(f.updater.context, readState(f.updater.context), f.job, undefined, (record) => {
@@ -114,7 +115,7 @@ test("initial-source resume retains its frozen basis when the live local source 
 });
 
 test("a claim-before-receipt interruption recovers only the same exact initial-source job", async () => {
-  const f = await bootstrapFixture();
+  const f = await bootstrapFixture("exact", false, exportHash);
   const state = readState(f.updater.context);
   const interrupted = new Error("fixture stops before publication receipt is persisted");
   await expect(
@@ -130,7 +131,7 @@ test("a claim-before-receipt interruption recovers only the same exact initial-s
 });
 
 test.each(["pins", "kind"] as const)("initial-source resume rejects a changed durable basis %s", async (field) => {
-  const f = await bootstrapFixture();
+  const f = await bootstrapFixture("exact", false, exportHash);
   const state = readState(f.updater.context);
   let retained: PublicationRecord | undefined;
   const interrupted = new Error("fixture retains the initial-source decision before remote effects");
@@ -156,7 +157,7 @@ test.each(["pins", "kind"] as const)("initial-source resume rejects a changed du
 });
 
 test("a consumed initial-source exception stays bound to its original registered job", async () => {
-  const f = await bootstrapFixture();
+  const f = await bootstrapFixture("exact", false, exportHash);
   const state = readState(f.updater.context);
   const previousJob = "f".repeat(64);
   state.jobs[f.job.baseUpstream] = previousJob;
@@ -217,7 +218,7 @@ test("initial source admission accepts only complete exact five-pin configuratio
 test.each(["changed-claim", "unregistered"] as const)(
   "a %s admission holds before claiming initial source",
   async (kind) => {
-    const f = await bootstrapFixture();
+    const f = await bootstrapFixture("exact", false, exportHash);
     const publisher = new PublicationProcess(f.config.promotion!.publish, join(f.job.directory, "publication"));
     await publisher.git(["init", "--bare", "--quiet"]);
     await publisher.git(["fetch", "--no-tags", "--", f.target, f.expectedMain]);
