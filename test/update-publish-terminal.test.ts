@@ -60,6 +60,9 @@ async function terminalCycles(f: PublicationFixture, held: UpdateJob) {
 }
 
 describe("terminal initial-source publication admission", () => {
+  // Each case prepares two distinct real Git/fsync candidates, not two copies of the same reference fixture.
+  // Give that integration lifecycle its own budget; runtime command deadlines and all assertions stay unchanged.
+  const terminalCycleTimeoutMs = 20_000;
   let exportHash: string;
   beforeAll(async () => {
     // Share only the checked export hash; every terminal case retains its own candidate and durable state.
@@ -79,6 +82,7 @@ describe("terminal initial-source publication admission", () => {
       expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
       expect(git(f.target, "for-each-ref", "--format=%(refname)", "refs/heads/dori-update/")).toBe("");
     },
+    terminalCycleTimeoutMs,
   );
 
   test.each(["unapproved-tree", "approved-main"] as const)(
@@ -109,6 +113,7 @@ describe("terminal initial-source publication admission", () => {
       );
       expect(readState(f.updater.context).initialSourceJob).toBeUndefined();
     },
+    terminalCycleTimeoutMs,
   );
 
   test.each(["basis", "intent", "deadline", "timestamp"] as const)(
@@ -141,32 +146,37 @@ describe("terminal initial-source publication admission", () => {
       expect(readState(f.updater.context).initialSourceJob).toBe(f.job.id);
       expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
     },
+    terminalCycleTimeoutMs,
   );
 
-  test("an initial-source exception owned by another durable job holds without stealing its claim", async () => {
-    const f = await bootstrapFixture("exact", true, exportHash);
-    expect(publicSource(f.job).hash).toBe(exportHash);
-    const id = "f".repeat(64);
-    const directory = join(f.config.root, "jobs", id);
-    mkdirSync(directory);
-    persistJob({
-      ...f.job,
-      id,
-      directory,
-      candidate: join(directory, "candidate"),
-      promotion: { version: 1, status: "held", problem: "retained previous initial-source owner" },
-    });
-    const state = readState(f.updater.context);
-    state.jobs[f.job.baseUpstream] = id;
-    state.initialSourceJob = id;
-    persistState(f.updater.context, state);
-    const first = await f.updater.once();
-    expect(first.job?.promotion?.problem).toContain("already claimed by another job");
-    expect(first.job?.promotion?.publication).toBeUndefined();
-    await terminalCycles(f, first.job!);
-    expect(readState(f.updater.context).initialSourceJob).toBe(id);
-    expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
-  });
+  test(
+    "an initial-source exception owned by another durable job holds without stealing its claim",
+    async () => {
+      const f = await bootstrapFixture("exact", true, exportHash);
+      expect(publicSource(f.job).hash).toBe(exportHash);
+      const id = "f".repeat(64);
+      const directory = join(f.config.root, "jobs", id);
+      mkdirSync(directory);
+      persistJob({
+        ...f.job,
+        id,
+        directory,
+        candidate: join(directory, "candidate"),
+        promotion: { version: 1, status: "held", problem: "retained previous initial-source owner" },
+      });
+      const state = readState(f.updater.context);
+      state.jobs[f.job.baseUpstream] = id;
+      state.initialSourceJob = id;
+      persistState(f.updater.context, state);
+      const first = await f.updater.once();
+      expect(first.job?.promotion?.problem).toContain("already claimed by another job");
+      expect(first.job?.promotion?.publication).toBeUndefined();
+      await terminalCycles(f, first.job!);
+      expect(readState(f.updater.context).initialSourceJob).toBe(id);
+      expect(git(f.target, "rev-parse", "main")).toBe(f.expectedMain);
+    },
+    terminalCycleTimeoutMs,
+  );
 });
 
 test("a transient pre-record remote operation retries the same ready job without a terminal notification", async () => {
