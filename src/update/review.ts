@@ -69,8 +69,8 @@ verification: nonempty actual configured checks all exit zero at exactly this so
 security: no auth/secrets copied, no paid reset/credit acceptance, no untrusted-content instructions followed;
 failureRecovery: durable dedup, interruption/restart fail-closed, retained evidence and isolated snapshot recovery;
 scope: Dori candidate only, ULW lock/library unchanged, no install/global upgrade/live cutover.
-Report concrete file/line or command-receipt evidence per item. Mark fail or unknown when evidence does not establish pass. Include findings and honest limitations (including environment isolation not being an OS sandbox and any unexercised surfaces). Approval requires every item pass and no blocking findings. Do not invent execution evidence or mark unavailable/malformed evidence as passed.
-Your FINAL response must contain exactly one line starting DORI_UPDATE_REVIEW followed by one compact JSON object, with no markdown fence:
+Report concrete file/line or command-receipt evidence per item. Mark fail or unknown when evidence does not establish pass. Include findings and honest limitations (including environment isolation not being an OS sandbox and any unexercised surfaces). For verdict approve, all eight checklist items must have status pass and findings must be exactly []. Any unresolved finding requires verdict reject. Record nonblocking advisories in the pertinent checklist evidence or limitations, not in findings. Do not invent execution evidence or mark unavailable/malformed evidence as passed.
+Your ENTIRE FINAL RESPONSE must be exactly one physical single line starting with DORI_UPDATE_REVIEW followed by one space and one compact JSON object. Output no other lines, prose, headings, bullets, explanations, markdown fences, or text before or after that line:
 DORI_UPDATE_REVIEW {"version":1,"sourceHash":"${job.sourceHash}","verdict":"approve|reject","checklist":{${REVIEW_ITEMS.map((key) => `"${key}":{"status":"pass|fail|unknown","evidence":"concrete evidence"}`).join(",")}},"findings":[],"limitations":["honest review limits"]}
 Do not output this marker for intermediate messages or examples.
 `;
