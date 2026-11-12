@@ -28,13 +28,16 @@ omp_version="$(omp --version)"
 omp_version="${BASH_REMATCH[1]}"
 at_least "$min_omp" "$omp_version" || fail "omp $omp_version is older than $min_omp"
 
-# Every install of this repository leaves a marker in its home; an omp-dori checkout in ~/.dori/src predates it.
+# Every install of this repository leaves a marker in its home. Installs that predate it are known by the
+# omp-dori checkout in ~/.dori/src or by the omp-dori extension link every earlier install.sh created.
 marked() { [ -e "$1/.omp-dori" ]; }
+earlier_extension_link="$(absolute "${OMP_EXTENSIONS_DIR:-$HOME/.omp/agent/extensions}")/omp-dori"
 is_omp_dori() { case "$(git -C "$1" remote get-url origin 2>/dev/null)" in */omp-dori | */omp-dori.git) return 0 ;; esac; return 1; }
 other_dori() {
   [ -d "$primary_home" ] && [ -n "$(ls -A "$primary_home")" ] || return 1
   marked "$primary_home" && return 1
   [ -d "$primary_home/src/.git" ] && is_omp_dori "$primary_home/src" && return 1
+  [ -L "$earlier_extension_link" ] && return 1
   return 0
 }
 other=""

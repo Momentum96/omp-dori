@@ -85,6 +85,22 @@ test("omp-dori runs the real omp with only the omp-dori extension, its overlay, 
   expect(overlay).toContain(`customDirectories:\n    - ${JSON.stringify(join(side, "skills"))}\n`);
 });
 
+test("an omp-dori install from before the marker, with its checkout elsewhere, is updated without asking", () => {
+  // Given a ~/.dori whose checkout lives outside it and whose earlier install.sh linked the omp-dori extension.
+  const { root, home, src, install } = setup();
+  mkdirSync(join(home, ".dori"));
+  writeFileSync(join(home, ".dori/config.json"), "{}\n");
+  mkdirSync(join(home, "extensions"));
+  symlinkSync(join(src, "extension"), join(home, "extensions/omp-dori"));
+  // When install.sh runs with no mode and no terminal.
+  const r = install();
+  // Then it installs in place as before: no question, no backup, and the marker now records it.
+  expect(r.code).toBe(0);
+  expect(existsSync(join(home, ".dori/backups"))).toBe(false);
+  expect(readFileSync(join(home, ".dori/.omp-dori"), "utf8")).toBe("primary\n");
+  expect(readFileSync(join(root, "bun.log"), "utf8")).toContain("link");
+});
+
 test("a later run of a side install stays a side install without asking", () => {
   // Given a side install next to another Dori.
   const { home, install } = setup();
