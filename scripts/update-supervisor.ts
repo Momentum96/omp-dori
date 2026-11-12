@@ -63,7 +63,7 @@ while (!stopped) {
       [
         executable,
         resolve(controllerPath, "skills/dori-mode/scripts/src/cli.ts"),
-        "update",
+        "upstream",
         "check",
         "--config",
         configPath,

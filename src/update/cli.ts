@@ -10,7 +10,7 @@ import { persistReport } from "./report.ts";
 import { saveJson } from "./state.ts";
 
 const COMMANDS = ["check", "stage", "watch", "status", "snapshot", "restore", "recover", "restart"];
-const USAGE = `dori update <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE
+const USAGE = `dori upstream <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE
   check       detect a changed Dori ref once; resume ready promotion before detection
   stage       explicitly stage the current pinned ref, including the effective baseline (deduplicated)
   watch       keep checking; resume pending exact-head CI, stop on held/interrupted work

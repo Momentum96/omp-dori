@@ -6,16 +6,18 @@
 
 [English](README.md) | 한국어
 
+**첫 공개 릴리스 `v0.1.0`은 Linux x64 / herdr / Discord용 GitHub prerelease입니다.** 테스트한 기준은 Bun **1.4.4**, native OMP **18.18.8**이며 최소 버전도 각각 같습니다. 더 높은 모든 버전의 검증을 뜻하지 않습니다. macOS와 hc는 CI 범위와 소스 어댑터를 유지하지만 첫 공개판의 실제 소비자 지원 범위와는 구분합니다. Slack/Telegram 소스 기능도 보존합니다. 독립 외부 사용자 beta 완료나 모든 환경의 호환성을 보장하는 공개판은 아닙니다. [설치·지원 상세](docs/releases.md), [변경 기록](CHANGELOG.md), [정식 릴리스 경로](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.0)를 확인하세요.
+
 Dori는 Slack, Discord, Telegram에서 요청을 받아 일마다 별도의 코딩 세션을 열고, 완료 증거를 확인한 뒤 같은 대화에 보고하는 상시 엔지니어입니다. 이 저장소는 [sisyphuslabs/dori-superagent](https://github.com/sisyphuslabs/dori-superagent/tree/97d807b9037cb050a72129659cf6306d8055010d)의 전체 공개 소스를 OMP로 포트한 수정본입니다. 기준은 upstream `97d807b9037cb050a72129659cf6306d8055010d`, 기존 OMP 소스 `75a1b28de8caddb6d30b2e3d72ef3dec09450b47`입니다.
 
-**실행은 설치자가 명시적으로 시작합니다.** 최신 upstream의 harness, 의존성, 스킬과 OMP 확장을 함께 포함합니다. 설치 스크립트는 코드·의존성·링크를 준비할 뿐 messenger, watcher, harness를 시작하거나 기존 운영 Dori를 교체하지 않습니다. runtime·모델·메신저 설정 후 세션을 시작하세요. 업데이트 후보의 검증과 실제 활성화도 별도 단계입니다.
+**실행은 설치자가 명시적으로 시작합니다.** harness, 의존성, 스킬과 OMP 확장을 함께 포함합니다. 릴리스 설치는 코드·의존성·링크를 준비할 뿐 messenger, Discord Gateway presence, watcher, service, harness나 모델 요청을 시작하지 않습니다. runtime·모델·메신저 설정과 본인 인증을 마친 뒤 필요한 세션과 monitor만 켜세요.
 
 ## 보존한 기능
 
 | 영역 | 동작 |
 |---|---|
 | 요청과 보고 | 작은 질문·조회는 Dori가 처리하고, 긴 작업·병렬 작업·PR은 레인에 맡깁니다. lead만 사람에게 보고하며 같은 스레드의 상태 메시지를 수정하고 15분마다 또는 이정표마다 진척을 남깁니다. |
-| 메신저 | Slack 스레드, Discord 스레드 생성·이름 변경·보관과 typing, Telegram forum topic 생성·이름 변경·닫기·재개와 typing/draft streaming을 유지합니다. Slack/Telegram inbound, Slack/Discord presence, 메시지 게시·수정, 설정한 음성 전사 명령도 포함합니다. 토큰은 실행 시 설정합니다. Discord 수신은 메신저 watch 도구를 사용합니다. |
+| 메신저 | Slack 스레드, Discord 스레드 생성·이름 변경·보관과 typing, Telegram forum topic 생성·이름 변경·닫기·재개와 typing/draft streaming을 유지합니다. Slack/Telegram inbound, Slack/Discord presence, 메시지 게시·수정, 설정한 음성 전사 명령도 포함합니다. Discord는 공개 `dori inbound discord`가 bot REST로 지정한 한 채널의 owner 텍스트만 받고 cursor를 보존합니다. |
 | 스킬 레인 | launch/adopt/sync, 호스트의 메모리·디스크·세션 수 가드, heavy slot, 진행 보고, `Done =` 신호와 claim-done 검증을 유지합니다. 신호는 PR merge, issue close, npm version, argv 명령, 파일/hash/JSON, URL 응답을 지원하며 모두 통과해야 닫힙니다. |
 | 영속 기록 | 레지스트리, reports, 요청 worklog, 재개용 checkpoints, 저장소별·전역 lessons, 예산·정체 감시와 재시작 후 `dori boot` 점검을 유지합니다. boot는 읽기 점검입니다. |
 | 전체 harness | lead/duty 세션, duty loop, hourly loop, lane, inbox와 모호한 전송 수동 정리, backlog와 GitHub issue import, 의사결정 알림, 두 runtime 간 migration을 보존합니다. |
@@ -51,7 +53,7 @@ lead와 duty는 `omp --dori-role dori`, 구현 레인과 기본 reviewer는 `omp
 
 ## runtime과 설정
 
-herdr와 hc를 upstream의 `SessionRuntime`/`SessionRef`/`Runtimes`로 함께 지원합니다. 기존 레인·역할은 자신이 열린 runtime으로 명령을 받고, 새 세션 선택 순서는 `DORI_RUNTIME`, config의 `runtime`, 현재 hc terminal, 현재 herdr pane, PATH의 hc, PATH의 herdr입니다. herdr에서는 `herdr integration install omp`가 필요합니다. hc에서는 retained 확장이 역할 세션의 native OSC 7501을 발행하고, unknown은 계속 보류합니다. 자세한 verb/gate/마이그레이션 계약은 [runtime 문서](docs/runtime.md)에 있습니다.
+herdr와 hc의 upstream `SessionRuntime`/`SessionRef`/`Runtimes` 어댑터를 보존합니다. 첫 공개 소비자 지원은 위의 Linux x64/herdr/Discord 조합입니다. 기존 레인·역할은 자신이 열린 runtime으로 명령을 받고, 새 세션 선택 순서는 `DORI_RUNTIME`, config의 `runtime`, 현재 hc terminal, 현재 herdr pane, PATH의 hc, PATH의 herdr입니다. herdr에서는 `herdr integration install omp`가 필요합니다. hc에서는 retained 확장이 역할 세션의 native OSC 7501을 발행하고, unknown은 계속 보류합니다. 자세한 verb/gate/마이그레이션 계약은 [runtime 문서](docs/runtime.md)에 있습니다.
 
 스킬 config는 기본 `~/.dori/config.json`, 또는 `DORI_CONFIG`입니다. `DORI_STATE_DIR`은 `stateDir`보다, `DORI_LEAD_PANE`은 `leadPane`보다 우선합니다. 기본값은 다음과 같고 명시적인 사용자 설정을 보존합니다.
 
@@ -70,16 +72,51 @@ harness 기록은 `DORI_HOME`(기본 `~/.dori`), 스킬 장부·확장 기록은
 
 ## 설치와 실행
 
-Bun 1.4.4 이상, native OMP 18.18.8 이상, git, `gh`, herdr 또는 hc가 필요합니다. 새 설치는 다음과 같습니다.
+Linux x64에 git, Bun 1.4.4, native OMP 18.18.8, herdr를 먼저 설치하고 `PATH`에 두세요. 아래 다운로드에는 `curl`, `sha256sum`, `tar`도 필요합니다. 릴리스 설치기는 toolchain을 설치·업그레이드하지 않습니다. 소비자 설치·업데이트에는 `gh`, GitHub 쓰기 권한이나 upstream 포팅용 모델 호출이 필요하지 않습니다.
+
+저장소가 **`vntrevx/omp-dori`**, 태그가 **`v0.1.0`**인지 확인한 뒤 그 릴리스의 네 asset을 함께 받아 checksum을 검증하고 실행하세요.
 
 ```sh
-git clone https://github.com/vntrevx/omp-dori.git "$HOME/.dori/src"
-bash "$HOME/.dori/src/install.sh"
+download_dir="$(mktemp -d)" || exit 1
+cd "$download_dir" || exit 1
+release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.0"
+for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.0.tar.gz; do
+  curl --proto '=https' --tlsv1.2 -fL "$release_url/$asset" -o "$asset" || exit 1
+done
+sha256sum --check SHA256SUMS || exit 1
+bash ./install.sh --version v0.1.0 --from "$download_dir" || exit 1
+"$HOME/.dori/bin/dori" --version
+export PATH="$HOME/.dori/bin:$PATH"
 ```
 
-기존 설치는 디렉터리 위로 다시 clone하지 말고 그 설치의 `install.sh`를 실행하세요. 스크립트는 checkout을 fast-forward로만 갱신하고 root/skill/extension의 잠긴 의존성을 설치합니다. 스킬은 `$HOME/.agents/skills/dori-mode`, 확장은 `$HOME/.omp/agent/extensions/omp-dori`에 연결하며 스킬의 `dori`만 link합니다. public omp-ulw는 lock 커밋으로 받습니다. 소스 위치는 `DORI_SRC`, 직접 받은 omp-ulw는 `OMP_ULW_SRC`, 링크 위치는 `SKILLS_DIR`/`OMP_EXTENSIONS_DIR`로 지정합니다. config가 없을 때만 예제를 복사하며 기존 값은 유지합니다. 현재 checkout을 pull 없이 설치하려면 `DORI_NO_PULL=1 DORI_SRC="$PWD" bash install.sh`를 쓰세요. 격리 검증은 `HOME`, `DORI_HOME`, `DORI_CONFIG`, `DORI_STATE_DIR`을 함께 분리해야 합니다. sibling root runtime import 때문에 스킬만 떼어 복사하지 말고 전체 checkout을 유지하세요.
+PATH export는 원하면 shell 설정에 보존하세요. 직접 실행 경로는 `~/.dori/bin/dori`이며 global `bun link`는 필요하지 않습니다. 신뢰 근거는 canonical HTTPS 저장소와 릴리스의 신원이며, checksum은 받은 파일들의 무결성을 묶습니다. 별도 전자서명을 주장하지 않습니다. 설치기는 태그·commit/tree·archive와 추출한 소스 manifest도 검증합니다. 네트워크 설치의 명시적 preview 선택은 `DORI_RELEASE=v0.1.0 bash ./install.sh`로도 가능합니다. 버전 없는 latest는 stable만 선택하므로 첫 prerelease만 있을 때는 대상이 없다고 알릴 수 있습니다.
 
-`runtime`, `leadPane`, `laneWorkspace`, `defaultCwd`, provider를 포함한 `defaultModel`과 메신저 hook을 설치 환경에 맞춥니다. herdr일 때 OMP integration을 설치하고, 선택한 runtime 안에서 `omp --dori-role dori`를 시작해 "Dori mode"라고 말하면 됩니다. 봇·메신저·읽기 온보딩은 [setup](skills/dori-mode/references/setup.md)이 안내합니다. 설치 스크립트는 messenger/presence/watcher/harness를 시작하지 않습니다.
+config는 없을 때만 만들고 기존 설정·인증·작업·세션을 보존합니다. CLI·스킬·확장은 단일 `~/.dori/src` pointer를 따르며, public omp-ulw는 lock 커밋으로 받습니다. 기존 unmanaged 소스 디렉터리나 링크 위치 충돌은 보류합니다. `--from`은 로컬 Dori asset 입력이며, 최초 pinned 의존성 취득에는 익명 네트워크 접속이 필요할 수 있습니다. [설치 배치·전환·문제 해결](docs/releases.md)을 따르세요.
+
+`runtime`은 `"herdr"`로, `leadPane`, `laneWorkspace`, `defaultCwd`, 사용 가능한 provider를 포함한 `defaultModel`과 메신저 hook은 본인 환경에 맞추고 설치기가 지정한 의존성 경로를 유지하세요. OMP provider 계정과 Discord application/bot 인증은 사용자가 준비합니다. [Discord Developer Portal](https://discord.com/developers/applications)에서 본인 봇을 만들고 초대해 채널 권한과 Message Content Intent를 설정하세요. 토큰은 본인 소유 mode-0600 파일에 보관하고 선택한 native monitor의 자식 환경에서만 읽습니다. 이 native Discord 텍스트 경로에는 Node·agent-messenger·외부 watcher나 maintainer 인증이 필요하지 않습니다. [setup](skills/dori-mode/references/setup.md)을 따르세요.
+
+`herdr integration install omp` 후 herdr shell에 비밀이 아닌 `DORI_DISCORD_OWNER_ID`, `DORI_DISCORD_CHANNEL_ID`를 양의 10진수 ID 문자열로 설정한 다음 `omp --dori-role dori`를 시작하고 "Dori mode"라고 말하세요. 채널 ID는 수신할 정확한 채널 또는 thread ID입니다. AI 세션은 본인 provider 사용량을 소비할 수 있습니다.
+
+그 OMP 세션의 native `monitor`에서 공개 `dori inbound discord`를 명시적으로 실행하세요. [토큰 파일을 자식 환경에서만 읽는 argv 예제](docs/releases.md#discord-owner-intake)를 사용합니다. 기본 polling은 3초이며 `--loop` 단위는 분입니다(`--loop 0.1`은 6초, `--loop 0`은 한 번). 최초 시작은 최신 메시지를 cursor로 저장하고 과거 대화를 재생하지 않으므로 `INBOUND_READY discord ...`를 확인한 뒤 새 owner 메시지를 보내세요. 이후 `INBOUND discord ...`로 owner 텍스트만 받고 채널별 cursor를 보존합니다. private helper나 외부 메신저 watcher는 필요하지 않습니다.
+
+REST 수신·메시지 전송과 online 표시는 별개입니다. 사용 중 online을 유지하려면 같은 native `monitor`로 `dori presence discord`를 [별도 child token-file argv](docs/releases.md#discord-online-presence)로 켜고 Gateway 프로세스를 유지하세요. presence monitor를 의도적으로 멈추면 offline이 되며, 수신만 멈추는 것은 presence를 바꾸지 않습니다. 설치·업데이트가 두 monitor를 자동으로 켜거나 명시적 중지를 되돌리지 않습니다.
+
+### 소비자 업데이트와 rollback
+
+```sh
+dori update check --version v0.1.0
+dori update install --version v0.1.0
+dori update status
+dori update rollback
+```
+
+API는 `dori update <check|install|status|rollback> [--version TAG] [--from DIST]`입니다. `check`/`install`은 로컬 asset 디렉터리인 `--from`도 받습니다. `rollback`은 보존한 직전 릴리스를 검증해 복원하며 선택적 `--version`은 그 태그를 확인합니다. `status`와 `rollback`은 `--from`을 받지 않습니다. 임의의 `main`을 가져오거나 포팅 모델·저장소 쓰기 권한을 쓰지 않습니다.
+
+살아 있는 Dori가 있으면 idle이어도 설치·업데이트·rollback의 활성화를 보류합니다. 운영자가 monitor를 명시적으로 멈추고 owning 세션을 정상 종료한 뒤 status를 확인하고 재시도하세요. 명령이 Dori를 강제 종료·재시작하지 않습니다. 검증 실패는 이전 소스를 유지하며 rollback은 사용자 config를 다시 쓰거나 monitor를 재개하지 않습니다. [업데이트·복구 한계](docs/releases.md#updates-and-rollback)를 확인하세요.
+
+### Maintainer 소스 설치와 harness
+
+소스 checkout 설치는 별도 `scripts/install-source.sh`로 옮겼습니다. [maintainer 설치](docs/releases.md#source-checkouts-for-maintainers)는 기존 fast-forward·lock·명시적 경로 override 동작을 설명합니다. frozen 소비자 릴리스에서 소스 설치기를 실행하지 마세요.
 
 전체 harness를 별도로 평가할 때는 선택한 runtime server를 시작한 뒤 아래 진입점을 사용합니다. `up`은 실제 lead/duty 및 두 loop를 시작합니다.
 
@@ -89,13 +126,15 @@ dori harness start fix-flaky-login --brief examples/brief.md
 dori harness status
 ```
 
-[`examples/container/`](examples/container/)는 현재 checkout을 build context로 사용하는 container 예제입니다. OMP와 확장, pinned omp-ulw를 포함하며, `.dori`/`.omp`/GitHub·messenger 인증/프로젝트를 격리 named volume에 보존하도록 구성합니다. 검증된 설치 경로는 native 설치 스크립트이며, container 예제는 게시되거나 독립 검증된 이미지가 아닙니다. 기본 시작은 runtime server와 idle 명령뿐입니다. [container 문서](docs/container.md)에 버전·checksum 출처, herdr/hc build 선택과 acceptance 절차가 있습니다.
+[`examples/container/`](examples/container/)는 현재 checkout을 build context로 사용하는 maintainer 소스 container 예제입니다. OMP와 확장, pinned omp-ulw를 포함하며 `.dori`/`.omp`/GitHub·messenger 인증/프로젝트를 격리 named volume에 보존하도록 구성합니다. 공개 소비자는 위의 검증된 릴리스 설치 경로를 사용하세요. 이 예제는 게시되거나 독립 검증된 소비자 이미지가 아닙니다. 기본 시작은 runtime server와 idle 명령뿐입니다. [container 문서](docs/container.md)에 버전·checksum 출처, herdr/hc build 선택과 acceptance 절차가 있습니다.
 
-## 명시적 상시 자동 업데이트
+## Maintainer upstream 포팅·상시 배포
 
-`dori update`의 기본 동작은 격리 포팅·검사·새 리뷰 후 후보 생성입니다. 소유자가 별도 `promotion` 정책을 승인하고 설정하면, 검증된 정확한 소스만 자체 저장소 branch에 커밋·푸시하고 해당 head의 GitHub CI 통과 후 main을 fast-forward합니다. Linux/herdr용 managed 배포는 기존 작업·세션 참조·커서·모델 정책을 유지하며 운영 소스를 교체하고 monitor·수신 heartbeat까지 확인합니다. 실패 시 안전하게 가능한 범위에서 이전 실행본을 복원하며, 승인 창·새 작업·불명확한 프로세스에는 강제로 개입하지 않습니다.
+`dori upstream <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE`의 기본 동작은 격리 포팅·검사·새 리뷰 후 후보 생성입니다. 소비자 `dori update`와 다른 maintainer 기능이며 포팅·리뷰에는 설정한 모델 인증과 사용량이 필요합니다. 소유자가 별도 `promotion` 정책을 승인하고 설정하면, 검증된 정확한 소스만 자체 저장소 branch에 커밋·푸시하고 해당 head의 GitHub CI 통과 후 main을 fast-forward합니다. Linux/herdr용 managed 배포는 기존 작업·세션 참조·커서·모델 정책을 유지하며 운영 소스를 교체하고 monitor·수신 heartbeat까지 확인합니다. 실패 시 가능한 범위에서 이전 실행본을 복원하며, 승인 창·새 작업·불명확한 프로세스에는 강제로 개입하지 않습니다.
 
 상시 배포 controller는 교체 대상 Dori의 자식 monitor가 아니라 외부 supervisor로 실행해야 합니다. [설정·검증·원복 계약](skills/dori-mode/references/scripts.md#staged-dori-updates)과 [systemd user unit](examples/update-supervisor.service)을 따르세요. 설치 자체는 이 정책을 켜지 않으며 global Bun·모델 설정·ULW는 변경하지 않습니다. GitHub main 발행과 실제 운영 교체는 서로 다른 기록입니다. 과거 실제 커밋 재생 실증을 미래 upstream 업데이트가 발생한 것으로 표현하면 안 됩니다.
+
+공개 릴리스 제작 명령은 `bun scripts/release.ts build --out DIST --prerelease`입니다. canonical 버전은 root `package.json`이며 실제 committed HEAD의 공개 소스만 포장합니다. tag workflow는 정확한 commit의 신뢰하는 `check`, `test-macos`, `e2e-herdr`, `e2e-hc` 성공을 확인한 뒤 고정 asset을 게시합니다. 절차와 증거 범위는 [릴리스 제작](docs/releases.md#building-and-publishing-releases)에 있습니다.
 
 ## 개발과 검증 상태
 

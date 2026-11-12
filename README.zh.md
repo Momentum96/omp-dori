@@ -8,7 +8,9 @@
 
 [English](README.md) | 简体中文 | [Deutsch](README.de.md) | [日本語](README.ja.md) | [Italiano](README.it.md)
 
-> Archived translation of [sisyphuslabs/dori-superagent at `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.zh.md). HISTORICAL UPSTREAM REFERENCE ONLY: the omo prerequisites and the original installation examples below are archived upstream material, not installation instructions for this OMP port. Current OMP installation and runtime requirements are in [English](README.md) and [한국어](README.ko.md); `dori` belongs to the skill CLI and the full harness is `dori harness ...` or `bun src/cli.ts ...`. This port has not replaced production Dori or enabled a production watcher.
+> **OMP 首个公开预览版 `v0.1.0` 面向 Linux x64 / herdr / Discord。** 测试基准为 Bun 1.4.4、native OMP 18.18.8，最低版本也分别相同。macOS/hc 的 CI 覆盖与首版实际消费者支持范围分开说明。以 [English](README.md)、[한국어](README.ko.md) 和[安装与支持指南](docs/releases.md)为准；没有宣称完成独立外部用户 beta。
+>
+> 其余译文保留 [upstream `97d807b` 的历史参考](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.zh.md)。历史 omo 和架构说明并非当前 OMP 版安装步骤。
 
 [![CI](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml)
 [![License: SUL-1.0](https://img.shields.io/badge/license-SUL--1.0-blue.svg)](LICENSE)
@@ -53,32 +55,29 @@ Slack、Discord 和 Telegram 都在 `skills/dori-mode/scripts/src/messenger/` �
 
 ## 快速开始
 
-两种安装方式都会在你的 PATH 上放一个名为 `dori` 的命令，所以每台机器只装一种。如果一台机器上两者都有，就用 `bun src/cli.ts` 运行 harness，把 `dori` 留给 Dori mode；无论哪种情况，harness 自己的提示词都用完整路径调用它。
+`dori` 是 skill 与 release 管理 CLI。完整 harness 使用 `dori harness ...`；可选的 root package link 仅提供独立的 `dori-harness`。维护者移植命令是 `dori upstream ... --config FILE`，release 消费者使用 `dori update check|install|status|rollback`。
 
 ### Dori mode，你对话的那个 bot
 
-你需要 herdr、Bun 1.4.4 或更新版本、git，以及 GitHub CLI `gh`。
+公开预览需要 Linux x64、git、Bun 1.4.4、native OMP 18.18.8，以及 PATH 上的 herdr。请按[精确标签 `v0.1.0` 安装步骤](docs/releases.md#install-the-exact-preview)，核对发布者 `vntrevx/omp-dori`，下载同一 release 的四个 asset，先检查 `SHA256SUMS` 再执行安装器。
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
-```
+直接调用路径为 `~/.dori/bin/dori`，可将 `~/.dori/bin` 加入 PATH。`dori update check|install --version v0.1.0` 明确选择此预览版；默认 latest 只选择 stable release，不拉取任意 `main`。
 
-这会把本仓库克隆到 `~/.dori/src`，把 skill 链接到 `~/.agents/skills/dori-mode`，把 `dori` 链接到你的 PATH 上，并把一份示例配置复制到 `~/.dori/config.json`。至少要修改 `leadPane`（你自己的 herdr pane，用 `herdr pane current` 查看）、`laneWorkspace` 和 `defaultCwd`。
-
-然后在 herdr 里启动你的 coding agent，对它说：Dori mode。它会问你给它起什么名字（就叫 Dori，或者 ShipDori、WorkDori，这样几个可以并排运行），问你用哪个消息平台，和你一起完成 bot 的创建和登录，然后通过 bot 向你打招呼。在读取你的任何东西之前，它会逐个工具征求你的许可，整个引导过程是只读的。
+AI 与 Discord 认证由用户本人准备。安装不会启动 provider、messenger、watcher 或 service。Discord REST polling 和消息发送本身不会维持 bot online；有需要时应明确用 native OMP monitor 运行 `dori presence discord`，有意停止后应离线。检测到存活的 Dori 时，安装、更新与 rollback 的激活会保留等待。完整限制与恢复流程见支持指南。
 
 运行约定在 [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md)；设置、会话、完成协议和每条命令都在它的 [`references/`](skills/dori-mode/references/) 里。
 
 ### harness
 
-你需要 Bun 1.4.4 或更新版本、herdr、omo，以及 `gh`（用于 PR head SHA、检查和 merge）。
+维护者使用独立 source checkout 和 Bun、OMP、herdr；`gh` 用于自身 PR 检查、merge 等 GitHub 操作。原 checkout 安装器现为 `scripts/install-source.sh`：
 
 ```sh
-git clone https://github.com/sisyphuslabs/dori-superagent.git
-cd dori-superagent
-bun install
-bun link   # puts `dori` on your PATH
+git clone https://github.com/vntrevx/omp-dori.git "$HOME/src/omp-dori"
+cd "$HOME/src/omp-dori"
+DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
 ```
+
+请勿在冻结的消费者 release 内运行。下方历史 harness 说明应结合[当前 OMP 与维护者步骤](docs/releases.md#source-checkouts-for-maintainers)阅读。
 
 启动 herdr，然后：
 

@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util";
+import { runConsumerUpdate } from "../../../../src/release/cli.ts";
+import { releaseVersion } from "../../../../src/release/version.ts";
 import { runUpdate } from "../../../../src/update/cli.ts";
 
 import { type Command, die, makeCli } from "./cli-context.ts";
@@ -17,7 +19,8 @@ import { realClock, run } from "./run.ts";
 const USAGE = `dori <command> [options]
 
   harness <command> [args...]          dispatch every upstream harness command (up, inbox, duty, review, merge, loop, backlog, migrate...)
-  update <command> --config FILE       Dori-only staged candidates: check, stage, watch, status, snapshot, restore, recover
+  update <command> [options]           verified releases: check, install, status, rollback [--version TAG] [--from DIST]
+  upstream <command> --config FILE     maintainer staging: check, stage, watch, status, snapshot, restore, recover, restart
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
          [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...] [--dry-run]
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
@@ -55,12 +58,20 @@ const USAGE = `dori <command> [options]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
-  inbound slack|telegram [--loop MIN]  print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
-                                       the Dori posted in (any helper), DMs and channels with unread mentions`;
+  inbound slack|telegram|discord [--loop MIN]
+                                       print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
+                                       the Dori posted in (any helper), DMs and channels with unread mentions
+                                       Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and DORI_DISCORD_CHANNEL_ID
+                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval`;
 
 const [command = "", ...rest] = process.argv.slice(2);
 if (command === "harness") process.exit(await runHarness(rest));
-if (command === "update") process.exit(await runUpdate(rest));
+if (command === "--version") {
+  console.log(releaseVersion);
+  process.exit(0);
+}
+if (command === "update") process.exit(await runConsumerUpdate(rest));
+if (command === "upstream") process.exit(await runUpdate(rest));
 
 const config = await loadConfig().catch((e: unknown) =>
   e instanceof ConfigError ? die(e.message) : Promise.reject(e),

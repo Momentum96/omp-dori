@@ -161,10 +161,20 @@ Prints `CAN_LAUNCH` and exits 0 when the host has room for another lane. Otherwi
 Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN`, or when that is unset or empty from the file `DORI_SLACK_TOKEN_FILE` names (plus `DORI_SLACK_COOKIE` for a user token). The file must be a regular file you own and owner-only (`chmod 600`), checked and read through one open descriptor; a file open to group or others, owned by someone else, not a regular file (a FIFO never blocks the read), missing or empty is refused. Windows has no mode bits or uid to check, so there the file's ACL is the owner's to set, and `dori boot` prints `SLACK token-file: the token file's NTFS ACL is not checked on Windows; ...` as a reminder. Other tokens come from `DORI_TELEGRAM_TOKEN` or `DORI_DISCORD_TOKEN`. Text containing `$(` is refused, since it can only come from a shell string. Rate limits are retried with the server's wait time; other errors fail at once.
 
 ### `dori presence <slack|discord>`
-Keeps the account shown as online until stopped.
-- **Discord:** the bot connects to the gateway and identifies as online.
-- **Slack, user token:** it opens one web-client-type socket and tickles it every minute. Slack shows a user active only while such a socket is open, and auto-aways an idle one after about 30 minutes.
-- Run one instance per account. Two writers flip each other's presence.
+Keeps the account shown as online until explicitly stopped. Enable one instance per account under the owning OMP session's native `monitor` tool; two writers can compete.
+- **Discord:** use your own `DORI_DISCORD_TOKEN` in the child environment. REST inbound polling and message sending do not establish online presence. The Gateway keeper emits `PRESENCE_READY discord event=READY|RESUMED` only after that real dispatch, `PRESENCE_ACK discord seq=<number|->` only for the first actual heartbeat acknowledgement per connection and `PRESENCE_RECONNECT` while reconnecting. Later routine acknowledgements update lifecycle state silently. Authentication/configuration/intent failures exit nonzero with sanitized errors. SIGINT/SIGTERM ends retries, sockets and timers with `PRESENCE_STOPPED discord`; intentional monitor stop means offline. Restart only by explicit choice. See [operational details](../../../docs/releases.md#discord-online-presence).
+- **Slack, user token:** it opens one web-client-type socket and tickles it every minute. Slack shows a user active only while such a socket is open, and auto-aways an idle one after about 30 minutes. This retained source feature is outside the first Discord preview's live support scope.
+
+### `dori inbound discord [--loop MINUTES]`
+The supported Discord text intake is built into Dori and uses the owner's bot token directly. It needs no Node, agent-messenger CLI, SDK adapter or private helper. Required child environment: `DORI_DISCORD_TOKEN`, `DORI_DISCORD_OWNER_ID`, `DORI_DISCORD_CHANNEL_ID`. The two IDs are positive decimal snowflake strings, never JavaScript numbers.
+
+Without `--loop`, it polls continuously every three seconds. `--loop 0.1` is six seconds; `--loop 0` is one-shot. Startup validates the authenticated bot, application Message Content Intent, channel access and View Channel/Read Message History permissions before printing `INBOUND_READY discord owner=<id> channel=<id> bot=<id>`. Sending replies additionally needs the relevant send/thread permissions.
+
+On first start, the latest message ID is atomically saved without replaying history; an empty channel saves `0`. Send the first new request after readiness. The committed cursor is retained at `<stateDir>/discord-inbound/<channelId>.json`, in an owned private directory with atomic mode-0600 cursor files. Resumed polling pages back to that cursor, deduplicates messages and emits owner text chronologically. Successfully handled items advance the cursor.
+
+Output is `INBOUND discord <channel> <message> from=owner ref=<id|-> <JSON text>`. Bots, self, non-owner, webhook and system messages do not emit owner intake. Only the exact configured channel is read; a thread requires its own channel ID. This is new-message text polling, not guild-wide/thread discovery or a general edit/delete/media event stream.
+
+Use one opted-in native `monitor` with filter `^INBOUND` and the [protected-token child argv recipe](../../../docs/releases.md#discord-owner-intake). Startup auth, permission, intent or state failures are sanitized nonzero errors; later failed polls follow the ordinary `WARN`/retry loop. SIGINT/SIGTERM stops intake, and an explicit restart resumes the committed cursor. REST polling never changes Gateway presence; enable or stop the separate presence monitor intentionally.
 
 ### `dori inbound slack [--loop MIN]`
 Prints `INBOUND <source> <channel> <thread> <ts> <user> <text>`. It reads from three places, each message once:
@@ -194,9 +204,15 @@ Waits until load is under `heavyMaxLoad` and one of `heavySlots` is free, then r
 
 `dori harness <args...>` dispatches to the retained upstream harness in `src/cli.ts`. It supports `up`, `role`, `start`, `report`, `ready`, `send`, `inbox`, `duty`, `review`, `merge`, `done`, `status`, `loop`, `backlog` and `migrate` without taking over the primary messenger/lane `dori` namespace. Direct source invocation is `bun src/cli.ts <args...>`; a separately linked root package exposes `dori-harness`. Nothing in installation starts this harness or another production messenger.
 
+## Consumer release management
+
+`dori --version` and `dori update <check|install|status|rollback> [--version TAG] [--from DIST]` dispatch before normal Dori config loading. `check` and `install` accept an exact tag or a verified local asset directory; without a tag, network selection is stable-only. `rollback` validates the retained previous source and optionally asserts its tag with `--version`; `status` and `rollback` do not accept `--from`. Local Dori assets do not eliminate the initial anonymous network fetch for pinned public omp-ulw when it is not already provisioned.
+
+These consumer commands use no porting/review models or GitHub write permission. Install/update/rollback activation holds while any live Dori is detected, including idle sessions; operators explicitly stop their own monitors and end the owning session before retrying. No implicit kill, restart or watcher restoration occurs. Existing config/auth/work/sessions remain intact. Follow the [release guide](../../../docs/releases.md) for canonical download identity, checksum/source verification, interrupted-activation recovery and support limits.
+
 ## Staged Dori updates
 
-`dori update` has its own required `--config FILE` and dispatches before normal Dori config/state loading. Without `promotion`, it only stages source candidates and never commits, pushes or replaces live Dori. An explicit owner-approved promotion policy enables exact-source publication and optional managed herdr replacement after all checks and fresh review pass. That policy is standing authorization for its configured target, not permission for arbitrary repositories or sessions. Installation and boot never enable it. Neither mode upgrades global Bun, changes global model policy or updates ULW.
+`dori upstream` is the maintainer source-porting interface, with its own required `--config FILE`, dispatched before normal Dori config/state loading. It is separate from consumer `dori update`. Without `promotion`, it only stages source candidates and never commits, pushes or replaces live Dori. An explicit owner-approved promotion policy enables exact-source publication and optional managed herdr replacement after all checks and fresh review pass. That policy is standing authorization for its configured target, not permission for arbitrary repositories or sessions. Installation and boot never enable it. Neither mode upgrades global Bun, changes global model policy or updates ULW.
 
 The complete example is [`examples/update.config.json`](../../../examples/update.config.json), relative to the repository root. Its paths resolve relative to that file: it reads this checkout as `localSource` and writes an independent sibling staging directory. It requires Bun 1.4.4+, Git, actual OMP on PATH, the configured model/provider capability and the configured verification tools. Edit explicit model/thinking selectors to match the operator's worker and reviewer policy; these are example command arguments, not model defaults in the controller.
 
@@ -211,10 +227,10 @@ The native reviewer guard awaits `api.setActiveTools(["read","grep","glob"])` an
 The native **worker** guard (`src/update/worker-guard.ts`) is the same mechanism with a different allow-list: it awaits `api.setActiveTools` to the built-in `read, grep, glob, find, ast_grep, ast_edit, edit, write, bash, lsp, todo, wait, eval` that exist, reads the set back (extras fail the run; `read`, `edit`, `write` and `bash` are required) and gates every call. MCP, web, GitHub, subagent (`task`), memory and skill-management tools are denied, so untrusted upstream content cannot steer the owner's global MCP servers. A denied attempt is recorded in the worker's nonce/job/PID-bound receipt (`blocked`) for the reviewer, but does not by itself fail the port. The worker keeps its normal shell and edit power as the operator's OS user: path confinement is by instruction and review, not by the guard.
 
 ```sh
-bun skills/dori-mode/scripts/src/cli.ts update check --config examples/update.config.json
-bun skills/dori-mode/scripts/src/cli.ts update stage --config examples/update.config.json
-bun skills/dori-mode/scripts/src/cli.ts update status --config examples/update.config.json
-bun skills/dori-mode/scripts/src/cli.ts update watch --config examples/update.config.json
+bun skills/dori-mode/scripts/src/cli.ts upstream check --config examples/update.config.json
+bun skills/dori-mode/scripts/src/cli.ts upstream stage --config examples/update.config.json
+bun skills/dori-mode/scripts/src/cli.ts upstream status --config examples/update.config.json
+bun skills/dori-mode/scripts/src/cli.ts upstream watch --config examples/update.config.json
 ```
 
 `check` observes exactly `remote` plus the full `ref`. A head equal to `baseUpstream` is unchanged. `stage` explicitly exercises the current exact head even when it is the baseline; its request receipt says `manual-current-head`, never a detected new commit. Both commands deduplicate an already attempted SHA, including failures and rejections. An unchanged head never spends another model run. `watch` is the same cycle with a configured interval and one controller lock for its lifetime. It stops on active or ambiguous work. Installation and normal boot start no updater.
@@ -262,11 +278,11 @@ Optional `reporter` is a trusted argv command consuming `{text}` (also allowed: 
 
 ### Recovery drill
 
-Stop the watcher in its owning session first. Inspect retained process receipts and establish that all old children have stopped; the updater never guesses from an aged lock, kills an unknown PID or resumes an interrupted model/check. For an active job, `dori update recover --config FILE --ack-stopped ID` is the explicit acknowledgement. It clears active ownership and keeps the SHA deduplicated. A job that was still mid-run becomes `interrupted`; a job that already had a complete verdict (`ready`, `failed`, `rejected`) keeps it, and a `ready` verdict whose source no longer matches becomes `failed`. A live controller or foreign-host lock holds recovery.
+Stop the watcher in its owning session first. Inspect retained process receipts and establish that all old children have stopped; the updater never guesses from an aged lock, kills an unknown PID or resumes an interrupted model/check. For an active job, `dori upstream recover --config FILE --ack-stopped ID` is the explicit acknowledgement. It clears active ownership and keeps the SHA deduplicated. A job that was still mid-run becomes `interrupted`; a job that already had a complete verdict (`ready`, `failed`, `rejected`) keeps it, and a `ready` verdict whose source no longer matches becomes `failed`. A live controller or foreign-host lock holds recovery.
 
 Acknowledgement never retries or rebinds a terminal failed candidate. To evaluate a corrected controller against the same upstream SHA, use a separate configuration and a fresh isolated `root`, retaining the previous root and its receipts unchanged. This is a new run: it must perform a fresh port, every configured check and a fresh independent review; no archived check or verdict grants readiness. Never rewrite the old state's `configHash`, job phase or receipts.
 
-If the watcher died while idle and there is no active job, `dori update recover --config FILE --ack-stopped none` acknowledges the stopped controller alone and retains its lock evidence in `recovery-ack.json`. Corrupt lock/state records require manual inspection; they are never guessed away.
+If the watcher died while idle and there is no active job, `dori upstream recover --config FILE --ack-stopped none` acknowledges the stopped controller alone and retains its lock evidence in `recovery-ack.json`. Corrupt lock/state records require manual inspection; they are never guessed away.
 
 The following commands discover the existing terminal job and create **fresh sibling directories**. Run them from the checkout with `jq` available; `config` is the existing example. First run the isolated candidate with its dedicated application data under `root/application`, then stop that candidate's state writers. `--app-state` must name that existing task-owned data, never the owner's live state or model-client directory. If skill `DORI_STATE_DIR` and harness `DORI_HOME` are separate, supply their common owned data container so both relative trees are preserved.
 
@@ -278,8 +294,8 @@ job="$(jq -r '.jobs | to_entries | last | .value' "$root/state.json")"
 stamp="$(date +%s)"
 snapshot="$(dirname "$PWD")/dori-source-state-$stamp"
 restored="$(dirname "$PWD")/dori-restored-$stamp"
-bun skills/dori-mode/scripts/src/cli.ts update snapshot --config "$config" --job "$job" --output "$snapshot" --app-state "$app_state"
-bun skills/dori-mode/scripts/src/cli.ts update restore --config "$config" --input "$snapshot" --output "$restored"
+bun skills/dori-mode/scripts/src/cli.ts upstream snapshot --config "$config" --job "$job" --output "$snapshot" --app-state "$app_state"
+bun skills/dori-mode/scripts/src/cli.ts upstream restore --config "$config" --input "$snapshot" --output "$restored"
 jq '{phase, sourceHash, applicationStateHash, applicationState, candidateOnly}' "$restored/recovery.json"
 ```
 
@@ -333,11 +349,11 @@ Herdr `done` is admitted as idle-equivalent only when process-bound native metad
 
 The intake heartbeat is a decimal epoch-millisecond timestamp written by the configured intake monitor. It must be an owned regular file without group/world write permission; use mode `0600`, including for an existing receipt. A live process and a fresh but group-writable pulse do not satisfy deployment health.
 
-On failed startup or health, rollback restores the prior execution source and session when that can be done without interrupting new owner work or approvals. An ambiguous identity or newly busy actor holds for inspection instead. Runtime rollback does not rewrite published GitHub history: main and the running release can temporarily differ, and the promotion record distinguishes them. `dori update restart --config FILE` uses the configured managed restart lock and the same identity/health checks; existing model-watch helpers must delegate before sending any signal.
+On failed startup or health, rollback restores the prior execution source and session when that can be done without interrupting new owner work or approvals. An ambiguous identity or newly busy actor holds for inspection instead. Runtime rollback does not rewrite published GitHub history: main and the running release can temporarily differ, and the promotion record distinguishes them. `dori upstream restart --config FILE` uses the configured managed restart lock and the same identity/health checks; existing model-watch helpers must delegate before sending any signal.
 
 ### Resident supervision
 
-Run `scripts/update-supervisor.ts --config FILE --controller DIRECTORY --bun EXECUTABLE` outside the Dori it may replace. The controller directory is a stable link to the accepted controller release; each cycle invokes the actual `update check`, so the next cycle loads accepted code. When the link changes, the supervisor exits for the service manager to reload itself. It uses `intervalSeconds` from the config, does not manufacture status messages, and never retries a model merely because the interval elapsed. Completed detector unavailability (exit `4`) waits for the next interval rather than disabling the service; configuration errors still stop it. Unfinished ambiguous model work remains held; only finished ready promotion effects have automatic readback-based recovery.
+Run `scripts/update-supervisor.ts --config FILE --controller DIRECTORY --bun EXECUTABLE` outside the Dori it may replace. The controller directory is a stable link to the accepted controller release; each cycle invokes the actual `upstream check`, so the next cycle loads accepted code. When the link changes, the supervisor exits for the service manager to reload itself. It uses `intervalSeconds` from the config, does not manufacture status messages, and never retries a model merely because the interval elapsed. Completed detector unavailability (exit `4`) waits for the next interval rather than disabling the service; configuration errors still stop it. Unfinished ambiguous model work remains held; only finished ready promotion effects have automatic readback-based recovery.
 
 On Linux, `SIGUSR1` wakes the supervisor's next check without interrupting an active cycle. An expiring initial quiesce checkpoint can therefore be consumed immediately rather than waiting a full polling interval. The signal does not bypass deployment, publication or review gates.
 

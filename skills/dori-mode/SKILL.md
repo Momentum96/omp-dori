@@ -15,9 +15,11 @@ This modified copy runs on OMP. Start the lead with `omp --dori-role dori`; `dor
 
 The extension records the current session, goal status and open approvals under `<stateDir>/sessions/`. The CLI trusts that record only when it belongs to the live agent process; pause/resume and delivery must use it rather than assuming omo screen wording. Dori monitors use the extension's `monitor` tool and restore from the owning session's recorded start/stop entries. Boot reads a separate desired-monitor manifest under `<stateDir>/monitors/`, so it can report cleanup candidates without opening private session transcripts or stopping anything.
 
-The installed `dori` command remains the messenger/lane CLI. `dori harness <args>` reaches the complete upstream harness, also available as `bun src/cli.ts` or the distinct `dori-harness` bin. Installation starts no harness, watcher or messenger. Existing configuration and operational helper import paths remain valid.
+The installed `dori` command provides the messenger/lane CLI and consumer release management. `dori harness <args>` reaches the complete upstream harness, also available as `bun src/cli.ts` or the distinct `dori-harness` bin. Installation starts no harness, watcher, Gateway presence process or messenger. Existing configuration and operational helper import paths remain valid.
 
-`dori update check|stage|watch|status --config FILE` is the Dori-only updater. Read `references/scripts.md#staged-dori-updates` for source-bound port/check/fresh-review, recovery, and optional owner-authorized automatic publication/deployment. Without `promotion` it only stages candidates. Explicit standing approval in a configured promotion policy permits verified branch/CI/main publication and optional managed herdr replacement without asking again for each accepted SHA; a bare ready report grants no such authority. Continuous deployment must use the outside-Dori supervisor so restarting Dori cannot kill its controller. Setup/boot activates nothing, and ULW stays pinned.
+The first public preview supports Linux x64/herdr/Discord with tested Bun 1.4.4 and native OMP 18.18.8. Follow the [verified release installation and support guide](../../docs/releases.md). Consumer commands are `dori update <check|install|status|rollback> [--version TAG] [--from DIST]`; `--from` is for check/install, and rollback uses a verified retained previous release. Activation holds while a live Dori exists. These commands perform no porting/model work and start no monitors. Discord online presence requires a separately enabled `dori presence discord` Gateway keeper under native monitor supervision; REST polling/sending alone does not keep the bot online, and explicit monitor stop means offline.
+
+For maintainers, `dori upstream <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE` is the source-porting updater. Read `references/scripts.md#staged-dori-updates` for source-bound port/check/fresh-review, recovery, and optional owner-authorized automatic publication/deployment. Without `promotion` it only stages candidates. Explicit standing approval in a configured promotion policy permits verified branch/CI/main publication and optional managed herdr replacement without asking again for each accepted SHA; a bare ready report grants no such authority. Continuous deployment must use the outside-Dori supervisor so restarting Dori cannot kill its controller. Setup/boot activates nothing, and ULW stays pinned.
 
 ## First: your name
 
@@ -27,11 +29,11 @@ Before anything else, ask the owner what to call you. Plain "Dori" is fine, and 
 
 Run once, in order. Details and commands: `references/setup.md`.
 
-1. Run inside herdr or hc. It is how you open, read and message sessions, and they survive restarts. With both installed it runs on hc unless `"runtime": "herdr"` is set in `~/.dori/config.json` (`DORI_RUNTIME` overrides it); `dori boot` prints the one in use as `RUNTIME <kind> (from <source>)`.
-2. Install agent-messenger, ask the owner which platform (Telegram, Discord, Slack, ...), and wait for the answer. If it is Slack, also ask: user token (a real member with a paid seat the owner pays for, sees everything that member sees, can show online) or bot token (an app, no seat cost, only invited channels and its scopes). Give that trade-off in one short list and wait.
-3. Finish every login in the browser, create the bot, give it its avatar (default `assets/dori-avatar.png`; the owner may swap it), and greet the owner through it before doing anything else.
-4. Install the scripts in `scripts/` (one command, see `references/setup.md`) and write `~/.dori/config.json` from `references/config.example.json`.
-5. Subscribe to new messages with the `monitor` tool from the OMP Dori extension. Transcribe voice messages (`dori transcribe`) and treat the transcript as the owner's message.
+1. Run inside herdr for the supported Linux x64/Discord preview. The retained hc adapter is an advanced source option. Runtime selection and `dori boot` are documented in `references/setup.md`; explicitly choose `"runtime": "herdr"` for the preview.
+2. For Discord, use the shipped native Dori bot commands and the owner's own Discord Developer Portal application/token. Node and agent-messenger are not prerequisites for this supported text flow. Other messenger tooling is optional and platform-specific. If the owner selects retained Slack functionality, ask whether to use a user token or bot token and explain its scope/cost before setup.
+3. Create/invite the owner's Discord bot through the Developer Portal, grant the channel permissions and Message Content Intent described in `references/setup.md`, and give it its avatar (default `assets/dori-avatar.png`; the owner may swap it). Keep the token in an owned protected file and load it only into the chosen native monitor child environment; never put its value in chat or argv. Other platforms retain their separate login flows.
+4. Use the verified release installer for consumers, or the explicitly separate source installer for maintainers. Preserve an existing `~/.dori/config.json`; create an example only when absent and edit the owner's runtime/model/workspace choices without replacing authentication or session data.
+5. For Discord, explicitly supervise `dori inbound discord` with the native `monitor` tool, filter `^INBOUND`, and the child-only token-file argv in `references/setup.md`. It requires `DORI_DISCORD_OWNER_ID` and `DORI_DISCORD_CHANNEL_ID`, polls every three seconds by default, and records a fresh-start baseline before accepting new owner text. Presence is a separately opted-in `dori presence discord` monitor. Do not start other paused watchers. Other platforms retain their own inbound/transcription workflows.
 6. Run onboarding (below), unless it has been done before.
 
 ## Onboarding
@@ -108,7 +110,8 @@ Real work runs in its own session, called a lane: a herdr tab, or a labelled ter
 | `dori launch` / `dori adopt` | open a lane in a new tab, or register one already running |
 | `dori sync [--write]` | rebuild the registry from live panes, report drift |
 | `dori boot` | after a restart or compaction: vanished panes, drift count, workspace-filter mismatch, lane journals, open worklog items, watches left on finished lanes; read-only, non-zero exit on drift or a config warning |
-| `dori update` | stage and review Dori-only candidates; optional explicitly authorized publication/managed rollout, restart, status and recovery |
+| `dori update` | consumer verified-release check/install/status/rollback; no porting models or live-session restart |
+| `dori upstream ... --config FILE` | maintainer source candidates, fresh review, optional explicitly authorized publication/managed rollout, restart, status and recovery |
 | `dori report` | a lane records a milestone, blocker, question, halt or done in its `reports.jsonl` and prints the `[REPORT]` line |
 | `dori checkpoint` / `dori checkpoints` | a lane records each completed step and its remote receipts once, and reads them back on resume |
 | `dori verify-pr <owner/repo> <num>` | before a PR is called done: commit emails match the repo's identity, fixes come with a test or a `No test:` reason |
@@ -123,3 +126,4 @@ Real work runs in its own session, called a lane: a herdr tab, or a labelled ter
 | `dori heavy <label> -- <cmd>` | run a heavy command only when a slot is free and load is low |
 | `dori can-launch` | is there room for a new lane? exit 4 with the reasons if not |
 | `dori send` / `dori presence` / `dori transcribe` | messenger utilities: post or edit on Slack, Telegram or Discord; stay shown online; voice note to text |
+| `dori inbound discord` | native bot REST intake for one owner and exact channel; durable cursor; separate from Gateway online presence |

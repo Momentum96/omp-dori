@@ -1,12 +1,12 @@
 # Session runtimes: herdr and hc
 
-**The OMP source candidate retains herdr and hc (herdr-core) through the complete upstream runtime abstraction. Sessions on both can live in one home, and `dori harness migrate` moves sessions between them.** This is a source contract; runtime/model behavior awaits MAIN's isolated verification.
+**The OMP port retains herdr and hc (herdr-core) through the complete upstream runtime abstraction. Sessions on both can live in one home, and `dori harness migrate` moves sessions between them.** This document describes the source/runtime contract. The [first public preview](releases.md) supports Linux x64/herdr/Discord; macOS/hc CI coverage is distinct from live consumer support and exact-release QA evidence.
 
 A session is one terminal with an agent or a loop in it: the lead, duty, the duty loop, the hourly loop, or a lane. herdr gives Dori workspaces, tabs and panes and detects the agent in a pane. hc gives Dori plain terminals with labels, and the agent in a terminal reports its own status. The harness talks to both through one interface, and nothing above that interface knows which runtime it is using.
 
 The primary installed `dori` remains the skill CLI. Every root harness command here uses `dori harness ...`; `dori-harness ...` after root linking or `bun src/cli.ts ...` are equivalent entrypoints. For example, skill `dori send discord` posts to a messenger, while `dori harness send lead` sends to an agent session.
 
-Lead and duty start OMP with role `dori`; lanes and the built-in reviewer use role `lane`. `DORI_AGENT_CMD` defaults to `omp`; explicit command/model/role arguments remain intact. The skill's own argv template and model precedence are separate; see [OMP session contracts](../README.md#omp-session-contract). The retained extension and pinned public omp-ulw must be installed with the full source checkout, because the skill imports these runtime adapters by sibling path.
+Lead and duty start OMP with role `dori`; lanes and the built-in reviewer use role `lane`. `DORI_AGENT_CMD` defaults to `omp`; explicit command/model/role arguments remain intact. The skill's own argv template and model precedence are separate; see [OMP session contracts](../README.md#omp-session-contract). The extension, pinned public omp-ulw and full sibling source layout must be installed together; the release installer provides that layout because the skill imports these runtime adapters by sibling path.
 
 ## The interface
 
@@ -182,7 +182,7 @@ Ref detection uses the same capture and drain bounds with a fixed 60-second comm
 
 Configured literal secrets are redacted in full in stdout, stderr and command error receipts. A longer configured secret takes precedence over its shorter prefix regardless of configuration order, including across stream reads.
 
-Environment and path isolation is not an OS sandbox. Descendants can survive a direct-child kill or output cancellation; the controller does not terminate process groups. A drain deadline holds the command as interrupted even when the direct child exited zero. A started reporter with incomplete output stays ambiguous and is never resent automatically. Inspect the retained receipt and verify every old child and descendant has stopped before the updater's `recover --ack-stopped JOB_ID`; that command acknowledges the operator's verification rather than stopping a process tree.
+Environment and path isolation is not an OS sandbox. Descendants can survive a direct-child kill or output cancellation; the controller does not terminate process groups. A drain deadline holds the command as interrupted even when the direct child exited zero. A started reporter with incomplete output stays ambiguous and is never resent automatically. Inspect the retained receipt and verify every old child and descendant has stopped before `dori upstream recover --config FILE --ack-stopped JOB_ID`; that maintainer command acknowledges the operator's verification rather than stopping a process tree.
 
 ## Limits
 
@@ -192,4 +192,4 @@ Environment and path isolation is not an OS sandbox. Descendants can survive a d
 
 ## Tests
 
-MAIN-owned verification remains unrun for this source port. `bun test ./test/runtime-omp.test.ts ./test/runtime-omp-typed.test.ts` exercises process-bound identity, approvals and typed delivery on fake herdr/hc. Skill `test/omp-session.test.ts`/`test/omp-pause.test.ts` cover OMP session/native goal contracts; extension `test/status.test.ts` asserts HC status frames and role-removal invalidation, and `test/monitor-state.test.ts` asserts the desired monitor manifest. Full `bun test ./test/` includes both adapters against recorders. Real-server fixture tests are `test/e2e.test.ts` (isolated `herdr --session`), `test/e2e-hc.test.ts` (isolated `HC_SESSION`/XDG and an OSC fixture), and `test/e2e-migrate.test.ts` (herdr to hc); each skips without its binary. Fixture tests do not establish real OMP/provider or messenger behavior.
+These are test entrypoints, not a claim that they passed for any particular release. `bun test ./test/runtime-omp.test.ts ./test/runtime-omp-typed.test.ts` exercises process-bound identity, approvals and typed delivery on fake herdr/hc. Skill `test/omp-session.test.ts`/`test/omp-pause.test.ts` cover OMP session/native goal contracts; extension `test/status.test.ts` asserts HC status frames and role-removal invalidation, and `test/monitor-state.test.ts` asserts the desired monitor manifest. Full `bun test ./test/` includes both adapters against recorders. Real-server fixture tests are `test/e2e.test.ts` (isolated `herdr --session`), `test/e2e-hc.test.ts` (isolated `HC_SESSION`/XDG and an OSC fixture), and `test/e2e-migrate.test.ts` (herdr to hc); each skips without its binary. Fixture tests do not establish real OMP/provider or messenger behavior.

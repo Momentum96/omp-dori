@@ -8,7 +8,9 @@ Il tuo ingegnere 24/7, nella chat che usi già.
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | Italiano
 
-> Archived translation of [sisyphuslabs/dori-superagent at `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.it.md). HISTORICAL UPSTREAM REFERENCE ONLY: the omo prerequisites and the original installation examples below are archived upstream material, not installation instructions for this OMP port. Current OMP installation and runtime requirements are in [English](README.md) and [한국어](README.ko.md); `dori` belongs to the skill CLI and the full harness is `dori harness ...` or `bun src/cli.ts ...`. This port has not replaced production Dori or enabled a production watcher.
+> **Anteprima pubblica OMP `v0.1.0`: Linux x64, herdr e Discord.** Le versioni testate sono Bun 1.4.4 e OMP nativo 18.18.8, anche versioni minime. macOS/hc hanno copertura CI, distinta dal supporto all'uso reale di questa prima anteprima. Fanno fede [English](README.md), [한국어](README.ko.md) e la [guida a installazione e supporto](docs/releases.md). Non viene dichiarata una beta indipendente con utenti esterni.
+>
+> Il resto della traduzione conserva il [riferimento upstream `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.it.md). Le descrizioni storiche di omo e dell'architettura non sono istruzioni attuali per installare la versione OMP.
 
 [![CI](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml)
 [![License: SUL-1.0](https://img.shields.io/badge/license-SUL--1.0-blue.svg)](LICENSE)
@@ -53,32 +55,29 @@ La creazione del bot e il completamento del suo login passano da [agent-messenge
 
 ## Avvio rapido
 
-Entrambe le installazioni mettono nel PATH un comando chiamato `dori`, quindi installane una per macchina. Su una macchina che le ha tutte e due, lancia l'harness come `bun src/cli.ts` e lascia `dori` a Dori mode; i prompt dell'harness lo chiamano comunque con il percorso completo.
+`dori` resta la CLI della skill e dei comandi di release. `dori harness ...` raggiunge l'harness completo; il link facoltativo del package root espone soltanto `dori-harness`. I maintainer usano `dori upstream ... --config FILE`; gli utenti delle release usano `dori update check|install|status|rollback`.
 
 ### Dori mode, il bot con cui parli
 
-Ti servono herdr, Bun 1.4.4 o successivo, git e la CLI di GitHub `gh`.
+Per l'anteprima pubblica servono Linux x64, git, Bun 1.4.4, OMP nativo 18.18.8 e herdr nel PATH. Segui la [guida al tag esatto `v0.1.0`](docs/releases.md#install-the-exact-preview): verifica il repository `vntrevx/omp-dori`, scarica i quattro asset della release e controlla `SHA256SUMS` prima di eseguire l'installer.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
-```
+Il comando esplicito è `~/.dori/bin/dori`; aggiungi `~/.dori/bin` al PATH. `dori update check|install --version v0.1.0` sceglie esplicitamente l'anteprima. La selezione predefinita di latest considera soltanto release stabili, mai un `main` arbitrario.
 
-Questo clona il repository in `~/.dori/src`, collega la skill in `~/.agents/skills/dori-mode`, collega `dori` nel tuo PATH e copia una config di esempio in `~/.dori/config.json`. Modifica almeno `leadPane` (il tuo pane di herdr, da `herdr pane current`), `laneWorkspace` e `defaultCwd`.
-
-Poi avvia il tuo coding agent dentro herdr e digli: Dori mode. Ti chiede come chiamarlo (semplicemente Dori, oppure ShipDori, WorkDori, così ne possono girare diversi affiancati), ti chiede quale messenger usare, completa con te la creazione e il login del bot e ti saluta tramite il bot. Prima di leggere qualsiasi cosa tua chiede il permesso strumento per strumento, e quell'onboarding è in sola lettura.
+Autenticazione AI e Discord sono dell'utente. L'installazione non avvia provider, messenger, watcher o servizi. Polling e invio REST su Discord non tengono il bot online: occorre abilitare esplicitamente `dori presence discord` come monitor nativo OMP; fermarlo intenzionalmente porta il bot offline. Attivazione e rollback restano in attesa finché Dori è vivo. Limiti e recupero sono nella guida di supporto.
 
 Il contratto operativo è [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md); setup, sessioni, il protocollo di conclusione e ogni comando sono nei suoi [`references/`](skills/dori-mode/references/).
 
 ### L'harness
 
-Ti servono Bun 1.4.4 o successivo, herdr, omo e `gh` (per gli SHA di head delle PR, i check e il merge).
+I maintainer usano un checkout sorgente separato con Bun, OMP e herdr. `gh` serve soltanto per operazioni GitHub come controlli PR e merge. Il precedente installer da checkout è ora `scripts/install-source.sh`:
 
 ```sh
-git clone https://github.com/sisyphuslabs/dori-superagent.git
-cd dori-superagent
-bun install
-bun link   # puts `dori` on your PATH
+git clone https://github.com/vntrevx/omp-dori.git "$HOME/src/omp-dori"
+cd "$HOME/src/omp-dori"
+DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
 ```
+
+Non eseguirlo dentro una release utente congelata. Le [istruzioni OMP per maintainer](docs/releases.md#source-checkouts-for-maintainers) prevalgono sulle descrizioni storiche dell'harness qui sotto.
 
 Avvia herdr, poi:
 

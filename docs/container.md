@@ -1,6 +1,6 @@
-# Running the OMP Dori candidate in a container
+# Maintainer source-container recipe
 
-This recipe packages **this local candidate**, including the complete upstream harness, skill, shared runtime adapters and retained OMP extension. It does not clone a separate Dori release. No image is published, and no build or container execution has been performed as part of this source port. MAIN owns build acceptance, review and isolated OMP/messenger QA; this document records inputs and expected behavior, not a deployed or verified result.
+This maintainer recipe packages **the local source checkout**, including the complete upstream harness, skill, shared runtime adapters and retained OMP extension. It does not clone a separate Dori release. Public consumers should follow the [verified release installer and support guide](releases.md). This recipe's build and session checks are separate evidence, not a published or independently validated consumer image. The first public preview supports Linux x64/herdr/Discord; the retained hc/other-architecture recipe does not expand that live support scope.
 
 The primary `dori` command runs `skills/dori-mode/scripts/src/cli.ts`. `dori harness <args>` dispatches to the complete root CLI; `dori-harness <args>` and `bun /opt/omp-dori/src/cli.ts <args>` also reach it. The image never assigns the root CLI the primary `dori` name.
 

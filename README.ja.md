@@ -8,7 +8,9 @@
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | 日本語 | [Italiano](README.it.md)
 
-> Archived translation of [sisyphuslabs/dori-superagent at `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md). HISTORICAL UPSTREAM REFERENCE ONLY: the omo prerequisites and the original installation examples below are archived upstream material, not installation instructions for this OMP port. Current OMP installation and runtime requirements are in [English](README.md) and [한국어](README.ko.md); `dori` belongs to the skill CLI and the full harness is `dori harness ...` or `bun src/cli.ts ...`. This port has not replaced production Dori or enabled a production watcher.
+> **OMP 初公開プレビュー `v0.1.0` の対象は Linux x64 / herdr / Discord です。** テスト基準は Bun 1.4.4、native OMP 18.18.8 で、最低バージョンも同じです。macOS/hc の CI 対象と、この初版の実運用サポート範囲は区別します。正式な手順は [English](README.md)、[한국어](README.ko.md)、[インストール・サポートガイド](docs/releases.md)を参照してください。独立した外部ユーザー beta の実施は主張していません。
+>
+> 残りの翻訳は [upstream `97d807b` の参考資料](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md)を保持しています。歴史的な omo・構成の説明は、現在の OMP 版のインストール手順ではありません。
 
 [![CI](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml/badge.svg)](https://github.com/sisyphuslabs/dori-superagent/actions/workflows/ci.yml)
 [![License: SUL-1.0](https://img.shields.io/badge/license-SUL--1.0-blue.svg)](LICENSE)
@@ -53,32 +55,29 @@ Slackでは、Doriをどう見せるかをセットアップ時に選びます�
 
 ## クイックスタート
 
-どちらのインストールも `dori` という名前のコマンドをPATHに置くので、1台のマシンにはどちらか一方を入れてください。両方を入れたマシンでは、ハーネスを `bun src/cli.ts` として実行し、`dori` はDori modeに任せます。ハーネス自身のプロンプトは、どちらの場合もフルパスで呼び出します。
+`dori` はスキルとリリース管理の CLI です。完全なハーネスは `dori harness ...`、root package の任意リンクは別名 `dori-harness` を使います。maintainer のポート処理は `dori upstream ... --config FILE`、リリース利用者は `dori update check|install|status|rollback` です。
 
 ### Dori mode、あなたが話しかけるボット
 
-herdr、Bun 1.4.4以降、git、GitHub CLIの `gh` が必要です。
+公開プレビューには Linux x64、git、Bun 1.4.4、native OMP 18.18.8、PATH 上の herdr が必要です。[正確なタグ `v0.1.0` の手順](docs/releases.md#install-the-exact-preview)に従い、`vntrevx/omp-dori` の公開元を確認して 4 つの release asset を取得し、`SHA256SUMS` を検証してから installer を実行してください。
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
-```
+直接の実行パスは `~/.dori/bin/dori` です。`~/.dori/bin` を PATH に追加できます。`dori update check|install --version v0.1.0` はこのプレビューを明示的に選びます。既定の latest は stable のみを選択し、任意の `main` は取得しません。
 
-これでこのリポジトリが `~/.dori/src` にクローンされ、スキルが `~/.agents/skills/dori-mode` にリンクされ、`dori` がPATHにリンクされ、設定例が `~/.dori/config.json` にコピーされます。少なくとも `leadPane`（`herdr pane current` で確認できる自分のherdrペイン）、`laneWorkspace`、`defaultCwd` は編集してください。
-
-次に、herdrの中でコーディングエージェントを起動し、「Dori mode」と伝えます。エージェントは呼び名を尋ね（ただのDori、あるいはShipDori、WorkDoriなど。複数を並べて動かせます）、使うメッセンジャーを尋ね、ボットの作成とログインをあなたと一緒に仕上げ、ボット経由で挨拶します。あなたのものを読む前に、ツールごとに許可を求めます。このオンボーディングは読み取り専用です。
+AI と Discord の認証は利用者自身のものを使います。インストールは provider、messenger、watcher、service を開始しません。Discord の REST polling・送信だけでは online 表示は維持されません。必要な場合だけ native OMP monitor で `dori presence discord` を明示的に動かし、意図的に停止したら offline に戻します。生きている Dori がある間、更新・rollback の有効化は保留されます。制限と復旧はサポートガイドにあります。
 
 運用の取り決めは [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md) にあります。セットアップ、セッション、完了プロトコル、全コマンドは [`references/`](skills/dori-mode/references/) にまとまっています。
 
 ### ハーネス
 
-Bun 1.4.4以降、herdr、omo、`gh`（PRのhead SHA、チェック、マージに使います）が必要です。
+maintainer は Bun、OMP、herdr を用い、別の source checkout で作業します。`gh` は PR 検査・merge など自分の GitHub 操作に使います。従来の checkout installer は `scripts/install-source.sh` に移動しました。
 
 ```sh
-git clone https://github.com/sisyphuslabs/dori-superagent.git
-cd dori-superagent
-bun install
-bun link   # puts `dori` on your PATH
+git clone https://github.com/vntrevx/omp-dori.git "$HOME/src/omp-dori"
+cd "$HOME/src/omp-dori"
+DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
 ```
+
+固定された利用者向け release 内では実行しません。以下の歴史的なハーネス説明より、[現在の OMP・maintainer 手順](docs/releases.md#source-checkouts-for-maintainers)を優先してください。
 
 herdrを起動してから、次を実行します。
 

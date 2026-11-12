@@ -14,22 +14,30 @@ I have read the CLA Document and I hereby sign the CLA
 
 The CLA Assistant workflow then records the signature and the check turns green; it never asks again. Signing is what lets upstream keep one licence for every contribution, including the relicensing rights it needs when it changes its licence — the [licence](LICENSE) is the Sustainable Use License, and the CLA is what makes future licence changes possible without hunting down every author.
 
+## Source development and public releases
+
+Consumers follow the [verified release installation and support guide](docs/releases.md) and use `dori update check|install|status|rollback`. Maintainers work in a separate ordinary checkout; the checkout installer is now `scripts/install-source.sh`. To install the current checkout without pulling, use `DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh`. Do not develop inside a frozen installed release.
+
+Upstream porting and candidate/recovery operations use `dori upstream ... --config FILE`. That interface can use configured models and maintainer publication permissions; consumer release management uses neither. Build fixed public assets with `bun scripts/release.ts build --out DIST --prerelease`, then follow the [exact-commit review/QA/CI/tag publication procedure](docs/releases.md#building-and-publishing-releases). Source checks, real runtime/messenger evidence and independent external-user testing are distinct claims.
+
 ## Run the gates
 
 ```sh
 bun install --frozen-lockfile
 (cd skills/dori-mode/scripts && bun install --frozen-lockfile)
+(cd extension && bun install --frozen-lockfile)
 bun run ci
 ```
 
 `bun run ci` is the same chain CI runs:
 
 - `check` — Biome lint and format.
-- `typecheck` — `tsc --noEmit` for the harness and for the skill's scripts.
+- `typecheck` — `tsc --noEmit` for the harness, skill scripts and extension.
 - `knip` — no unused files, exports or dependencies.
-- `lint:loc` — the file-length check, against `scripts/loc-baseline.json` (a file may not grow past its baseline).
+- `lint:loc` — the TypeScript file-length gate, with a 250-line limit per capped file.
 - `test` — the harness suite.
 - `test:skill` — the skill's script suite.
+- `test:extension` — the OMP extension suite.
 
 The unit suites need `bun` and `git`, run offline, and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 

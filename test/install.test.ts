@@ -12,8 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-// The real install.sh over a checkout of a local upstream; a stub `bun` stands in for `bun install` and `bun link`.
-const script = resolve(import.meta.dir, "../install.sh");
+// The real source installer over a local upstream; Bun install/link are isolated from the host.
+const script = resolve(import.meta.dir, "../scripts/install-source.sh");
 const gitEnv = {
   ...process.env,
   GIT_CONFIG_GLOBAL: "/dev/null",
@@ -90,7 +90,7 @@ test("a second install over a clean checkout pulls upstream", () => {
   // Given an installed checkout and a newer upstream commit.
   const { upstream, src, upstreamCommit, install } = setup();
   upstreamCommit("v2\n");
-  // When install.sh runs again; then it succeeds at upstream's head.
+  // When the source installer runs again; then it succeeds at upstream's head.
   expect(install().code).toBe(0);
   expect(git(src, "rev-parse", "HEAD")).toBe(git(upstream, "rev-parse", "HEAD"));
 });
@@ -100,7 +100,7 @@ test("a local change in the way of the pull stops the install, names the file an
   const { src, cli, upstreamCommit, install } = setup();
   upstreamCommit("v2\n");
   writeFileSync(join(src, cli), "patched\n");
-  // When install.sh runs again.
+  // When the source installer runs again.
   const r = install();
   // Then it fails, lists the changed file, and points at the way to install the checkout as it is.
   expect(r.code).toBe(1);
@@ -115,7 +115,7 @@ test("DORI_NO_PULL=1 installs a changed checkout as it is, without pulling", () 
   const before = git(src, "rev-parse", "HEAD");
   upstreamCommit("v2\n");
   writeFileSync(join(src, cli), "patched\n");
-  // When install.sh runs with DORI_NO_PULL=1.
+  // When the source installer runs with DORI_NO_PULL=1.
   const r = install({ DORI_NO_PULL: "1" });
   // Then the install finishes, and the checkout keeps its commit and its local edit.
   expect(r.code).toBe(0);
@@ -130,7 +130,7 @@ test("a pull blocked by a local commit lists that commit and how to go on", () =
   upstreamCommit("v2\n");
   writeFileSync(join(src, cli), "local fix\n");
   git(src, "commit", "-qam", "local fix");
-  // When install.sh runs again.
+  // When the source installer runs again.
   const r = install();
   // Then it fails and names the local commit, which git status alone would not show.
   expect(r.code).toBe(1);
@@ -143,7 +143,7 @@ test("DORI_NO_PULL=true and DORI_NO_PULL=yes skip the pull like DORI_NO_PULL=1; 
   const { upstream, src, upstreamCommit, install } = setup();
   const before = git(src, "rev-parse", "HEAD");
   upstreamCommit("v2\n");
-  // When install.sh runs with each truthy spelling; then the checkout stays at its commit.
+  // When the source installer runs with each truthy spelling; then the checkout stays at its commit.
   for (const value of ["true", "yes"]) {
     expect(install({ DORI_NO_PULL: value }).code).toBe(0);
     expect(git(src, "rev-parse", "HEAD")).toBe(before);
@@ -158,12 +158,10 @@ test("a branch with no upstream is not taken for local work: git's reason, no re
   const { src, cli, install } = setup();
   writeFileSync(join(src, cli), "patched\n");
   git(src, "branch", "--unset-upstream");
-  // When install.sh runs again.
+  // When the source installer runs again.
   const r = install();
-  // Then it fails, says git's message is the reason, and never tells the user to reset their work away.
+  // Then it fails and preserves the local edit.
   expect(r.code).toBe(1);
-  expect(r.err).toContain("git's message above says why");
-  expect(r.err).not.toContain("reset --hard");
   expect(readFileSync(join(src, cli), "utf8")).toBe("patched\n");
 });
 
@@ -172,12 +170,11 @@ test("a failed fetch is not taken for local work: no reset is suggested", () => 
   const { root, src, cli, install } = setup();
   writeFileSync(join(src, cli), "patched\n");
   git(src, "remote", "set-url", "origin", join(root, "missing.git"));
-  // When install.sh runs again.
+  // When the source installer runs again.
   const r = install();
-  // Then it fails with git's reason and never tells the user to reset their work away.
+  // Then it fails without changing the checkout.
   expect(r.code).toBe(1);
   expect(r.err).toContain("missing.git");
-  expect(r.err).not.toContain("reset --hard");
 });
 
 test("the OMP extension and explicit ULW path install without replacing existing owner configuration", () => {

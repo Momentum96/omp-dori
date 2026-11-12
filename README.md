@@ -4,7 +4,7 @@
 
 # omp-dori
 
-Your 24/7 engineer, in the chat you already use.
+First public preview: Linux x64, herdr and Discord.
 
 English | [한국어](README.ko.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | [Italiano](README.it.md)
 
@@ -15,13 +15,15 @@ Dori lives in your Slack, Discord or Telegram. You tell him what to do in a thre
 
 This is a modified OMP port of [`sisyphuslabs/dori-superagent`](https://github.com/sisyphuslabs/dori-superagent/tree/97d807b9037cb050a72129659cf6306d8055010d), based on upstream `97d807b9037cb050a72129659cf6306d8055010d` and the local OMP integration at `75a1b28de8caddb6d30b2e3d72ef3dec09450b47`. The Sustainable Use License and original notices remain; see [NOTICE](NOTICE).
 
-**OMP port, with operator-controlled activation.** The complete upstream harness, messenger skill and OMP extension are included. Installation places the code, dependencies and links; it does not start a messenger, watcher or harness, replace an existing running Dori, or activate a staged update. Configure your runtime, models and messenger before starting sessions.
+**`v0.1.0` is a GitHub prerelease for Linux x64 / herdr / Discord.** The tested baseline is Bun **1.4.4** and native OMP **18.18.8**; these are also the minimum versions, not a claim that every newer combination has been tested. Install an exact verified release, then choose when to start Dori. Installation prepares code, dependencies and links without starting a messenger, Gateway presence keeper, watcher, service, harness or model request.
+
+macOS and hc have CI coverage and retained source adapters; they are outside this first live consumer support scope. Slack and Telegram features remain in the source. Preview support does not imply an independent external-user beta or universal compatibility. See the [release installation and support guide](docs/releases.md), [release notes](CHANGELOG.md) and the canonical [`v0.1.0` release path](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.0).
 
 Dori mode (`skills/dori-mode`) is the bot you talk to: a skill for [OMP](https://github.com/can1357/oh-my-pi) plus the primary installed `dori` CLI that opens, tracks and closes work sessions and talks to Slack, Discord and Telegram.
 
 The complete harness (`src/`) remains available through `dori harness <args>`, `dori-harness <args>` after an optional root package link, or `bun src/cli.ts <args>`. It provides lead/duty sessions, the duty and hourly loops, lanes, inboxes, backlog, migration, review and merge gates, hooks and telemetry on Bun without runtime npm dependencies of its own. Sessions use upstream's [herdr](https://github.com/herdrdev/herdr) or hc (herdr-core) runtime abstraction, with OMP replacing the upstream omo agent. The retained [omp-ulw](https://github.com/dbc-hbin/omp-ulw) prompt port is pinned by [`omp-ulw.lock`](omp-ulw.lock).
 
-`dori update check|stage|watch|status --config FILE` stages Dori-only updates in independent source clones using real configurable port/check/fresh-review commands. The default is candidate-only. An explicit owner-approved `promotion` configuration additionally publishes the exact verified export through an own-repository branch, exact-head GitHub CI and fast-forward main, and can replace a configured Linux/herdr Dori with a health-checked managed release. Work, session references, intake and model policy remain in place; failed startup restores the prior execution source when safe. See [configuration, supervision and recovery](skills/dori-mode/references/scripts.md#staged-dori-updates), the [staging example](examples/update.config.json) and the [external supervisor unit](examples/update-supervisor.service). Installation never activates this policy; ULW remains pinned.
+For maintainers, `dori upstream <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE` stages Dori-only updates in independent source clones using real configurable port/check/fresh-review commands. The default is candidate-only. An explicit owner-approved `promotion` configuration additionally publishes the exact verified export through an own-repository branch, exact-head GitHub CI and fast-forward main, and can replace a configured Linux/herdr Dori with a health-checked managed release. Work, session references, intake and model policy remain in place; failed startup restores the prior execution source when safe. See [configuration, supervision and recovery](skills/dori-mode/references/scripts.md#staged-dori-updates), the [staging example](examples/update.config.json) and the [external supervisor unit](examples/update-supervisor.service). Installation never activates this policy; ULW remains pinned.
 
 Native automated workers and reviewers require exactly one provider-qualified `--model`; `--provider`, `--models`, duplicates and implicit or bare models are rejected at configuration load. Every configured `--mode` must be `json`. The controller supplies role-specific multiline literals through OMP's `--system-prompt` and `--append-system-prompt`, so project and ancestor `SYSTEM.md`, `APPEND_SYSTEM.md` and `SYSTEM_TEMPLATE.md` files remain task data. Configured system/template/profile/alias/extension/hook/trusted-extension/Dori-role overrides are rejected before any worker or check starts, while `modelAgentDir` stays a trusted reference without credential copies. This boundary isolates paths and environment; it is not an OS sandbox.
 
@@ -46,14 +48,14 @@ Slack, Discord and Telegram are implemented in `skills/dori-mode/scripts/src/mes
 | Post and edit in place | Yes, and reply in threads | Yes; mentions in the text never ping anyone | Yes, plain or HTML with tables |
 | Threads | Slack threads | Start, rename and archive threads | Forum topics: create, rename, close, reopen |
 | Typing and streaming | | Typing indicator | Typing indicator, and a draft that grows while the answer is written, starting as "Thinking…" |
-| Inbound, how your messages arrive | `dori inbound slack`: the Threads view, every thread the Dori posted in (tagged or not), and unread DMs, group DMs and mentions | Your messenger tooling's watch | `dori inbound telegram`: a long poll that passes only the owner's messages, DMs and one group (one topic of it when `DORI_TELEGRAM_TOPIC_ID` is set), edits included, media as file ids |
+| Inbound, how your messages arrive | `dori inbound slack`: the Threads view, every thread the Dori posted in (tagged or not), and unread DMs, group DMs and mentions | `dori inbound discord`: native bot REST polling, owner-only text in one configured channel, persistent cursor | `dori inbound telegram`: a long poll that passes only the owner's messages, DMs and one group (one topic of it when `DORI_TELEGRAM_TOPIC_ID` is set), edits included, media as file ids |
 | Presence | `dori presence slack` keeps a member account shown online | `dori presence discord` identifies on the gateway as online | |
 | Files | Upload from the library | | File ids on inbound media |
-| Tokens | `DORI_SLACK_TOKEN`, plus `DORI_SLACK_COOKIE` for a user token | `DORI_DISCORD_TOKEN` | `DORI_TELEGRAM_TOKEN`, `DORI_TELEGRAM_OWNER_ID`, and optionally `DORI_TELEGRAM_GROUP_ID` and `DORI_TELEGRAM_TOPIC_ID` |
+| Tokens / intake scope | `DORI_SLACK_TOKEN`, plus `DORI_SLACK_COOKIE` for a user token | `DORI_DISCORD_TOKEN`; intake also requires `DORI_DISCORD_OWNER_ID` and `DORI_DISCORD_CHANNEL_ID` | `DORI_TELEGRAM_TOKEN`, `DORI_TELEGRAM_OWNER_ID`, and optionally `DORI_TELEGRAM_GROUP_ID` and `DORI_TELEGRAM_TOPIC_ID` |
 
 On Slack you choose at setup how Dori appears. With a user token he is a real member: a paid seat, he sees everything that member sees, and he can hold a green online dot. With a bot token he is an app: no seat, only the channels he is invited to, within the scopes you grant.
 
-Creating the bot and finishing its login goes through [agent-messenger](https://github.com/agent-messenger/agent-messenger). The helpers in the table call each platform's API directly, retry rate limits with the server's wait time, and refuse any text containing `$(`, since message text is data and never passes through a shell. On every platform, `dori transcribe` turns a voice note into text through the command you configure as `hooks.transcribe`. There is no Teams, WhatsApp, LINE, WeChat, iMessage, KakaoTalk or Lark support in this repository, and `dori send` refuses a channel it does not know.
+For the supported Discord preview, create/invite your own bot through the [Discord Developer Portal](https://discord.com/developers/applications) and use the shipped native Dori commands; Node and agent-messenger are not required for this text flow. [agent-messenger](https://github.com/agent-messenger/agent-messenger) remains optional tooling for other platform workflows. The helpers in the table call each platform's API directly, retry rate limits with the server's wait time, and refuse any text containing `$(`, since message text is data and never passes through a shell. On every platform, `dori transcribe` turns a voice note into text through the command you configure as `hooks.transcribe`. There is no Teams, WhatsApp, LINE, WeChat, iMessage, KakaoTalk or Lark support in this repository, and `dori send` refuses a channel it does not know.
 
 `dori send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]` posts or edits a message from the shell. The same classes (`Slack`, `Discord`, `Telegram`) are importable modules that take their HTTP client and clock as arguments (the typing and presence helpers take timers), which is how the tests run without the network.
 
@@ -61,30 +63,59 @@ Creating the bot and finishing its login goes through [agent-messenger](https://
 
 `dori` belongs to the skill CLI. Use `dori harness ...` for every harness command below: skill `dori send` posts to a messenger, while `dori harness send` delivers to an agent session; skill `dori report` and harness `dori harness report` also have different flags. Root `bun link` exposes only `dori-harness`, so it does not replace the skill command. The root CLI remains callable directly with `bun src/cli.ts`.
 
-### Dori mode, the bot you talk to
+### Install the verified preview
 
-You need Bun 1.4.4 or newer, native OMP 18.18.8 or newer, git, herdr or hc, and the GitHub CLI `gh`. With herdr, install its OMP integration using `herdr integration install omp`. In hc role sessions the extension emits native OSC 7501 status; see [runtime prerequisites](docs/runtime.md#status).
+Have git, [Bun](https://bun.sh) 1.4.4, [native OMP](https://github.com/can1357/oh-my-pi) 18.18.8 and [herdr](https://github.com/herdrdev/herdr) installed on Linux x64 and on `PATH`. The installer does not install or upgrade this toolchain. Download tools in this example are `curl`, `sha256sum` and `tar`. Installing or updating a release needs no `gh`, GitHub write permission or porting-model calls; AI use later needs your own provider authentication.
+
+Check that the release belongs to **`vntrevx/omp-dori`** and is tagged **`v0.1.0`**. Download all four assets from that exact release and verify the checksums before running its installer:
 
 ```sh
-git clone https://github.com/vntrevx/omp-dori.git "$HOME/.dori/src"
-bash "$HOME/.dori/src/install.sh"
+download_dir="$(mktemp -d)" || exit 1
+cd "$download_dir" || exit 1
+release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.0"
+for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.0.tar.gz; do
+  curl --proto '=https' --tlsv1.2 -fL "$release_url/$asset" -o "$asset" || exit 1
+done
+sha256sum --check SHA256SUMS || exit 1
+bash ./install.sh --version v0.1.0 --from "$download_dir" || exit 1
+"$HOME/.dori/bin/dori" --version
+export PATH="$HOME/.dori/bin:$PATH"
 ```
 
-For an existing installation, run its `install.sh` instead of cloning over the directory. The installer updates its checkout only by fast-forward, installs locked package dependencies, links the skill into `$HOME/.agents/skills/dori-mode`, links the extension into `$HOME/.omp/agent/extensions/omp-dori`, installs only the skill's `dori` bin, and creates an example `$HOME/.dori/config.json` when missing. It fetches public omp-ulw at the lock revision, or accepts an explicit `OMP_ULW_SRC`; `DORI_SRC`, `SKILLS_DIR` and `OMP_EXTENSIONS_DIR` override the source and link destinations. Keep the complete checkout: the skill and extension import sibling root runtime modules. To install a local checkout without pulling, use `DORI_NO_PULL=1 DORI_SRC="$PWD" bash install.sh`; isolate `HOME`, `DORI_HOME`, `DORI_CONFIG` and `DORI_STATE_DIR` together when testing.
+Keep the PATH export in your shell configuration if desired. The explicit launcher is always `~/.dori/bin/dori`; no global `bun link` is needed. Checksums bind the downloaded files together; the trusted identity comes from the canonical HTTPS repository/release. The installer also checks the tag, commit/tree, archive and extracted source manifest. There is no detached-signature claim. `DORI_RELEASE=v0.1.0 bash ./install.sh` selects the same preview explicitly for a network install; a default latest request selects stable releases only and can report that none exists.
 
-Edit `runtime`, `leadPane`, `laneWorkspace`, `defaultCwd`, the provider-qualified `defaultModel` and messenger hooks for your installation. Start `omp --dori-role dori` inside the selected runtime and tell it: Dori mode. It asks what to call it (plain Dori, ShipDori or WorkDori, so several can run side by side), asks which messenger, and guides bot creation/login and read-only onboarding with permission per tool. Installation itself starts no messenger, presence writer, watcher or harness.
+The installer creates config only when absent, preserves existing configuration/authentication/work/session data, fetches public omp-ulw at [`omp-ulw.lock`](omp-ulw.lock), and routes the CLI, skill and extension through the single `~/.dori/src` release pointer. Existing unmanaged source directories or conflicting non-link destinations are held for inspection. `--from` supplies local Dori assets; first-time pinned dependency retrieval can still need anonymous network access. See [layout, migration and troubleshooting](docs/releases.md).
+
+### Authenticate and start, explicitly
+
+Use your own OMP provider account and your own Discord application/bot credentials. Configure `runtime` as `"herdr"`, `leadPane`, `laneWorkspace`, `defaultCwd`, a provider-qualified `defaultModel` you can use, and messenger hooks in `~/.dori/config.json`; retain the installer's dependency paths. Create/invite the bot through the [Discord Developer Portal](https://discord.com/developers/applications), grant its channel permissions and enable Message Content Intent. Keep its token in an owned mode-0600 file and load it only in the chosen monitor children. The [setup guide](skills/dori-mode/references/setup.md) covers the native bot path; no maintainer credentials, Node or external messenger watcher are required.
+
+Run `herdr integration install omp`. Before starting OMP inside herdr, set the non-secret decimal-string `DORI_DISCORD_OWNER_ID` and `DORI_DISCORD_CHANNEL_ID` in that shell; the latter is the exact channel or thread to receive. Then start `omp --dori-role dori` and tell it: Dori mode. Choose its name and permitted onboarding tools. Starting AI sessions can use your provider quota.
+
+Explicitly enable `dori inbound discord` under that session's native `monitor` tool, using the [child-only token-file argv recipe](docs/releases.md#discord-owner-intake). It polls every three seconds by default; `--loop` is in minutes (`--loop 0.1` is six seconds, `--loop 0` is one-shot). On first start it records the latest message without replaying history: wait for `INBOUND_READY discord ...`, then send a fresh owner message. Subsequent owner text is emitted as `INBOUND discord ...` and the committed per-channel cursor survives restart. No private helper or external messenger watcher is needed.
+
+Discord REST intake and message sending do not keep a bot shown online. To keep it online while Dori is in use, separately supervise `dori presence discord` with the native `monitor` tool using its [child-only token-file recipe](docs/releases.md#discord-online-presence). Keep the Gateway process running. Intentionally stopping its monitor makes the bot go offline; stopping intake alone does not change presence. Installation and updates never enable either monitor or restore an explicitly stopped watcher.
 
 The operating contract is [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md); setup, sessions, the done protocol and every command are in its [`references/`](skills/dori-mode/references/).
+
+### Consumer updates and rollback
+
+```sh
+dori update check --version v0.1.0
+dori update install --version v0.1.0
+dori update status
+dori update rollback
+```
+
+The API is `dori update <check|install|status|rollback> [--version TAG] [--from DIST]`. Use `--from` with `check` or `install` for a verified local asset directory. `rollback` restores the retained previous release; an optional `--version` asserts its exact tag. `status` and `rollback` do not accept `--from`. Consumers take fixed releases, never arbitrary `main`, and need no upstream port/review models or repository write access.
+
+Plan downtime before installation, update or rollback: activation holds while a live Dori is detected, including an idle one. Explicitly stop its monitors and end its owning session using your normal runtime controls, inspect status, then retry. The release command does not kill or restart Dori. Failed verification leaves the previous source active; rollback verifies the retained previous release and switches source without rewriting user config or resuming monitors. See [update limits and recovery](docs/releases.md#updates-and-rollback).
 
 ### The harness
 
 Use the same prerequisites and extension/omp-ulw installation as Dori mode. `gh` supplies PR head SHAs, checks and merges. The following commands start real sessions and loops; do not start a second harness against an existing installation's runtime and state.
 
-```sh
-# For development from the installed checkout:
-bun install --frozen-lockfile
-# Optional: bun link exposes dori-harness, never the primary dori bin.
-```
+Source development uses a separate checkout and [`scripts/install-source.sh`](scripts/install-source.sh); see [maintainer installation](docs/releases.md#source-checkouts-for-maintainers). Do not run source-install or dependency-editing commands inside a frozen consumer release.
 
 Start the chosen runtime's server, then:
 
@@ -286,7 +317,7 @@ Harness records live under `DORI_HOME` (default `~/.dori`); skill registry, repo
 
 ## Run it in a container
 
-[`examples/container/`](examples/container/) provides a container recipe with gh, Node, Bun 1.4.4, herdr or hc, agent-messenger, OMP 18.18.8, the extension and omp-ulw at the lock revision. The build context is this checkout; it never clones an old Dori release. Binary downloads retain pinned sha256 checks, npm packages have exact top-level versions, and source package installs use their locks. The native installer is the verified installation path; the container recipe is not a published or independently validated image. Named volumes keep isolated state and interactive logins; startup runs only the terminal runtime server and an idle command. See [`docs/container.md`](docs/container.md) for inputs, commands and acceptance steps.
+[`examples/container/`](examples/container/) provides a maintainer source-container recipe with gh, Node, Bun 1.4.4, herdr or hc, agent-messenger, OMP 18.18.8, the extension and omp-ulw at the lock revision. The build context is this checkout; it never clones an old Dori release. Binary downloads retain pinned sha256 checks, npm packages have exact top-level versions, and source package installs use their locks. Public consumers use the verified release installer above; this recipe is not a published or independently validated consumer image. Named volumes keep isolated state and interactive logins; startup runs only the terminal runtime server and an idle command. See [`docs/container.md`](docs/container.md) for inputs, commands and acceptance steps.
 
 ## Telemetry
 
@@ -305,6 +336,8 @@ dori sends anonymous usage counts the same way omo does: OTLP/HTTP JSON logs to 
 Every record also carries the service name and version, the install hash, a CI flag, the OS type and version, and the CPU architecture. Never sent: paths, repo names, PR numbers, lane keys, briefs, messages or any other text. A command waits at most 2 seconds for the send, and a telemetry failure never fails a command.
 
 ## Tests and development
+
+Use [source-checkout installation](docs/releases.md#source-checkouts-for-maintainers) for development. Maintainers port with `dori upstream ... --config FILE`, then [build and publish fixed releases](docs/releases.md#building-and-publishing-releases); consumers use `dori update`.
 
 ```sh
 bun install --frozen-lockfile

@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { discordPresence } from "../src/messenger/discord.ts";
 import type { Http, HttpRequest, HttpResponse } from "../src/messenger/http.ts";
 import { Slack } from "../src/messenger/slack.ts";
 import { slackPresence } from "../src/messenger/slack-presence.ts";
@@ -127,34 +126,4 @@ test("Slack presence opens one client-type socket with the cookie, then only tic
   expect(
     seen.filter((r) => r.url.endsWith("users.setPresence")).map((r) => JSON.parse(String(r.body)).presence),
   ).toEqual(["auto", "away"]);
-});
-
-test("Discord presence identifies as online after hello, heartbeats with the last sequence, and stops beating on close", () => {
-  const sent: string[] = [];
-  let onMsg: (d: string) => void = () => {};
-  const t = fakeTimers();
-  let closed = false;
-  const p = discordPresence(
-    () => ({
-      send: (d) => sent.push(d),
-      close: () => {
-        closed = true;
-      },
-      onMessage: (cb) => {
-        onMsg = cb;
-      },
-    }),
-    "BOT",
-    t.timers,
-  );
-  onMsg(JSON.stringify({ op: 10, d: { heartbeat_interval: 41250 } }));
-  onMsg(JSON.stringify({ op: 0, s: 3, t: "READY", d: {} }));
-  t.fire();
-  const identify = JSON.parse(sent[0] ?? "{}");
-  expect(identify.op).toBe(2);
-  expect(identify.d.presence.status).toBe("online");
-  expect(JSON.parse(sent[1] ?? "{}")).toEqual({ op: 1, d: 3 });
-  p.close();
-  expect(closed).toBe(true);
-  expect(t.live.size).toBe(0);
 });
