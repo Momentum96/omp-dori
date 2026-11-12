@@ -42,6 +42,7 @@ export function setup() {
   writeFileSync(join(upstream, "extension/index.ts"), "export default () => {};\n");
   mkdirSync(ulw);
   writeFileSync(join(ulw, "index.ts"), "export default () => {};\n");
+  writeFileSync(join(ulw, "presets.ts"), "export {};\n");
   writeFileSync(join(upstream, cli), "v1\n");
   writeFileSync(join(upstream, "omp-ulw.lock"), "0000000000000000000000000000000000000000\n");
   writeFileSync(join(upstream, "skills/dori-mode/SKILL.md"), skillFixture);

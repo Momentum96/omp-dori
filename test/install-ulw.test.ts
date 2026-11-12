@@ -70,12 +70,17 @@ test("an OMP older than omp-ulw main needs gets the lock revision unless OMP_ULW
   expect(ulwHead()).toBe(latest);
 });
 
+const ulwCheckout = (dir: string) => {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "index.ts"), "export default () => {};\n");
+  writeFileSync(join(dir, "presets.ts"), "export {};\n");
+};
+
 test("a standalone omp-ulw extension is reused: no second checkout and no second import", () => {
-  // Given an omp-ulw package already installed as an OMP extension.
+  // Given omp-ulw installed as an OMP extension by hand, at a revision from before it had a package.json.
   const { home, config, install } = withUlwRemote();
   const standalone = join(home, "extensions/omp-ulw");
-  mkdirSync(standalone, { recursive: true });
-  writeFileSync(join(standalone, "package.json"), '{ "name": "omp-ulw" }\n');
+  ulwCheckout(standalone);
   // When install.sh runs.
   const r = install();
   // Then omp-dori clones nothing and its config leaves omp-ulw to that extension.
@@ -83,4 +88,34 @@ test("a standalone omp-ulw extension is reused: no second checkout and no second
   expect(r.err).toContain(`standalone extension at ${standalone}`);
   expect(existsSync(join(home, ".dori/omp-ulw"))).toBe(false);
   expect(config().ompUlwPath).toBe("");
+});
+
+test("a config that points ompUlwPath at its own checkout keeps that checkout, now as the extension", () => {
+  // Given a config whose ompUlwPath is a checkout of the owner's own.
+  const { home, config, install } = withUlwRemote();
+  const own = join(home, "my-ulw");
+  ulwCheckout(own);
+  mkdirSync(join(home, ".dori"));
+  writeFileSync(join(home, ".dori/.omp-dori"), "primary\n");
+  writeFileSync(join(home, ".dori/config.json"), JSON.stringify({ ompUlwPath: join(own, "index.ts") }));
+  // When install.sh runs; then nothing is cloned, that checkout is the extension, and the import path is emptied.
+  const r = install();
+  expect(r.code).toBe(0);
+  expect(r.err).toContain(`config.json points at ${own}`);
+  expect(existsSync(join(home, ".dori/omp-ulw"))).toBe(false);
+  expect(readlinkSync(join(home, "extensions/omp-ulw"))).toBe(own);
+  expect(config().ompUlwPath).toBe("");
+});
+
+test("a standalone omp-ulw added after an install replaces the installer's own link", () => {
+  // Given an install that linked its omp-ulw checkout, and a standalone omp-ulw added later.
+  const { home, install } = withUlwRemote();
+  expect(install().code).toBe(0);
+  expect(readlinkSync(join(home, "extensions/omp-ulw"))).toBe(join(home, ".dori/omp-ulw"));
+  ulwCheckout(join(home, "extensions/omp-ulw-main"));
+  // When install.sh runs again; then the standalone is used and the earlier link is gone, so omp-ulw loads once.
+  const r = install();
+  expect(r.code).toBe(0);
+  expect(r.err).toContain("standalone extension at " + join(home, "extensions/omp-ulw-main"));
+  expect(existsSync(join(home, "extensions/omp-ulw"))).toBe(false);
 });

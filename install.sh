@@ -121,21 +121,42 @@ if [ "$mode" = primary ] && [ -n "$other" ]; then
   echo "The previous config.json and link targets are kept in $backup" >&2
 fi
 
+# An omp-ulw checkout of any revision has these two files; package.json only arrived in 2026-11.
+is_ulw() { [ -f "$1/index.ts" ] && [ -f "$1/presets.ts" ]; }
+ulw_explicit="${OMP_ULW_SRC:+1}"
+if [ -z "$ulw_explicit" ] && [ -f "$base/config.json" ]; then
+  # A config that points ompUlwPath somewhere of its own keeps that checkout; only the default moves with the installer.
+  custom_ulw="$(CONFIG="$base/config.json" ULW_DIR="$ulw" bun -e '
+    const config = await Bun.file(process.env.CONFIG).json();
+    const path = typeof config.ompUlwPath === "string" ? config.ompUlwPath.replace(/^~(?=\/|$)/, process.env.HOME) : "";
+    const dir = path.replace(/\/[^/]*$/, "");
+    if (path && path !== process.env.HOME + "/.dori/omp-ulw/index.ts" && dir !== process.env.ULW_DIR) console.log(dir);')"
+  if [ -n "$custom_ulw" ]; then
+    ulw="$custom_ulw"
+    ulw_explicit=1
+    echo "omp-ulw: config.json points at $custom_ulw; installing that checkout as the extension." >&2
+  fi
+fi
 standalone_ulw=""
-if [ "$mode" = primary ] && [ -z "${OMP_ULW_SRC:-}" ]; then
+if [ "$mode" = primary ] && [ -z "$ulw_explicit" ]; then
   for entry in "$extensions"/*; do
-    if [ "$entry" != "$extensions/omp-dori" ] && [ "$(readlink "$entry")" != "$ulw" ] &&
-      [ -f "$entry/package.json" ] && grep -q '"name": *"omp-ulw"' "$entry/package.json"; then
+    [ "$entry" != "$extensions/omp-dori" ] || continue
+    [ "$(readlink "$entry" 2>/dev/null)" != "$ulw" ] || continue
+    if is_ulw "$entry"; then
       standalone_ulw="$entry"
       break
     fi
   done
 fi
 
-if [ -n "${OMP_ULW_SRC:-}" ]; then
-  [ -f "$ulw/index.ts" ] || fail "OMP_ULW_SRC=$ulw has no index.ts"
+if [ -n "$ulw_explicit" ]; then
+  is_ulw "$ulw" || fail "$ulw is not an omp-ulw checkout (no index.ts and presets.ts)"
 elif [ -n "$standalone_ulw" ]; then
   echo "omp-ulw: using the standalone extension at $standalone_ulw; omp-dori does not load a second copy." >&2
+  if [ "$(readlink "$extensions/omp-ulw" 2>/dev/null)" = "$ulw" ]; then
+    rm "$extensions/omp-ulw"
+    echo "omp-ulw: removed the earlier $extensions/omp-ulw link so omp-ulw loads once." >&2
+  fi
 else
   [ -d "$ulw/.git" ] || git clone --quiet "$ulw_repo" "$ulw"
   git -C "$ulw" fetch --quiet origin
