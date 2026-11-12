@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -89,7 +90,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 export function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "dori-consumer-"));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "dori-consumer-")));
   roots.push(root);
   const paths = consumerPaths(join(root, "home"));
   initialize(paths);
