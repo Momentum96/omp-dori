@@ -34,4 +34,6 @@ The port retains messenger/lane commands, host and heavy-slot guards, claim-done
 
 CI coverage for macOS/hc is distinct from supported live consumer behavior. A source test, isolated runtime fixture, clean install/recovery run and actual messenger intake/reply establish different things. This changelog is not a claim that a future QA run passed, a model/provider was exercised, an independent external-user beta took place or an asset was published. Actual release QA, exact-head CI and publication readback belong with that release's evidence.
 
+The terminal-admission integration group uses a test-local 20-second budget for two distinct real Git/fsync candidate lifecycles. Runtime command deadlines, assertion coverage and the default budget of unrelated tests are unchanged.
+
 The Sustainable Use License, OMP attribution in `LICENSE.omp-dori`, `NOTICE`, public dependency pin and third-party notices remain unchanged.
