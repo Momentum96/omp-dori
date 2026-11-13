@@ -116,7 +116,9 @@ API는 `dori update <check|install|status|rollback> [--version TAG] [--from DIST
 
 ### Maintainer 소스 설치와 harness
 
-소스 checkout 설치는 별도 `scripts/install-source.sh`로 옮겼습니다. [maintainer 설치](docs/releases.md#source-checkouts-for-maintainers)는 기존 fast-forward·lock·명시적 경로 override 동작을 설명합니다. frozen 소비자 릴리스에서 소스 설치기를 실행하지 마세요.
+소스 checkout 설치는 별도 `scripts/install-source.sh`를 사용합니다. [maintainer 설치](docs/releases.md#source-checkouts-for-maintainers)는 fast-forward와 경로 override를 설명합니다. 관리되는 소스 omp-ulw는 OMP 18.19+에서 최신 `main`을 따르며, 이전 지원 OMP에서는 ref를 생략한 경우 `omp-ulw.lock`으로 고정합니다. 명시적 `OMP_ULW_REF`는 OMP 버전과 관계없이 `lock`·branch·tag·commit을 선택하고, `OMP_ULW_REPO`는 저장소를 선택합니다. `OMP_ULW_SRC`나 기존 custom `ompUlwPath`는 해당 checkout을 fetch 없이 재사용합니다. 소비자 릴리스는 manifest와 lock에 묶인 의존성 pin을 유지합니다. frozen 소비자 릴리스에서 소스 설치기를 실행하지 마세요.
+
+소스 config의 `ompUlwPath`는 `""`로 비워 OMP가 omp-ulw를 한 번 로드합니다. `primary`의 global omp-ulw 확장은 Dori 역할이 없는 일반 OMP 세션에도 적용되고, `side`는 격리 wrapper에서만 명시적으로 로드합니다. side의 외부 checkout 선택은 재설치에도 보존되며, 기존 `<OMP_DORI_HOME>/omp-ulw`를 `OMP_ULW_SRC`로 다시 선택하면 이전 보존 링크를 지워 다음 설치부터 관리 ref를 따릅니다.
 
 전체 harness를 별도로 평가할 때는 선택한 runtime server를 시작한 뒤 아래 진입점을 사용합니다. `up`은 실제 lead/duty 및 두 loop를 시작합니다.
 
@@ -132,7 +134,7 @@ dori harness status
 
 `dori upstream <check|stage|watch|status|snapshot|restore|recover|restart> --config FILE`의 기본 동작은 격리 포팅·검사·새 리뷰 후 후보 생성입니다. 소비자 `dori update`와 다른 maintainer 기능이며 포팅·리뷰에는 설정한 모델 인증과 사용량이 필요합니다. 소유자가 별도 `promotion` 정책을 승인하고 설정하면, 검증된 정확한 소스만 자체 저장소 branch에 커밋·푸시하고 해당 head의 GitHub CI 통과 후 main을 fast-forward합니다. Linux/herdr용 managed 배포는 기존 작업·세션 참조·커서·모델 정책을 유지하며 운영 소스를 교체하고 monitor·수신 heartbeat까지 확인합니다. 실패 시 가능한 범위에서 이전 실행본을 복원하며, 승인 창·새 작업·불명확한 프로세스에는 강제로 개입하지 않습니다.
 
-상시 배포 controller는 교체 대상 Dori의 자식 monitor가 아니라 외부 supervisor로 실행해야 합니다. [설정·검증·원복 계약](skills/dori-mode/references/scripts.md#staged-dori-updates)과 [systemd user unit](examples/update-supervisor.service)을 따르세요. 설치 자체는 이 정책을 켜지 않으며 global Bun·모델 설정·ULW는 변경하지 않습니다. GitHub main 발행과 실제 운영 교체는 서로 다른 기록입니다. 과거 실제 커밋 재생 실증을 미래 upstream 업데이트가 발생한 것으로 표현하면 안 됩니다.
+상시 배포 controller는 교체 대상 Dori의 자식 monitor가 아니라 외부 supervisor로 실행해야 합니다. [설정·검증·원복 계약](skills/dori-mode/references/scripts.md#staged-dori-updates)과 [systemd user unit](examples/update-supervisor.service)을 따르세요. 소비자 릴리스 설치 자체는 이 정책을 켜지 않으며 global Bun·모델 설정·ULW는 변경하지 않습니다. GitHub main 발행과 실제 운영 교체는 서로 다른 기록입니다. 과거 실제 커밋 재생 실증을 미래 upstream 업데이트가 발생한 것으로 표현하면 안 됩니다.
 
 공개 릴리스 제작 명령은 `bun scripts/release.ts build --out DIST --prerelease`입니다. canonical 버전은 root `package.json`이며 실제 committed HEAD의 공개 소스만 포장합니다. tag workflow는 정확한 commit의 신뢰하는 `check`, `test-macos`, `e2e-herdr`, `e2e-hc` 성공을 확인한 뒤 고정 asset을 게시합니다. 절차와 증거 범위는 [릴리스 제작](docs/releases.md#building-and-publishing-releases)에 있습니다.
 

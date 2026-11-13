@@ -1,31 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { git, setup } from "./install-setup.ts";
-
-// A local omp-ulw remote with one commit per call, and omp-dori's lock pointing at its first commit.
-function withUlwRemote() {
-  const s = setup();
-  const remote = join(s.root, "ulw-remote");
-  mkdirSync(remote);
-  git(remote, "init", "-q", "-b", "main");
-  writeFileSync(join(remote, "presets.ts"), "export {};\n");
-  const commit = (text: string): string => {
-    writeFileSync(join(remote, "index.ts"), `export default () => {}; // ${text}\n`);
-    git(remote, "add", ".");
-    git(remote, "commit", "-qm", text);
-    return git(remote, "rev-parse", "HEAD");
-  };
-  const first = commit("u1");
-  writeFileSync(join(s.upstream, "omp-ulw.lock"), `${first}\n`);
-  git(s.upstream, "add", "omp-ulw.lock");
-  git(s.upstream, "commit", "-qm", "lock");
-  const config = () => JSON.parse(readFileSync(join(s.home, ".dori/config.json"), "utf8"));
-  const ulwHead = () => git(join(s.home, ".dori/omp-ulw"), "rev-parse", "HEAD");
-  const install = (extra: Record<string, string> = {}) =>
-    s.install({ OMP_ULW_SRC: "", OMP_ULW_REPO: remote, ...extra });
-  return { ...s, remote, first, commit, config, ulwHead, install };
-}
+import { git, withUlwRemote } from "./install-setup.ts";
 
 test("by default omp-ulw follows its latest main, not the lock", () => {
   // Given an omp-ulw remote whose main is one commit past the lock.
