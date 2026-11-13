@@ -8,7 +8,7 @@ Il tuo ingegnere 24/7, nella chat che usi già.
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | Italiano
 
-> **Candidata alla prima anteprima pubblica OMP `v0.1.2`: Linux x64, herdr e Discord.** Non ancora pubblicata; QA della release e verifica della pubblicazione restano da eseguire. Le versioni testate sono Bun 1.4.4 e OMP nativo 18.18.8, anche versioni minime. macOS/hc hanno copertura CI, distinta dal supporto all'uso reale di questa prima anteprima. Fanno fede [English](README.md), [한국어](README.ko.md) e la [guida a installazione e supporto](docs/releases.md). Non viene dichiarata una beta indipendente con utenti esterni.
+> **Anteprima OMP `v0.1.2`: Linux x64, herdr e Discord.** Le versioni testate sono Bun 1.4.4 e OMP nativo 18.18.8, anche versioni minime. macOS/hc hanno copertura CI, distinta dal supporto all'uso reale di questa prima anteprima. Fanno fede [English](README.md), [한국어](README.ko.md) e la [guida a installazione e supporto](docs/releases.md). Non viene dichiarata una beta indipendente con utenti esterni.
 >
 > Il resto della traduzione conserva il [riferimento upstream `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.it.md). Le descrizioni storiche di omo e dell'architettura non sono istruzioni attuali per installare la versione OMP.
 

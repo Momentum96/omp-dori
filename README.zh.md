@@ -8,7 +8,7 @@
 
 [English](README.md) | 简体中文 | [Deutsch](README.de.md) | [日本語](README.ja.md) | [Italiano](README.it.md)
 
-> **OMP 首个公开预览候选版 `v0.1.2` 面向 Linux x64 / herdr / Discord。** 目前尚未发布；release QA 和发布回读仍待完成。测试基准为 Bun 1.4.4、native OMP 18.18.8，最低版本也分别相同。macOS/hc 的 CI 覆盖与首版实际消费者支持范围分开说明。以 [English](README.md)、[한국어](README.ko.md) 和[安装与支持指南](docs/releases.md)为准；没有宣称完成独立外部用户 beta。
+> **OMP 预览版 `v0.1.2` 面向 Linux x64 / herdr / Discord。** 测试基准为 Bun 1.4.4、native OMP 18.18.8，最低版本也分别相同。macOS/hc 的 CI 覆盖与首版实际消费者支持范围分开说明。以 [English](README.md)、[한국어](README.ko.md) 和[安装与支持指南](docs/releases.md)为准；没有宣称完成独立外部用户 beta。
 >
 > 其余译文保留 [upstream `97d807b` 的历史参考](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.zh.md)。历史 omo 和架构说明并非当前 OMP 版安装步骤。
 

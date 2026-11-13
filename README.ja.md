@@ -8,7 +8,7 @@
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | 日本語 | [Italiano](README.it.md)
 
-> **OMP 初公開プレビュー候補 `v0.1.2` の対象は Linux x64 / herdr / Discord です。** まだ未公開で、release QA と公開結果の確認は未実施です。テスト基準は Bun 1.4.4、native OMP 18.18.8 で、最低バージョンも同じです。macOS/hc の CI 対象と、この初版の実運用サポート範囲は区別します。正式な手順は [English](README.md)、[한국어](README.ko.md)、[インストール・サポートガイド](docs/releases.md)を参照してください。独立した外部ユーザー beta の実施は主張していません。
+> **OMP プレビュー `v0.1.2` の対象は Linux x64 / herdr / Discord です。** テスト基準は Bun 1.4.4、native OMP 18.18.8 で、最低バージョンも同じです。macOS/hc の CI 対象と、この初版の実運用サポート範囲は区別します。正式な手順は [English](README.md)、[한국어](README.ko.md)、[インストール・サポートガイド](docs/releases.md)を参照してください。独立した外部ユーザー beta の実施は主張していません。
 >
 > 残りの翻訳は [upstream `97d807b` の参考資料](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md)を保持しています。歴史的な omo・構成の説明は、現在の OMP 版のインストール手順ではありません。
 

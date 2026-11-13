@@ -6,7 +6,7 @@
 
 [English](README.md) | 한국어
 
-**첫 공개 릴리스 후보 `v0.1.2`는 Linux x64 / herdr / Discord용 GitHub prerelease로 준비 중입니다.** 아직 공개되지 않았으며 릴리스 QA와 공개 결과 확인이 남아 있습니다. 테스트한 기준은 Bun **1.4.4**, native OMP **18.18.8**이며 최소 버전도 각각 같습니다. 더 높은 모든 버전의 검증을 뜻하지 않습니다. macOS와 hc는 CI 범위와 소스 어댑터를 유지하지만 첫 공개판의 실제 소비자 지원 범위와는 구분합니다. Slack/Telegram 소스 기능도 보존합니다. 독립 외부 사용자 beta 완료나 모든 환경의 호환성을 보장하는 공개판은 아닙니다. [설치·지원 상세](docs/releases.md), [변경 기록](CHANGELOG.md), [예정된 정식 릴리스 경로](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.2)를 확인하세요.
+**`v0.1.2` GitHub prerelease의 지원 범위는 Linux x64 / herdr / Discord입니다.** 테스트한 기준은 Bun **1.4.4**, native OMP **18.18.8**이며 최소 버전도 각각 같습니다. 더 높은 모든 버전의 검증을 뜻하지 않습니다. macOS와 hc는 CI 범위와 소스 어댑터를 유지하지만 첫 공개판의 실제 소비자 지원 범위와는 구분합니다. Slack/Telegram 소스 기능도 보존합니다. 독립 외부 사용자 beta 완료나 모든 환경의 호환성을 보장하는 공개판은 아닙니다. [설치·지원 상세](docs/releases.md), [변경 기록](CHANGELOG.md), [`v0.1.2` 릴리스 경로](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.2)를 확인하세요.
 
 Dori는 Slack, Discord, Telegram에서 요청을 받아 일마다 별도의 코딩 세션을 열고, 완료 증거를 확인한 뒤 같은 대화에 보고하는 상시 엔지니어입니다. 이 저장소는 [sisyphuslabs/dori-superagent](https://github.com/sisyphuslabs/dori-superagent/tree/97d807b9037cb050a72129659cf6306d8055010d)의 전체 공개 소스를 OMP로 포트한 수정본입니다. 기준은 upstream `97d807b9037cb050a72129659cf6306d8055010d`, 기존 OMP 소스 `75a1b28de8caddb6d30b2e3d72ef3dec09450b47`입니다.
 
