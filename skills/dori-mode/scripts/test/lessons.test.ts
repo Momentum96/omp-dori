@@ -180,7 +180,7 @@ test("global and repo lessons have their own caps, so globals never push repo le
   // When selecting for this repo and for an unrelated one.
   const here = lessons.forRepo("/repo").lessons;
   const elsewhere = lessons.forRepo("/unrelated").lessons;
-  // Then each kind keeps its own newest (4 global, 8 repo), and only the globals reach the other repo.
+  // Then each kind keeps its own newest (12 global, 8 repo), and only the globals reach the other repo.
   const newestGlobals = globals
     .slice(-GLOBAL_LESSON_CAP)
     .reverse()
@@ -193,6 +193,12 @@ test("global and repo lessons have their own caps, so globals never push repo le
       .map((lesson) => lesson.id),
   ]);
   expect(elsewhere.map((lesson) => lesson.id)).toEqual(newestGlobals);
+  // Nothing over a cap is ever out of sight: the oldest global and the two extra repo lessons are named as omitted.
+  expect(lessons.forRepo("/repo").omitted.map((lesson) => lesson.rule)).toEqual([
+    "Clean up heavy job data right away",
+    "Rule 1",
+    "Rule 0",
+  ]);
   const global = globals[0];
   if (!global) throw new Error("no global lesson added");
   expect(global).toEqual({

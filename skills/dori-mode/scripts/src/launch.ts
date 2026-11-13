@@ -100,10 +100,14 @@ export const prepareLaunch = async (
     activityPaths: input.activityPaths ?? [],
   };
   // A damaged journal line is a warning: it must not keep a lane from starting or hide the lessons around it.
-  const { lessons, problems } = new Lessons(deps.config.stateDir).forRepo(cwd);
+  const { lessons, problems, omitted } = new Lessons(deps.config.stateDir).forRepo(cwd);
   return {
     lane: draft,
-    warnings: problems.map((problem) => `LESSON_WARNING ${problem}`),
+    // A lesson the cap kept out is named too: a brief that silently lacks a standing rule is the bug this catches.
+    warnings: [
+      ...problems.map((problem) => `LESSON_WARNING ${problem}`),
+      ...omitted.map((lesson) => `LESSON_OMITTED ${lesson.id} (${lesson.scope === "global" ? "global" : lesson.cwd}) ${lesson.rule}`),
+    ],
     preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities)}`,
   };
 };

@@ -3,6 +3,32 @@ import { guardText, type Http, MessengerError, withBackoff } from "./http.ts";
 
 export type TgTarget = { readonly chatId: number | string; readonly threadId?: number };
 
+/** Telegram rejects any message body over this many characters with "message is too long". */
+export const TELEGRAM_LIMIT = 4096;
+
+/**
+ * Break text into sendable bodies, each at most `limit` characters, without losing a character.
+ *
+ * A break is taken at a newline (or failing that a space) in the back half of the window, so a
+ * report splits between paragraphs instead of mid-sentence; text with no such break is cut hard.
+ * The parts concatenate back to the input exactly, which is what the tests pin.
+ */
+export const splitForTelegram = (text: string, limit = TELEGRAM_LIMIT): string[] => {
+  if (text.length <= limit) return [text];
+  const parts: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    const nl = window.lastIndexOf("\n");
+    const sp = window.lastIndexOf(" ");
+    const at = nl >= limit / 2 ? nl + 1 : sp >= limit / 2 ? sp + 1 : limit;
+    parts.push(rest.slice(0, at));
+    rest = rest.slice(at);
+  }
+  if (rest !== "") parts.push(rest);
+  return parts;
+};
+
 const retryAfter = (body: string): number | undefined => {
   try {
     const n = (JSON.parse(body) as { parameters?: { retry_after?: number } }).parameters?.retry_after;
@@ -49,20 +75,40 @@ export class Telegram {
   }
 
   async send(t: TgTarget, text: string, rich = false): Promise<number> {
-    const r = await this.call<{ message_id: number }>("sendMessage", {
-      ...this.where(t),
-      text: guardText(text),
-      ...(rich ? { parse_mode: "HTML" } : {}),
-    });
-    return r.message_id;
+    // Telegram refuses any body over its limit outright, so a long report is sent as its parts.
+    // The returned id is the last part's: that is the message an --edit would sensibly rewrite.
+    let last = 0;
+    for (const part of splitForTelegram(guardText(text))) {
+      const r = await this.call<{ message_id: number }>("sendMessage", {
+        ...this.where(t),
+        text: part,
+        ...(rich ? { parse_mode: "HTML" } : {}),
+      });
+      last = r.message_id;
+    }
+    return last;
   }
 
   async edit(t: TgTarget, messageId: number, text: string, rich = false): Promise<void> {
+    const parts = splitForTelegram(guardText(text));
     await this.call("editMessageText", {
       chat_id: t.chatId,
       message_id: messageId,
-      text: guardText(text),
+      text: parts[0] ?? "",
       ...(rich ? { parse_mode: "HTML" } : {}),
+    });
+    // An edit cannot grow past the limit either: the remainder goes out as new messages.
+    for (const part of parts.slice(1)) {
+      await this.call("sendMessage", { ...this.where(t), text: part, ...(rich ? { parse_mode: "HTML" } : {}) });
+    }
+  }
+
+  /** The read receipt: one reaction on the owner's message, replaced (not stacked) on a repeat. */
+  async react(t: TgTarget, messageId: number, emoji: string): Promise<void> {
+    await this.call("setMessageReaction", {
+      chat_id: t.chatId,
+      message_id: messageId,
+      reaction: [{ type: "emoji", emoji }],
     });
   }
 

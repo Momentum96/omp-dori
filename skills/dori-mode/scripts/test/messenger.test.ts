@@ -8,7 +8,7 @@ import {
   UnsafeMessageError,
 } from "../src/messenger/http.ts";
 import { Slack } from "../src/messenger/slack.ts";
-import { htmlTable, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
+import { htmlTable, splitForTelegram, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
 import { fakeClock } from "./fakes.ts";
 
 type Script = (req: HttpRequest, n: number) => HttpResponse;
@@ -154,4 +154,50 @@ test("Discord messages are sent without pinging anyone and edited in place; thre
     "POST /channels/C1/messages/M1/threads",
     "PATCH /channels/T1",
   ]);
+});
+
+test("a Telegram text over 4096 characters goes out as consecutive parts, losing nothing", async () => {
+  const { http, seen } = fakeHttp(() => ok({ ok: true, result: { message_id: 7 } }));
+  const tg = new Telegram(http, sleeps().clock, "b");
+  // Paragraphs of 200 characters: a break at a newline must be preferred over a hard cut.
+  const para = `${"x".repeat(199)}\n`;
+  const long = para.repeat(40); // 8000 characters
+  expect(await tg.send({ chatId: 1 }, long)).toBe(7);
+  const texts = seen.map((r) => JSON.parse(String(r.body)).text as string);
+  expect(texts.length).toBeGreaterThan(1);
+  expect(texts.every((t) => t.length <= 4096)).toBe(true);
+  expect(texts.join("")).toBe(long);
+  expect(seen.every((r) => r.url.endsWith("/sendMessage"))).toBe(true);
+});
+
+test("an over-long Telegram edit rewrites the target and posts the remainder as new messages", async () => {
+  const { http, seen } = fakeHttp(() => ok({ ok: true, result: { message_id: 8 } }));
+  const tg = new Telegram(http, sleeps().clock, "b");
+  const long = "y".repeat(5000);
+  await tg.edit({ chatId: 1 }, 42, long);
+  expect(seen.map((r) => r.url.split("/").at(-1))).toEqual(["editMessageText", "sendMessage"]);
+  expect(JSON.parse(String(seen[0]?.body)).message_id).toBe(42);
+  const texts = seen.map((r) => JSON.parse(String(r.body)).text as string);
+  expect(texts.every((t) => t.length <= 4096)).toBe(true);
+  expect(texts.join("")).toBe(long);
+});
+
+test("a Telegram split keeps short text whole and preserves the telegram comment line shape", () => {
+  expect(splitForTelegram("short")).toEqual(["short"]);
+  expect(splitForTelegram("")).toEqual([""]);
+  const exact = "z".repeat(4096);
+  expect(splitForTelegram(exact)).toEqual([exact]);
+  const one = "z".repeat(4097);
+  expect(splitForTelegram(one).map((p) => p.length)).toEqual([4096, 1]);
+});
+
+test("a read receipt puts one emoji reaction on the owner's message and replaces it on a repeat", async () => {
+  const { http, seen } = fakeHttp(() => ok({ ok: true, result: true }));
+  const tg = new Telegram(http, sleeps().clock, "b");
+  await tg.react({ chatId: 1 }, 55, "👀");
+  expect(JSON.parse(String(seen[0]?.body))).toEqual({
+    chat_id: 1,
+    message_id: 55,
+    reaction: [{ type: "emoji", emoji: "👀" }],
+  });
 });
