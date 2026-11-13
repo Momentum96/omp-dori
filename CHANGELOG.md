@@ -10,6 +10,8 @@ This is the first public-release interface for the OMP port. Live consumer suppo
 
 The producer now names the tag and commit identity explicitly in every draft mutation, including the release-update path that previously sent only the body, and reads back the known release ID instead of re-resolving a draft by tag. This is a producer interface change; consumer commands and the asset contract are unchanged.
 
+CLI output, release metadata and opt-in telemetry resource versions use the canonical root `package.json` version rather than independent copied version values.
+
 ### Release installation and recovery
 
 - The root `install.sh` installs an exact verified release instead of cloning or pulling arbitrary `main`. Select this preview explicitly with `--version v0.1.1` or `DORI_RELEASE=v0.1.1`; default latest selects stable releases only.
