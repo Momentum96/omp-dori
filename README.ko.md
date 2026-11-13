@@ -98,7 +98,7 @@ config는 없을 때만 만들고 기존 설정·인증·작업·세션을 보�
 
 `herdr integration install omp` 후 herdr shell에 비밀이 아닌 `DORI_DISCORD_OWNER_ID`, `DORI_DISCORD_CHANNEL_ID`를 양의 10진수 ID 문자열로 설정한 다음 `omp --dori-role dori`를 시작하고 "Dori mode"라고 말하세요. 채널 ID는 수신할 정확한 채널 또는 thread ID입니다. AI 세션은 본인 provider 사용량을 소비할 수 있습니다.
 
-그 OMP 세션의 native `monitor`에서 공개 `dori inbound discord`를 명시적으로 실행하세요. [토큰 파일을 자식 환경에서만 읽는 argv 예제](docs/releases.md#discord-owner-intake)를 사용합니다. 기본 polling은 3초이며 `--loop` 단위는 분입니다(`--loop 0.1`은 6초, `--loop 0`은 한 번). 최초 시작은 최신 메시지를 cursor로 저장하고 과거 대화를 재생하지 않으므로 `INBOUND_READY discord ...`를 확인한 뒤 새 owner 메시지를 보내세요. 이후 `INBOUND discord ...`로 owner 텍스트만 받고 채널별 cursor를 보존합니다. private helper나 외부 메신저 watcher는 필요하지 않습니다.
+그 OMP 세션의 native `monitor`에서 공개 `dori inbound discord`를 명시적으로 실행하세요. [토큰 파일을 자식 환경에서만 읽는 argv 예제](docs/releases.md#discord-owner-intake)를 사용합니다. 기본 polling은 3초이며 `--loop` 단위는 분입니다(`--loop 0.1`은 6초, `--loop 0`은 한 번). 최초 시작은 최신 메시지를 cursor로 저장하고 과거 대화를 재생하지 않으므로 `INBOUND_READY discord ...`를 확인한 뒤 새 owner 메시지를 보내세요. 이후 `INBOUND discord ...`로 owner 메시지만 받고, 답장 대상과 첨부(음성 메시지 포함)는 그 뒤의 `INBOUND_REPLY`/`INBOUND_ATTACHMENT` 줄로 받으며 채널별 cursor를 보존합니다. private helper나 외부 메신저 watcher는 필요하지 않습니다.
 
 REST 수신·메시지 전송과 online 표시는 별개입니다. 사용 중 online을 유지하려면 같은 native `monitor`로 `dori presence discord`를 [별도 child token-file argv](docs/releases.md#discord-online-presence)로 켜고 Gateway 프로세스를 유지하세요. presence monitor를 의도적으로 멈추면 offline이 되며, 수신만 멈추는 것은 presence를 바꾸지 않습니다. 설치·업데이트가 두 monitor를 자동으로 켜거나 명시적 중지를 되돌리지 않습니다.
 

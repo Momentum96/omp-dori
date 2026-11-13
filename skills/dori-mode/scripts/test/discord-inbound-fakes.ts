@@ -11,6 +11,9 @@ export type TestDiscordMessage = {
   content?: string;
   webhook_id?: string;
   message_reference?: { message_id?: string };
+  referenced_message?: { id: string; author: { id: string }; content: string } | null;
+  flags?: number;
+  attachments?: unknown;
 };
 export const ownerMessage = (id: string, patch: Partial<TestDiscordMessage> = {}): TestDiscordMessage => ({
   id,

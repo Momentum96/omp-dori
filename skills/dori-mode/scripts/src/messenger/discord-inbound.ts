@@ -4,7 +4,7 @@ import {
   discoverChannels,
   inboundProtocolError,
   inboundRequest,
-  isOwnerText,
+  isOwnerMessage,
   type Message,
   messagePage,
   toInbound,
@@ -21,8 +21,18 @@ export type DiscordInboundOptions = {
   all?: boolean;
 };
 
-export const formatDiscordInbound = (message: DiscordInbound): string =>
-  `INBOUND discord ${message.channel} ${message.message} from=owner ref=${message.reference ?? "-"} ${JSON.stringify(message.text)}`;
+/**
+ * The unchanged `INBOUND discord` line, then an `INBOUND_REPLY` line for a reply and one `INBOUND_ATTACHMENT` line per
+ * attachment. The extra records use their own prefixes, so a parser of the `INBOUND discord` line never sees them.
+ */
+export const formatDiscordInbound = (message: DiscordInbound): string => {
+  const id = `discord ${message.channel} ${message.message}`;
+  return [
+    `INBOUND ${id} from=owner ref=${message.reference ?? "-"} ${JSON.stringify(message.text)}`,
+    ...(message.replyTo ? [`INBOUND_REPLY ${id} ${JSON.stringify(message.replyTo)}`] : []),
+    ...message.attachments.map((attachment) => `INBOUND_ATTACHMENT ${id} ${JSON.stringify(attachment)}`),
+  ].join("\n");
+};
 
 const newer = (a: string, b: string): boolean => BigInt(a) > BigInt(b);
 const unavailable = (error: unknown): boolean =>
@@ -87,7 +97,7 @@ export const discordInbound = async (
     }
   };
   const deliver = (message: Message, store: DiscordInboundStore, emit: (message: DiscordInbound) => void) => {
-    if (isOwnerText(message, ownerId, botId)) emit(toInbound(message));
+    if (isOwnerMessage(message, ownerId, botId)) emit(toInbound(message));
     store.save(message.id); // Checkpoint only after successful delivery; filtered messages still advance the cursor.
   };
   const pollChannel = async (

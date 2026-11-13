@@ -28,8 +28,8 @@ test("cold start baselines latest history, then admits only owner text in the ex
   );
   await intake.poll((message) => received.push(message));
   expect(received).toEqual([
-    { channel: "20", message: "101", reference: null, text: 'hello\n"quoted" $(data)' },
-    { channel: "20", message: "107", reference: "101", text: "reply" },
+    { channel: "20", message: "101", reference: null, text: 'hello\n"quoted" $(data)', replyTo: null, attachments: [] },
+    { channel: "20", message: "107", reference: "101", text: "reply", replyTo: null, attachments: [] },
   ]);
   expect(received.map(formatDiscordInbound)).toEqual([
     'INBOUND discord 20 101 from=owner ref=- "hello\\n\\"quoted\\" $(data)"',

@@ -9,9 +9,32 @@ export type Message = {
   author?: { id?: string; bot?: boolean; system?: boolean };
   webhook_id?: string;
   content?: string;
+  flags?: number;
+  attachments?: unknown;
   message_reference?: { message_id?: string };
+  /** Present on replies: the replied-to message, or null when Discord could not load it (e.g. deleted). */
+  referenced_message?: { id?: string; author?: { id?: string }; content?: string } | null;
 };
-export type DiscordInbound = { channel: string; message: string; reference: string | null; text: string };
+/** One owner attachment, with Discord's own field names; the URL is a signed CDN link that expires. */
+type InboundAttachment = {
+  filename: string;
+  content_type?: string;
+  size: number;
+  url: string;
+  /** Set on the audio of a Discord voice message (message flag IS_VOICE_MESSAGE). */
+  voice?: true;
+  duration_secs?: number;
+};
+/** The message a reply answers; its author is an ID to compare with the owner and bot IDs from INBOUND_READY. */
+type InboundReply = { id: string; author: string; text: string };
+export type DiscordInbound = {
+  channel: string;
+  message: string;
+  reference: string | null;
+  text: string;
+  replyTo: InboundReply | null;
+  attachments: InboundAttachment[];
+};
 export type Request = <T>(path: string, body?: Record<string, unknown>) => Promise<T>;
 
 const REQUEST_FAILED = "Discord inbound request failed; check the connection and Discord API availability";
@@ -73,8 +96,8 @@ export const messagePage = async (
   return messages;
 };
 
-/** Plain owner text or a reply: not the bot itself, another bot, a webhook, or a system message. */
-export const isOwnerText = (message: Message, ownerId: string, botId: string): boolean =>
+/** A plain owner message or reply, with or without text: not the bot itself, another bot, a webhook, or a system message. */
+export const isOwnerMessage = (message: Message, ownerId: string, botId: string): boolean =>
   message.author?.id === ownerId &&
   message.author.id !== botId &&
   !message.author.bot &&
@@ -90,12 +113,45 @@ export const toInbound = (message: Message): DiscordInbound => {
     );
   }
   const reference = message.message_reference?.message_id;
+  const replied = message.referenced_message;
   return {
     channel: message.channel_id,
     message: message.id,
     reference: isDiscordSnowflake(reference) ? reference : null,
     text: message.content,
+    replyTo:
+      replied && isDiscordSnowflake(replied.id) && isDiscordSnowflake(replied.author?.id)
+        ? {
+            id: replied.id,
+            author: replied.author.id,
+            text: typeof replied.content === "string" ? replied.content : "",
+          }
+        : null,
+    attachments: toAttachments(message),
   };
+};
+
+const IS_VOICE_MESSAGE = 1 << 13;
+
+const toAttachments = (message: Message): InboundAttachment[] => {
+  const list = message.attachments ?? [];
+  if (!Array.isArray(list)) throw inboundProtocolError("Discord inbound attachment list is invalid");
+  const voice = typeof message.flags === "number" && (message.flags & IS_VOICE_MESSAGE) !== 0;
+  return list.map((value: unknown) => {
+    const item = value as Record<string, unknown> | null;
+    const { filename, content_type, size, url, duration_secs } = item ?? {};
+    if (typeof filename !== "string" || typeof url !== "string" || !Number.isSafeInteger(size)) {
+      throw inboundProtocolError("Discord inbound attachment is invalid");
+    }
+    return {
+      filename,
+      ...(typeof content_type === "string" ? { content_type } : {}),
+      size: size as number,
+      url,
+      ...(voice ? { voice: true as const } : {}),
+      ...(typeof duration_secs === "number" ? { duration_secs } : {}),
+    };
+  });
 };
 
 const TEXT_CHANNELS = new Set([0, 5]); // text and announcement
