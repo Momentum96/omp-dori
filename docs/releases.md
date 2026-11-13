@@ -2,9 +2,9 @@
 
 ## Preview support boundary
 
-The intended first public release, `v0.1.2`, is being prepared as a GitHub **prerelease** for **Linux x64, herdr and Discord**. It is not yet published; release QA and publication readback are pending. The project retains the full messenger skill, harness and OMP extension; retained features and CI jobs do not expand this preview's live consumer support scope.
+This guide covers the `v0.1.2` GitHub **prerelease** for **Linux x64, herdr and Discord**. The project retains the full messenger skill, harness and OMP extension; retained features and CI jobs do not expand this preview's live consumer support scope.
 
-The immutable `v0.1.0` and `v0.1.1` tags are superseded unpublished release attempts with zero uploaded assets, not stable published releases. See the [release history](../CHANGELOG.md#superseded-unpublished-tags) for the draft-identity and first-upload failures.
+The immutable `v0.1.0` and `v0.1.1` tags are superseded unpublished release attempts with zero release assets, not stable published releases. See the [release history](../CHANGELOG.md#superseded-unpublished-tags) for the draft-identity and first-upload failures.
 
 | Component | Minimum requirement | Tested preview baseline |
 |---|---|---|
@@ -212,7 +212,7 @@ Before publication, maintainers perform isolated real-binary install/update/fail
 
 The `.github/workflows/release.yml` tag workflow validates the tag against the canonical package version. It requires successful **`check`**, **`test-macos`**, **`e2e-herdr`** and **`e2e-hc`** results for that exact commit from the repository's own CI workflow and the trusted GitHub Actions app **15368**. A tag push alone does not prove `ci.yml` ran. The first release is explicitly marked prerelease. Existing tags, releases and assets must not be overwritten; publication needs maintainer permissions and consumers need none.
 
-Every maintainer draft mutation names the tag and commit identity explicitly and reads back the known release ID rather than re-resolving a draft by tag; a body-only draft update can drop that draft's tag binding. The local producer publication path uses the GitHub CLI and needs a `gh` that supports `--paginate` together with `--slurp` for release-asset listing, which the trusted Actions runner provides; an older host `gh` without `--slurp` is not a supported producer environment. This is a maintainer tool requirement only: consumer install, check, update and rollback still need no `gh`.
+Every maintainer release-metadata mutation names the tag and commit identity explicitly and reads back the known release ID rather than re-resolving a draft by tag; a body-only draft update can drop that draft's tag binding. The local producer publication path uses the GitHub CLI and needs a `gh` that supports `--paginate` together with `--slurp` for paginated API reads, including release-asset listing, which the trusted Actions runner provides; an older host `gh` without `--slurp` is not a supported producer environment. This is a maintainer tool requirement only: consumer install, check, update and rollback still need no `gh`.
 
 Each binary asset upload sends an exact `Content-Length` from the existing payload's `byteLength`, as required by the [GitHub release asset API](https://docs.github.com/en/rest/releases/assets?apiVersion=2022-11-28#upload-a-release-asset). The stateful producer fixture rejects missing, malformed or mismatched lengths against the actual stdin bytes with HTTP 400.
 

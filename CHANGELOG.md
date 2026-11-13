@@ -1,22 +1,24 @@
 # Changelog
 
-## 0.1.2 — Linux x64 preview candidate (`v0.1.2`, unpublished)
+## 0.1.2 — Linux x64 preview (`v0.1.2`)
 
-This candidate is intended as the first public release for the OMP port. It is not yet published; release QA and publication readback are pending. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
+This preview targets the first public release for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
 
 ### Superseded unpublished tags
 
 `v0.1.0` was tagged before the producer identity correction but was never published and has zero uploaded assets. A body-only draft metadata update changed the draft's tag binding, so publication verification stopped before any asset upload.
 
-The immutable `v0.1.1` tag points to `6ff348fc247bfa7c36df8a11b86d2cc0b4d80c92`. Its official build and gate passed, and canonical draft identity survived, confirming the initial identity fix. Publication then failed on the first asset upload, `SHA256SUMS`, because the binary stdin request omitted `Content-Length`. That release was never published and has zero uploaded assets.
+The immutable `v0.1.1` tag points to `6ff348fc247bfa7c36df8a11b86d2cc0b4d80c92`. Its official build and gate passed, and canonical draft identity survived, confirming the initial identity fix. Publication then stopped on the first asset upload, `SHA256SUMS`; its underlying HTTP error was not retained. The binary upload helper omitted required `Content-Length`, and a separate real API diagnostic reproduced HTTP 400 for that lengthless request. That release was never published and has zero release assets.
 
 Both tags are retained immutably as superseded unpublished release attempts, not stable published releases. `v0.1.2` is the new intended first public preview.
 
 ### Producer corrections
 
-The producer now names the tag and commit identity explicitly in every draft mutation, including the release-update path that previously sent only the body, and reads back the known release ID instead of re-resolving a draft by tag. This is a producer interface change; consumer commands and the asset contract are unchanged.
+The producer now names the tag and commit identity explicitly in every release-metadata mutation, including the release-update path that previously sent only the body, and reads back the known release ID instead of re-resolving a draft by tag. This is a producer interface change; consumer commands and the asset contract are unchanged.
 
 Binary release-asset uploads now set the exact `Content-Length` from the existing payload's `byteLength`, without another copy or read. The stateful upload fixture rejects missing, malformed or mismatched lengths against the actual stdin bytes with HTTP 400; the existing complete producer lifecycle is the regression case.
+
+The corrected upload and download helpers were exercised against GitHub with one private binary test asset, including a byte-offset view and SHA-256-verified binary readback. Only that newly created test asset was deleted afterward; the held draft's tag, body and zero-asset state were preserved. This proves the binary transport, not publication of a consumer release.
 
 CLI output, release metadata and opt-in telemetry resource versions use the canonical root `package.json` version rather than independent copied version values.
 
