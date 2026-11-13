@@ -97,16 +97,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$HOME/.local/bin"
-          # The web download path (github.com/.../releases/download) answers 504 for long stretches; the REST asset path
-          # (what gh release download uses) kept answering 200 with the same bytes. Three tries with a backoff, then fail.
-          for attempt in 1 2 3; do
-            gh release download v0.9.5 -R herdrdev/herdr -p herdr-linux-x86_64 -O "$HOME/.local/bin/herdr" --clobber && break
-            [ "$attempt" = 3 ] && exit 22
-            sleep $((attempt * 20))
-          done
-          echo "14d9e8bc8b4a9e0118d77c32266f76d461f09b40342eb23752960bd89f59929d  $HOME/.local/bin/herdr" | sha256sum -c -
-          chmod +x "$HOME/.local/bin/herdr"
+          bash scripts/ci-install-herdr.sh "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: herdr --version
       - run: bun test test/e2e.test.ts
@@ -127,10 +118,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hc update --version 0.1.20
       - run: hc --version
-      - name: hc e2e (skipped only while the test file does not exist)
+      - name: hc e2e
         run: |
-          if [ -f test/e2e-hc.test.ts ]; then
-            bun test test/e2e-hc.test.ts
-          else
-            echo 'SKIP e2e-hc until the test lands'
-          fi
+          test -f test/e2e-hc.test.ts
+          bun test test/e2e-hc.test.ts

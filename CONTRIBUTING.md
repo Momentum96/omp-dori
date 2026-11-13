@@ -45,6 +45,8 @@ bun run ci
 
 `bun run test` remains the sequential harness command for debugging. CI uses Bun's native `--parallel=2` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit two-worker limit avoids scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged.
 
+The Linux herdr E2E installer uses the pinned REST release asset and verifies its SHA256 before atomically replacing the binary. Each download attempt is capped at 60 seconds (plus a 5-second termination grace); at most three attempts run, with 20/40-second backoff. A checksum failure fails immediately. The hc job requires its E2E file to exist; a missing file is an error, not a successful skip. These controls keep all four release gates mandatory and do not change macOS coverage or queue capacity.
+
 The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 
 The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. Its native guard requires both the isolated OMP 18.18.8 host and the exact explicit-override compatibility entry; a missing fixture fails rather than adding a skip. Prepare the host and both dependency revisions as the standard CI `check` and `test-macos` jobs do:
