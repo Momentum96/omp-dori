@@ -70,7 +70,7 @@ test.each(["existing", "missing", "not-directory"])(
     expect(source.install({ DORI_INSTALL_MODE: "primary", DORI_NO_PULL: "1" }).code).toBe(0);
     expect(readlinkSync(join(base, "src"))).toBe(target);
     expect(readlinkSync(join(source.home, "global-bin/dori"))).toBe(join(source.src, source.cli));
-    expect(JSON.parse(readFileSync(join(base, "config.json"), "utf8")).ompUlwPath).toBe(join(source.ulw, "index.ts"));
+    expect(JSON.parse(readFileSync(join(base, "config.json"), "utf8")).ompUlwPath).toBe("");
   },
 );
 

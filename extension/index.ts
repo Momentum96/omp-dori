@@ -5,8 +5,8 @@
  * - Role: `--dori-role dori|lane` is recorded in the session file on session_start and re-read from the session
  *   branch on every session change, so `--resume` and herdr restores keep it without the flag. Subagents inherit
  *   their spawning agent's role.
- * - omp-ulw (config `ompUlwPath`) is applied through a gated API: its event, command and tool handlers run only in
- *   role sessions; load-time registrations (flags, command and tool names) stay visible everywhere.
+ * - A nonempty config `ompUlwPath` applies omp-ulw through a gated API: its event, command and tool handlers run
+ *   only in role sessions; load-time registrations stay visible everywhere. Source installs leave it empty for OMP loading.
  * - Pane state (`{stateDir}/sessions/<pane>.json`, read by the `dori` CLI): session id, goal status and open tool
  *   approvals of the Dori/lane session running in HERDR_PANE_ID or HC_TERMINAL_ID.
  * - Lanes without a goal get omp's `goal` tool so the agent can create its goal from the lane brief.
@@ -528,14 +528,18 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   try {
     const config = await loadConfig();
     stateDir = config.stateDir;
-    try {
-      // The omp-ulw checkout is user-configured (`ompUlwPath`), so the specifier only exists at runtime.
-      const module: unknown = await import(config.ompUlwPath);
-      const ulw = module && typeof module === "object" && "default" in module ? module.default : undefined;
-      if (typeof ulw !== "function") throw new Error("its default export is not a function");
-      await ulw(gated);
-    } catch (error) {
-      loadError = `omp-ulw not loaded from ${config.ompUlwPath} (${errorText(error)})`;
+    // An empty ompUlwPath means a standalone omp-ulw extension already serves every session; importing it again
+    // would register its commands and handlers twice.
+    if (config.ompUlwPath) {
+      try {
+        // The omp-ulw checkout is user-configured (`ompUlwPath`), so the specifier only exists at runtime.
+        const module: unknown = await import(config.ompUlwPath);
+        const ulw = module && typeof module === "object" && "default" in module ? module.default : undefined;
+        if (typeof ulw !== "function") throw new Error("its default export is not a function");
+        await ulw(gated);
+      } catch (error) {
+        loadError = `omp-ulw not loaded from ${config.ompUlwPath} (${errorText(error)})`;
+      }
     }
   } catch (error) {
     loadError = `Dori config not loaded (${errorText(error)}); omp-ulw and pane state are off`;

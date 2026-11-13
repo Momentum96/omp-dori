@@ -109,10 +109,12 @@ test("the OMP extension and explicit ULW path install without replacing existing
   );
   expect(install().code).toBe(0);
   expect(readlinkSync(join(home, "extensions/omp-dori"))).toBe(join(src, "extension"));
+  // omp-ulw becomes an OMP extension, so the config's import path is emptied rather than pointed at it.
+  expect(readlinkSync(join(home, "extensions/omp-ulw"))).toBe(ulw);
   expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({
     defaultModel: "provider/custom",
     hooks: { threadReply: ["fixture"] },
-    ompUlwPath: join(ulw, "index.ts"),
+    ompUlwPath: "",
   });
 });
 

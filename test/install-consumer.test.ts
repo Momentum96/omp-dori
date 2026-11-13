@@ -47,7 +47,7 @@ test("a separate side source install and its reinstall preserve an installed con
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   expect(config.stateDir).toBe(join(side, "state"));
   expect(config.agentCommand[0]).toBe(join(side, "bin/omp"));
-  expect(config.ompUlwPath).toBe(join(source.ulw, "index.ts"));
+  expect(config.ompUlwPath).toBe("");
   config.defaultModel = "fixture/preserved";
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
   expect(source.install(options).code).toBe(0);
@@ -131,3 +131,32 @@ test("side config and wrapper symlinks cannot redirect generated files into the 
   }
   expect(existsSync(join(source.root, "bun.log"))).toBe(false);
 });
+
+test.each(["config", "retained"])(
+  "a side %s ULW alias into the consumer home holds before source changes",
+  async (choice) => {
+    const source = setup();
+    const { paths } = await installedConsumer();
+    const options = consumerEnv(paths);
+    const alias = join(source.root, "consumer-ulw");
+    const protectedUlw = join(paths.dori, "source-ulw-fixture");
+    mkdirSync(protectedUlw);
+    writeFileSync(join(protectedUlw, "index.ts"), "export default () => {};\n");
+    writeFileSync(join(protectedUlw, "presets.ts"), "export {};\n");
+    symlinkSync(protectedUlw, alias);
+    mkdirSync(options.OMP_DORI_HOME);
+    const config = join(options.OMP_DORI_HOME, "config.json");
+    const configBytes = JSON.stringify({ ompUlwPath: choice === "config" ? join(alias, "index.ts") : "" });
+    writeFileSync(config, configBytes);
+    if (choice === "retained") symlinkSync(alias, join(options.OMP_DORI_HOME, ".omp-dori-ulw"));
+    const before = protectedSnapshot(paths);
+    const checkout = snapshot(source.src);
+    source.upstreamCommit("pending upstream\n");
+    const r = source.install({ ...options, DORI_INSTALL_MODE: "side", OMP_ULW_SRC: "" });
+    expect(r.code).toBe(1);
+    expect(protectedSnapshot(paths)).toEqual(before);
+    expect(snapshot(source.src)).toBe(checkout);
+    expect(readFileSync(config, "utf8")).toBe(configBytes);
+    expect(existsSync(join(source.root, "bun.log"))).toBe(false);
+  },
+);

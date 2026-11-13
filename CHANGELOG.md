@@ -6,6 +6,9 @@
 - Source installation preserves unmanaged legacy/fork recognition, terminal choice and EOF holds, foreign-checkout and failed-pull guards, and config/link-target backups for explicit unmanaged primary takeovers.
 - Primary source installation links the executable skill CLI directly in `OMP_DORI_BIN_DIR` instead of using Bun global package registration. It backs up foreign command symlink targets before replacement and preserves conflicting regular files with an actionable error.
 - Consumer release metadata and source pointers protect the selected installation home in either mode, including symlink aliases. Primary source installation holds on a consumer home; side paths must be separate. The consumer bootstrap, release runtime and dependency pin are unchanged.
+- Source-only omp-ulw defaults to latest `main` on OMP 18.19+, with an implicit lock fallback on older supported OMP and explicit repo/ref/checkout overrides. Existing custom checkouts and pre-package.json standalone extensions are reused; a later standalone removes only the source home's own default link.
+- Source configs use an empty `ompUlwPath` so OMP loads the dependency once. Primary source installs disclose global omp-ulw behavior; side wrappers load both extensions explicitly without global discovery, and retain external checkout choices across reinstalls. Consumer nonempty import behavior, verified manifest pins and retained container pins stay intact.
+- Side source installs can return from a retained external omp-ulw checkout to the existing managed default. Equivalent default paths in legacy configs stay managed, so later installs continue to select and update refs.
 - Installer regression fixtures cover data/permission/link preservation and managed consumer isolation. The new source workflow has no new real OMP, provider, messenger, consumer QA or CI result claimed here; those results belong with the exact candidate's evidence.
 
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
