@@ -26,14 +26,29 @@ export const originalBrief = (text: string): string => {
   return brief.slice(start === -1 || start > foot ? 0 : start + BRIEF_START.length + 1, foot).replace(/\s*$/, "");
 };
 
-export const footer = (lane: Lane, leadPane: string, identities: DoriConfig["repoIdentities"] = {}): string =>
+// The exact send command: without it lanes search the runtime sources for how to deliver the line.
+const sendReport = (leadPane: string, runtime: DoriConfig["runtime"]): string => {
+  const lead = leadPane ? quoteForPane(leadPane) : "<lead pane>";
+  const herdr = `herdr pane run ${lead} "$line"`;
+  const hc = `hc send ${lead} -- "$line"`;
+  if (runtime === "herdr") return herdr;
+  if (runtime === "hc") return hc;
+  return `${herdr} (on hc: ${hc})`;
+};
+
+export const footer = (
+  lane: Lane,
+  leadPane: string,
+  identities: DoriConfig["repoIdentities"] = {},
+  runtime?: DoriConfig["runtime"],
+): string =>
   [
     "",
     FOOTER_START,
     FOOTER_HEADING,
     `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
     `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
-    `- Persist each milestone, blocker, question, halt and completion with ${CLI} report ${lane.key} --kind milestone|blocker|question|halted|done --text "what, with evidence links". It appends reports.jsonl and prints the human [REPORT] line; send that line to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string.`,
+    `- Persist each milestone, blocker, question, halt and completion with ${CLI} report ${lane.key} --kind milestone|blocker|question|halted|done --text "what, with evidence links". It appends reports.jsonl and prints the human [REPORT] line; send that line to the lead in the same shell call, as one argument and never spliced into a command string: line=$(${CLI} report ${lane.key} --kind <kind> --text "<text>") && printf '%s\\n' "$line" && ${sendReport(leadPane, runtime)}`,
     ...(Object.keys(identities).length
       ? [
           "- Before committing, set the repository's identity below for that command only; never change the global Git identity. For a repository not listed, ask the lead for its identity before the first commit.",

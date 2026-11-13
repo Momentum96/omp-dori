@@ -104,7 +104,7 @@ export const prepareLaunch = async (
   return {
     lane: draft,
     warnings: problems.map((problem) => `LESSON_WARNING ${problem}`),
-    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities)}`,
+    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, deps.config.runtime)}`,
   };
 };
 

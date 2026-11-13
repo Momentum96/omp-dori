@@ -34,7 +34,7 @@ const working: Lane = {
 test("the lane footer calls the skill CLI by its own path, never a bare dori that may be the root harness", async () => {
   const text = footer({ ...working, key: "path-lane" }, "lead:p1");
   const commands = [...text.matchAll(/bun (\S+) (report|claim-done) path-lane/g)];
-  expect(commands.map((m) => m[2])).toEqual(["report", "claim-done"]);
+  expect(commands.map((m) => m[2])).toEqual(["report", "report", "claim-done"]);
   for (const [, cli] of commands) {
     expect(cli).toEndWith("/skills/dori-mode/scripts/src/cli.ts");
     expect(await Bun.file(cli ?? "").exists()).toBe(true);
@@ -74,6 +74,44 @@ test("the footer CLI command survives a skill path with a space or a quote", asy
     expect((await new Response(proc.stdout).text()).trim()).toBe("CLI_OK report path-lane --kind milestone");
     expect(await proc.exited).toBe(0);
     expect(footer({ ...working, key: "path-lane" }, "lead:p1")).toContain(cliCommand());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the footer's report command sends the [REPORT] line to the lead as one argument on each runtime", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dori footer send "));
+  try {
+    const cli = join(dir, "cli.ts");
+    writeFileSync(
+      cli,
+      'const [, , , key, , kind, , text] = process.argv;\nconsole.log(["[REPORT]", key, "|", kind, "|", text].join(" "));\n',
+    );
+    for (const bin of ["herdr", "hc"])
+      writeFileSync(join(dir, bin), `#!/bin/sh\nprintf '%s\\n' ${bin} "$@" > "${dir}/${bin}.argv"\n`, {
+        mode: 0o755,
+      });
+    for (const [runtime, sent] of [
+      ["herdr", ["herdr", "pane", "run", "lead:p1"]],
+      ["hc", ["hc", "send", "lead:p1", "--"]],
+    ] as const) {
+      const line = footer({ ...working, key: "send-lane" }, "lead:p1", {}, runtime)
+        .split("\n")
+        .find((l) => l.startsWith("- Persist"));
+      const command = (line?.split("never spliced into a command string: ")[1] ?? "")
+        .replaceAll(cliCommand(), cliCommand(cli))
+        .replace("<kind>", "milestone")
+        .replace("<text>", "it's done; ok | 100%");
+      const proc = Bun.spawn(["bash", "-c", command], {
+        stdout: "pipe",
+        env: { ...process.env, PATH: `${dir}:${process.env["PATH"]}` },
+      });
+      const report = "[REPORT] send-lane | milestone | it's done; ok | 100%";
+      expect((await new Response(proc.stdout).text()).trim()).toBe(report);
+      expect(await proc.exited).toBe(0);
+      expect((await Bun.file(join(dir, `${runtime}.argv`)).text()).split("\n").slice(0, -1)).toEqual([...sent, report]);
+    }
+    expect(footer(working, "lead:p1")).toContain('herdr pane run lead:p1 "$line" (on hc: hc send lead:p1 -- "$line")');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
