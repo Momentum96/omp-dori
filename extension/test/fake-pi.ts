@@ -13,7 +13,15 @@ export type Entry = {
 };
 export type FakeSession = { id: string; file?: string; entries: Entry[] };
 type Agent = DoriContext["agent"];
-export type FakeOptions = { session: FakeSession; flags?: Record<string, string>; agent?: Agent; active?: string[] };
+/** `model` is omp's ctx.model; omp-ulw picks its preset from it. */
+type Model = { id: string; name?: string; provider?: string };
+export type FakeOptions = {
+  session: FakeSession;
+  flags?: Record<string, string>;
+  agent?: Agent;
+  active?: string[];
+  model?: Model;
+};
 
 export type FakePi = {
   api: DoriApi;
@@ -49,6 +57,7 @@ export const fakePi = (options: FakeOptions): FakePi => {
       cwd: tmpdir(),
       mode: "print",
       agent,
+      model: options.model,
       sessionManager: {
         getSessionId: () => fake.session.id,
         getSessionFile: () => fake.session.file,

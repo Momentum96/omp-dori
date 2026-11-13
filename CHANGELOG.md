@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Move the maintained source checkout's `omp-ulw.lock` to `d69ad5fbe032c8aa49098c1d599c20df232bc474` for OMP's `⁂` prompt sections while retaining the OMP 18.18.8 minimum. This source change does not replace the published `v0.1.2` assets or their dependency lock.
+- Pass an optional model through the extension's FakePI context and retain a real-omp-ulw regression requiring one model-preset result and replacement of the host role body on a `⁂`-marked prompt. The real-fixture group skips when its entry point is absent; a fixture-free run does not prove preset compatibility. See [the fixture requirements](CONTRIBUTING.md#run-the-gates).
+
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
 
 This preview targets the first public release for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
