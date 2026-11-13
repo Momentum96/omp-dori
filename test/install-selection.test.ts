@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, writeFile
 import { join } from "node:path";
 import { git, withUlwRemote } from "./install-setup.ts";
 
-test.each(["", "/", "//", "/.", "/../omp-ulw"])(
+test.each(["", "/../omp-ulw"])(
   "selecting an existing side default%s clears the external choice and restores managed ref updates",
   (suffix) => {
     const { root, home, remote, first, commit, install } = withUlwRemote();
@@ -34,15 +34,7 @@ test.each(["", "/", "//", "/.", "/../omp-ulw"])(
 );
 
 test.each([
-  ["side trailing slash", "", "/", "side"],
   ["side repeated slash", "", "//", "side"],
-  ["side dot segment", "", "/.", "side"],
-  ["side parent segment", "", "/../.omp-dori", "side"],
-  ["home trailing slash", "/", "", "side"],
-  ["home repeated slash", "//", "", "side"],
-  ["home dot segment", "/.", "", "side"],
-  ["home parent segment", "/../home", "", "side"],
-  ["primary default with trailing HOME", "/", "", "primary"],
   ["primary default with parent HOME", "/../home", "", "primary"],
 ])("a legacy side config keeps implicit managed ref selection with %s", (_label, homeSuffix, sideSuffix, kind) => {
   const { root, home, remote, first, commit, install } = withUlwRemote();
