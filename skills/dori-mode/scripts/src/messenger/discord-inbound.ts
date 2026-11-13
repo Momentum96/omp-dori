@@ -57,10 +57,21 @@ export const discordInbound = async (
     );
   }
   const watched = new Map<string, DiscordInboundStore>();
+  /** Only history-read failures can make a discovered channel unavailable, never state or delivery failures. */
+  const readPage = async (channelId: string, limit: number, before?: string) => {
+    try {
+      return await messagePage(request, channelId, limit, before);
+    } catch (error) {
+      if (explicit.includes(channelId) || !unavailable(error)) throw error;
+      watched.delete(channelId);
+      return undefined;
+    }
+  };
   const attach = async (channelId: string): Promise<void> => {
     const store = storeFor(channelId);
     const cursor = store.load();
-    const latest = await messagePage(request, channelId, 1); // Also verifies channel access before readiness.
+    const latest = await readPage(channelId, 1); // Also verifies channel access before readiness.
+    if (latest === undefined) return;
     if (latest.some((message) => message.channel_id !== channelId)) {
       throw inboundProtocolError("Discord inbound channel response does not match the configured channel");
     }
@@ -72,11 +83,7 @@ export const discordInbound = async (
     if (!opts.all) return;
     for (const id of await discoverChannels(request, ownerId)) {
       if (watched.has(id)) continue;
-      try {
-        await attach(id);
-      } catch (error) {
-        if (!unavailable(error)) throw error;
-      }
+      await attach(id);
     }
   };
   const deliver = (message: Message, store: DiscordInboundStore, emit: (message: DiscordInbound) => void) => {
@@ -95,7 +102,8 @@ export const discordInbound = async (
     const pending = new Map<string, Message>();
     let before: string | undefined;
     for (;;) {
-      const messages = await messagePage(request, channelId, 100, before);
+      const messages = await readPage(channelId, 100, before);
+      if (messages === undefined) return;
       let oldest: string | undefined;
       for (const message of messages) {
         if (oldest === undefined || newer(oldest, message.id)) oldest = message.id;
@@ -120,14 +128,7 @@ export const discordInbound = async (
     /** Reads every watched channel from its cursor; the REST path and the Gateway backfill. */
     async poll(emit: (message: DiscordInbound) => void): Promise<void> {
       if (opts.all && ++polls % 100 === 0) await refresh(); // Pick up channels and threads created since start.
-      for (const [channelId, store] of [...watched]) {
-        try {
-          await pollChannel(channelId, store, emit);
-        } catch (error) {
-          if (explicit.includes(channelId) || !unavailable(error)) throw error;
-          watched.delete(channelId); // A discovered channel the bot lost access to.
-        }
-      }
+      for (const [channelId, store] of [...watched]) await pollChannel(channelId, store, emit);
     },
     /** Reconciles the watched set, then reads each channel from its cursor; used after a Gateway (re)connect. */
     async sync(emit: (message: DiscordInbound) => void): Promise<void> {
@@ -145,7 +146,10 @@ export const discordInbound = async (
         watched.set(message.channel_id, store);
       }
       const cursor = store.load();
-      if (cursor === undefined || !newer(message.id, cursor)) return;
+      if (cursor === undefined) {
+        throw new MessengerError("Discord inbound cursor disappeared; restore its state before retrying", 0);
+      }
+      if (!newer(message.id, cursor)) return;
       deliver(message, store, emit);
     },
   };
