@@ -11,6 +11,7 @@
 - Source-only omp-ulw defaults to latest `main` on OMP 18.19+, with an implicit lock fallback on older supported OMP and explicit repo/ref/checkout overrides. Existing custom checkouts and pre-package.json standalone extensions are reused; a later standalone removes only the source home's own default link.
 - Source configs use an empty `ompUlwPath` so OMP loads the dependency once. Primary source installs disclose global omp-ulw behavior; side wrappers load both extensions explicitly without global discovery, and retain external checkout choices across reinstalls. Consumer nonempty import behavior and verified manifest pins stay intact; source fixtures and container builds continue to follow `omp-ulw.lock`.
 - Side source installs can return from a retained external omp-ulw checkout to the existing managed default. Equivalent default paths in legacy configs stay managed, so later installs continue to select and update refs.
+- Multi-cycle real-Git publication integration tests use a test-local 30-second budget instead of Bun's 5-second default. Producer timeouts, CI wait deadlines, assertions and retry policy are unchanged.
 - Installer regression fixtures cover data/permission/link preservation and managed consumer isolation. The new source workflow has no new real OMP, provider, messenger, consumer QA or CI result claimed here; those results belong with the exact candidate's evidence.
 
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
