@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Installs the complete OMP Dori candidate: skill CLI, harness sources, extension, and pinned omp-ulw.
+# Installs an OMP Dori source checkout: skill CLI, harness sources, extension, and source-selected omp-ulw.
 # DORI_NO_PULL=1 (or true, yes) installs an existing checkout without updating it.
 # DORI_INSTALL_MODE=primary installs into ~/.dori; DORI_INSTALL_MODE=side installs next to another Dori, in
 # OMP_DORI_HOME (default ~/.omp-dori), without changing ~/.dori, the dori command or the dori-mode skill.
 # Without DORI_INSTALL_MODE, a ~/.dori owned by another Dori is never changed: a terminal is asked, anything else stops.
 # Consumer-managed ~/.dori homes use dori update; primary source installation always holds there.
-# Optional paths: DORI_SRC, OMP_ULW_SRC, SKILLS_DIR, OMP_EXTENSIONS_DIR, OMP_DORI_HOME, OMP_DORI_BIN_DIR.
+# Source omp-ulw follows OMP_ULW_REF (default main; lock uses omp-ulw.lock), or reuses an existing checkout.
+# Primary mode discovers it globally; side mode loads it only through the isolated omp-dori omp wrapper.
+# Optional paths: DORI_SRC, OMP_ULW_SRC, OMP_ULW_REPO, SKILLS_DIR, OMP_EXTENSIONS_DIR, OMP_DORI_HOME, OMP_DORI_BIN_DIR.
 set -euo pipefail
 
 fail() { echo "$1" >&2; exit 1; }
@@ -13,7 +15,8 @@ absolute() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$PWD" "
 at_least() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | { read -r first; printf '%s\n' "$first"; })" = "$1" ]; }
 
 repo="https://github.com/vntrevx/omp-dori.git"
-ulw_repo="https://github.com/dbc-hbin/omp-ulw.git"
+ulw_repo="${OMP_ULW_REPO:-https://github.com/dbc-hbin/omp-ulw.git}"
+ulw_ref="${OMP_ULW_REF:-main}"
 primary_home="$HOME/.dori"
 side_home="$(absolute "${OMP_DORI_HOME:-$HOME/.omp-dori}")"
 min_bun="1.4.4"
@@ -28,6 +31,11 @@ omp_version="$(omp --version)"
 [[ "$omp_version" =~ ([0-9]+(\.[0-9]+){2}) ]] || fail "could not read omp version: $omp_version"
 omp_version="${BASH_REMATCH[1]}"
 at_least "$min_omp" "$omp_version" || fail "omp $omp_version is older than $min_omp"
+ulw_main_omp="18.19.0"
+if [ -z "${OMP_ULW_REF:-}" ] && ! at_least "$ulw_main_omp" "$omp_version"; then
+  ulw_ref=lock
+  echo "omp-ulw: its main needs OMP $ulw_main_omp+, this OMP is $omp_version, so omp-ulw.lock is used; update OMP or set OMP_ULW_REF to choose." >&2
+fi
 
 # Every install of this repository leaves a marker in its home. Installs that predate it are known by the
 # omp-dori checkout in ~/.dori/src or by the omp-dori extension link every earlier source installer created.
@@ -105,8 +113,52 @@ skills="$(absolute "${SKILLS_DIR:-$HOME/.agents/skills}")"
 extensions="$(absolute "${OMP_EXTENSIONS_DIR:-$HOME/.omp/agent/extensions}")"
 bin_dir="$(absolute "${OMP_DORI_BIN_DIR:-${BUN_INSTALL:-$HOME/.bun}/bin}")"
 
+# Checkouts of every supported revision have these files; older revisions have no package.json.
+is_ulw() { [ -f "$1/index.ts" ] && [ -f "$1/presets.ts" ]; }
+ulw_explicit="${OMP_ULW_SRC:+1}"
+if [ -z "$ulw_explicit" ] && [ -f "$base/config.json" ]; then
+  custom_ulw="$(CONFIG="$base/config.json" ULW_DIR="$ulw" bun -e '
+    const { dirname, resolve } = require("node:path");
+    const config = await Bun.file(process.env.CONFIG).json();
+    const path = typeof config.ompUlwPath === "string" ? config.ompUlwPath.replace(/^~(?=\/|$)/, process.env.HOME) : "";
+    const dir = path ? resolve(dirname(path)) : "";
+    if (path && path !== process.env.HOME + "/.dori/omp-ulw/index.ts" && dir !== process.env.ULW_DIR) console.log(dir);')"
+  if [ -n "$custom_ulw" ]; then
+    ulw="$custom_ulw"
+    ulw_explicit=1
+    echo "omp-ulw: config.json points at $custom_ulw; installing that checkout as the extension." >&2
+  fi
+fi
+# A side config's import path is cleared below; retain an external checkout choice for later reinstalls.
+if [ "$mode" = side ] && [ -z "$ulw_explicit" ] && [ -L "$base/.omp-dori-ulw" ]; then
+  ulw="$(absolute "$(readlink "$base/.omp-dori-ulw")")"
+  ulw_explicit=1
+fi
+if [ -n "$ulw_explicit" ]; then
+  is_ulw "$ulw" || fail "$ulw is not an omp-ulw checkout (no index.ts and presets.ts); nothing was changed."
+fi
+standalone_ulw=""
+if [ "$mode" = primary ]; then
+  for entry in "$extensions"/*; do
+    [ "$entry" != "$extensions/omp-dori" ] || continue
+    # Only a marked source home's own default link may be replaced by a later standalone extension.
+    if marked "$base" && [ "$entry" = "$extensions/omp-ulw" ] &&
+      [ "$(readlink "$entry" 2>/dev/null)" = "$base/omp-ulw" ]; then continue; fi
+    if is_ulw "$entry"; then
+      [ -z "$standalone_ulw" ] || fail "Multiple standalone omp-ulw extensions exist; keep one before source installation; nothing was changed."
+      if [ -n "$ulw_explicit" ] && ! [ "$entry" -ef "$ulw" ]; then
+        fail "The standalone omp-ulw at $entry differs from $ulw; select one checkout before primary source installation; nothing was changed."
+      fi
+      standalone_ulw="$entry"
+    fi
+  done
+fi
+
 if [ "$mode" = side ]; then
   consumer_home "$base" && fail "$base is a consumer-managed home; choose a separate OMP_DORI_HOME."
+  if [ -e "$base/.omp-dori-ulw" ] && [ ! -L "$base/.omp-dori-ulw" ]; then
+    fail "$base/.omp-dori-ulw exists and is not a link; nothing was changed."
+  fi
   # Resolve existing symlinks and missing suffixes before any checkout, dependency or config mutation.
   PRIMARY_HOME="$primary_home" bun -e '
     const { lstatSync, readlinkSync, realpathSync } = require("node:fs");
@@ -126,7 +178,7 @@ if [ "$mode" = side ]; then
       }
     }
   ' "$base" "$src" "$src/skills/dori-mode/scripts" "$src/extension" "$ulw" "$bin_dir" \
-    "$base/config.json" "$base/.omp-dori" "$base/env.sh" "$base/omp.yml" \
+    "$base/config.json" "$base/.omp-dori" "$base/.omp-dori-ulw" "$base/env.sh" "$base/omp.yml" \
     "$base/skills" "$base/skills/omp-dori-mode" "$base/state" "$base/bin" \
     "$base/bin/dori" "$base/bin/omp" "$base/bin/omp-dori"
 fi
@@ -165,13 +217,37 @@ if [ "$mode" = primary ] && [ -n "$other" ]; then
   echo "The previous config.json and link targets are kept in $backup" >&2
 fi
 
-if [ -n "${OMP_ULW_SRC:-}" ]; then
-  [ -f "$ulw/index.ts" ] || fail "OMP_ULW_SRC=$ulw has no index.ts"
-else
-  pin="$(tr -d '[:space:]' < "$src/omp-ulw.lock")"
+if [ -n "$standalone_ulw" ]; then
+  echo "omp-ulw: using the standalone extension at $standalone_ulw; omp-dori does not load a second copy." >&2
+  if marked "$base" && [ "$(readlink "$extensions/omp-ulw" 2>/dev/null)" = "$base/omp-ulw" ]; then
+    rm "$extensions/omp-ulw"
+    echo "omp-ulw: removed the earlier $extensions/omp-ulw link so omp-ulw loads once." >&2
+  fi
+elif [ -z "$ulw_explicit" ]; then
   [ -d "$ulw/.git" ] || git clone --quiet "$ulw_repo" "$ulw"
+  if [ -n "${OMP_ULW_REPO:-}" ]; then git -C "$ulw" remote set-url origin "$ulw_repo"; fi
   git -C "$ulw" fetch --quiet origin
-  git -C "$ulw" -c advice.detachedHead=false checkout --quiet "$pin"
+  if [ "$ulw_ref" = lock ]; then
+    target="$(tr -d '[:space:]' < "$src/omp-ulw.lock")"
+  elif git -C "$ulw" rev-parse --verify --quiet "origin/$ulw_ref^{commit}" >/dev/null; then
+    target="origin/$ulw_ref"
+  else
+    target="$ulw_ref"
+  fi
+  git -C "$ulw" -c advice.detachedHead=false checkout --quiet "$target"
+  is_ulw "$ulw" || fail "$ulw is not an omp-ulw checkout (no index.ts and presets.ts)"
+  echo "omp-ulw: $ulw_ref at $(git -C "$ulw" rev-parse --short HEAD)" >&2
+  if [ -f "$ulw/upstream/materialize-frontend-refs.mjs" ]; then
+    { git -C "$ulw" submodule update --init --recursive --quiet && (cd "$ulw" && bun upstream/materialize-frontend-refs.mjs >/dev/null); } ||
+      echo "omp-ulw: frontend references were not generated; see $ulw/README.md" >&2
+  fi
+fi
+if [ "$mode" = side ]; then
+  ulw_extension="$ulw"
+elif [ -n "$standalone_ulw" ]; then
+  ulw_extension="$standalone_ulw"
+else
+  ulw_extension="$extensions/omp-ulw"
 fi
 
 link() {
@@ -186,6 +262,9 @@ if [ "$mode" = primary ]; then
   mkdir -p "$skills" "$extensions"
   link "$src/skills/dori-mode" "$skills/dori-mode" || true
   link "$src/extension" "$extensions/omp-dori" || fail "extension link was not installed"
+  if [ -z "$standalone_ulw" ]; then
+    link "$ulw" "$extensions/omp-ulw" || fail "omp-ulw extension link was not installed"
+  fi
 fi
 
 # In primary mode the skill owns the installed dori name; a side install never links a global dori.
@@ -195,14 +274,16 @@ fi
 (cd "$src/extension" && bun install --frozen-lockfile --silent)
 
 mkdir -p "$base"
+if [ "$mode" = side ] && [ -n "$ulw_explicit" ] && [ "$ulw" != "$base/omp-ulw" ]; then
+  link "$ulw" "$base/.omp-dori-ulw" || fail "omp-ulw checkout choice was not saved"
+fi
 config="$base/config.json"
 created=""
 [ -f "$config" ] || { cp "$src/skills/dori-mode/references/config.example.json" "$config" && created=1; }
 side_omp=""
 [ "$mode" = side ] && side_omp="$base/bin/omp"
-CONFIG="$config" ULW_INDEX="$ulw/index.ts" ULW_EXPLICIT="${OMP_ULW_SRC:+1}" CREATED="$created" SIDE_OMP="$side_omp" \
-  STATE_DIR="$base/state" bun -e '
-  const path = process.env.CONFIG, index = process.env.ULW_INDEX;
+CONFIG="$config" CREATED="$created" SIDE_OMP="$side_omp" STATE_DIR="$base/state" bun -e '
+  const path = process.env.CONFIG;
   const config = await Bun.file(path).json();
   let changed = false;
   if (process.env.CREATED && process.env.SIDE_OMP) {
@@ -212,8 +293,9 @@ CONFIG="$config" ULW_INDEX="$ulw/index.ts" ULW_EXPLICIT="${OMP_ULW_SRC:+1}" CREA
     config.agentCommand = [process.env.SIDE_OMP, ...rest];
     changed = true;
   }
-  if (process.env.ULW_EXPLICIT || !config.ompUlwPath || config.ompUlwPath === "~/.dori/omp-ulw/index.ts") {
-    config.ompUlwPath = index;
+  // OMP loads this source dependency as an extension, so the Dori extension must not import it again.
+  if (config.ompUlwPath !== "") {
+    config.ompUlwPath = "";
     changed = true;
   }
   if (changed) await Bun.write(path, JSON.stringify(config, null, 2) + "\n");'
@@ -226,7 +308,7 @@ if [ "$mode" = primary ]; then
 Installed.
   Skill:     $skills/dori-mode
   Extension: $extensions/omp-dori
-  omp-ulw:   $ulw
+  omp-ulw:   $ulw_extension (OMP extension; active in every globally discovering OMP session)
   CLI:       dori (messenger/lane CLI), dori harness (upstream harness)
   Config:    $config
 Next: configure the runtime and hooks, install the omp herdr integration if using herdr,
@@ -281,7 +363,7 @@ wrapper() {
   chmod 755 "$base/bin/$1"
 }
 printf 'exec %q %q "$@"\n' "$bun_bin" "$src/skills/dori-mode/scripts/src/cli.ts" | wrapper dori
-printf 'exec %q --no-extensions -e %q --config %q "$@"\n' "$omp_bin" "$src/extension" "$base/omp.yml" | wrapper omp
+printf 'exec %q --no-extensions -e %q -e %q --config %q "$@"\n' "$omp_bin" "$src/extension" "$ulw" "$base/omp.yml" | wrapper omp
 printf 'case "${1:-}" in\n  omp) shift; exec %q "$@" ;;\n  hc) shift; exec hc "$@" ;;\n  *) exec %q "$@" ;;\nesac\n' \
   "$base/bin/omp" "$base/bin/dori" | wrapper omp-dori
 mkdir -p "$bin_dir"
@@ -292,7 +374,7 @@ Installed next to the Dori in $primary_home, which was not changed.
   Home:       $base (config.json, state, generated skill, omp.yml and wrappers)
   Command:    $bin_dir/omp-dori  (omp-dori <dori command> | omp-dori omp ... | omp-dori hc ...)
   Skill:      omp-dori-mode; dori-mode is hidden in omp-dori omp sessions
-  Extension:  $src/extension, loaded only by omp-dori omp, which loads no other OMP extension
+  Extensions: $src/extension and $ulw, loaded only by omp-dori omp, which discovers no other OMP extension
   omp-ulw:    $ulw
   hc session: $hc_session
   Config:     $config

@@ -56,7 +56,9 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
   const config = JSON.parse(readFileSync(join(side, "config.json"), "utf8"));
   expect(config.stateDir).toBe(join(side, "state"));
   expect(config.agentCommand).toEqual([join(side, "bin/omp"), "--dori-role", "lane", "--model", "{model}", "{prompt}"]);
-  expect(config.ompUlwPath).toBe(join(ulw, "index.ts"));
+  // omp-ulw loads as an OMP extension of omp-dori omp, so the omp-dori extension imports no second copy.
+  expect(config.ompUlwPath).toBe("");
+  expect(existsSync(join(ulw, "index.ts"))).toBe(true);
   // And its skill is a renamed copy whose description differs from dori-mode's, so omp lists both apart.
   const skill = readFileSync(join(side, "skills/omp-dori-mode/SKILL.md"), "utf8");
   expect(skill).toContain("\nname: omp-dori-mode\n");
@@ -66,6 +68,7 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
   expect(description).not.toBe(original.match(/^description: (.+)$/m)?.[1]);
   expect(readlinkSync(join(side, "skills/omp-dori-mode/references"))).toBe(join(src, "skills/dori-mode/references"));
 });
+
 
 test("an omp-dori install from before the marker, with its checkout elsewhere, is updated without asking", () => {
   // Given an unmanaged source home whose earlier source installer linked the external checkout's extension.

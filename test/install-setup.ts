@@ -42,6 +42,7 @@ export function setup() {
   writeFileSync(join(upstream, "extension/index.ts"), "export default () => {};\n");
   mkdirSync(ulw);
   writeFileSync(join(ulw, "index.ts"), "export default () => {};\n");
+  writeFileSync(join(ulw, "presets.ts"), "export {};\n");
   writeFileSync(join(upstream, cli), "v1\n");
   writeFileSync(join(upstream, "omp-ulw.lock"), "0000000000000000000000000000000000000000\n");
   writeFileSync(join(upstream, "skills/dori-mode/SKILL.md"), skillFixture);
@@ -58,7 +59,10 @@ export function setup() {
     `#!/bin/sh\ncase "$1" in\n--version) echo "\${INSTALL_TEST_BUN_VERSION:-1.4.4}" ;;\n-e) exec ${JSON.stringify(process.execPath)} "$@" ;;\n*) echo "$*" >> ${JSON.stringify(join(root, "bun.log"))} ;;\nesac\n`,
   );
   chmodSync(join(bin, "bun"), 0o755);
-  writeFileSync(join(bin, "omp"), "#!/bin/sh\ncase \"$1\" in\n--version) echo 'omp 18.18.8' ;;\n*) exit 64 ;;\nesac\n");
+  writeFileSync(
+    join(bin, "omp"),
+    `#!/bin/sh\ncase "$1" in\n--version) echo "omp \${INSTALL_TEST_OMP_VERSION:-18.19.0}" ;;\n*) exit 64 ;;\nesac\n`,
+  );
   chmodSync(join(bin, "omp"), 0o755);
   const upstreamCommit = (text: string) => {
     writeFileSync(join(upstream, cli), text);
@@ -74,6 +78,9 @@ export function setup() {
     SKILLS_DIR: join(home, "skills"),
     OMP_EXTENSIONS_DIR: join(home, "extensions"),
     OMP_ULW_SRC: ulw,
+    OMP_ULW_REPO: "",
+    OMP_ULW_REF: "",
+    INSTALL_TEST_OMP_VERSION: "",
     OMP_DORI_HOME: join(home, ".omp-dori"),
     OMP_DORI_HC_SESSION: "",
     OMP_DORI_BIN_DIR: join(home, "global-bin"),
