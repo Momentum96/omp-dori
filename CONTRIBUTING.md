@@ -53,7 +53,7 @@ test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
 bun run test:extension
 ```
 
-Fixture preparation needs network access unless an exact local checkout is already available. Confirm that the real-fixture tests ran without being skipped: both role gating and the current `⁂` prompt-marker regression must execute. A fixture-free run covers the local FakePI seam but supplies no runtime proof that the pinned dependency replaces `HOST_ROLE` with an `<omp-model-preset>` result. Git commit metadata alone also supplies no such proof. This fixture test does not run an OMP provider or establish live session, messenger or container compatibility.
+Fixture preparation needs network access unless an exact local checkout is already available. Confirm that the real-fixture tests ran without being skipped: role gating and both Sol composition orders must execute. The composition guard follows OMP's public `ExtensionRunner.emitBeforeAgentStart` contract: each returned prompt becomes the next handler's input. It requires the final prompt to retain one model preset, one bookkeeping block and downstream context, with the host role replaced. A fixture-free run supplies no pinned-dependency proof, and this handler-level guard remains separate from a native OMP host smoke. Git commit metadata alone supplies neither. These checks do not run a provider or establish live session, messenger or container compatibility.
 
 ## A pull request
 

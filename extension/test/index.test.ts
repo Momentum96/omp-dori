@@ -457,22 +457,33 @@ describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
     expect(lane.userMessages).toEqual(["ulw fix it"]);
   });
 
-  test("a lane on the current OMP prompt layout gets its model preset", async () => {
-    useConfig(REAL_ULW);
-    const lane = await load({
-      session: session("lane-preset"),
-      flags: { "dori-role": "lane" },
-      model: { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai-codex" },
-    });
-    await lane.emit("session_start");
-    // OMP 18.18 marks its system-prompt sections with ⁂; a pin that only knows § leaves every preset unapplied.
-    const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
-    const results = await lane.emit("before_agent_start", { ...agentStart, systemPrompt: [host] });
-    const prompts = results.flatMap((result) =>
-      result && typeof result === "object" && "systemPrompt" in result ? [JSON.stringify(result.systemPrompt)] : [],
-    );
-    const preset = prompts.filter((prompt) => prompt.includes("<omp-model-preset>"));
-    expect(preset).toHaveLength(1);
-    expect(preset[0]).not.toContain("HOST_ROLE");
+  test("Sol bookkeeping survives the pinned model preset in either extension order", async () => {
+    for (const order of ["dori-first", "ulw-first"]) {
+      useConfig(REAL_ULW);
+      const lane = await load({
+        session: session(`lane-preset-${order}`),
+        flags: { "dori-role": "lane" },
+        model: { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai-codex" },
+      });
+      await lane.emit("session_start");
+      // A standalone host-loaded ULW can precede Dori; keep each extension's own handler order.
+      if (order === "ulw-first") {
+        const handlers = lane.handlers.get("before_agent_start") ?? [];
+        lane.handlers.set("before_agent_start", [...handlers.slice(1), ...handlers.slice(0, 1)]);
+      }
+      // OMP's runner passes each replacement to the next handler. Inspect the final result, not independent returns.
+      const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
+      const results = await lane.emit("before_agent_start", {
+        ...agentStart,
+        systemPrompt: [host, "Retained downstream context"],
+      });
+      const final = results.at(-1);
+      expect(final).toHaveProperty("systemPrompt");
+      const prompt = JSON.stringify(final);
+      expect(prompt.match(/<omp-model-preset>/g)).toHaveLength(1);
+      expect(prompt.match(/<omp-dori-lane-bookkeeping>/g)).toHaveLength(1);
+      expect(prompt).not.toContain("HOST_ROLE");
+      expect(prompt).toContain("Retained downstream context");
+    }
   });
 });
