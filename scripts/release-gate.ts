@@ -115,7 +115,7 @@ export async function releaseGate(
   const jobs = (await reads.pages(`${prefix}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`, "jobs")).map(
     record,
   );
-  for (const name of REQUIRED) {
+  const requiredChecks = REQUIRED.map((name) => {
     const matches = jobs.filter((job) => job["name"] === name);
     if (matches.length !== 1) throw new Error(`Required exact-commit CI job is missing or ambiguous: ${name}`);
     const job = matches[0]!;
@@ -133,9 +133,18 @@ export async function releaseGate(
     ) {
       throw new Error(`Required CI job did not succeed for the exact attempt: ${name}`);
     }
-    const check = record(await reads.api(`${prefix}/check-runs/${match[1]}`));
+    return { name, checkId: Number(match[1]) };
+  });
+  // Only these four independent GETs overlap. Drain all reads before validating in required-job order.
+  const results = await Promise.allSettled(
+    requiredChecks.map(({ checkId }) => reads.api(`${prefix}/check-runs/${checkId}`)),
+  );
+  for (const [index, { name, checkId }] of requiredChecks.entries()) {
+    const result = results[index]!;
+    if (result.status === "rejected") throw result.reason;
+    const check = record(result.value);
     if (
-      check["id"] !== Number(match[1]) ||
+      check["id"] !== checkId ||
       check["head_sha"] !== manifest.commit ||
       check["name"] !== name ||
       check["status"] !== "completed" ||
