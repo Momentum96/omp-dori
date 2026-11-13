@@ -58,11 +58,13 @@ const USAGE = `dori <command> [options]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
-  inbound slack|telegram|discord [--loop MIN]
+  inbound slack|telegram|discord [--loop MIN] [--gateway]
                                        print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
-                                       Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and DORI_DISCORD_CHANNEL_ID
-                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval
+                                       Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and configured channel IDs
+                                       (more channels or threads: DORI_DISCORD_CHANNEL_IDS=a,b; every readable one: DORI_DISCORD_SCOPE=all)
+                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval;
+                                       --gateway delivers owner messages live with REST backfill and ignores --loop, including 0
   inbound-lag [--limit N]              receive-lag percentiles from state/telegram-lag.jsonl (the meter behind the INBOUND lines)`;
 
 const [command = "", ...rest] = process.argv.slice(2);
@@ -96,6 +98,7 @@ const flags = parseArgs({
     note: { type: "string" },
     write: { type: "boolean" },
     loop: { type: "string" },
+    gateway: { type: "boolean" },
     to: { type: "string" },
     text: { type: "string" },
     edit: { type: "string" },
