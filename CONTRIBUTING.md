@@ -28,6 +28,8 @@ Upstream porting and candidate/recovery operations use `dori upstream ... --conf
 bun install --frozen-lockfile
 (cd skills/dori-mode/scripts && bun install --frozen-lockfile)
 (cd extension && bun install --frozen-lockfile)
+(cd test/fixtures/omp-native-host && bun install --frozen-lockfile)
+export DORI_TEST_OMP_ROOT="$PWD/test/fixtures/omp-native-host/node_modules/@oh-my-pi/pi-coding-agent"
 bun run ci
 ```
 
@@ -43,17 +45,19 @@ bun run ci
 
 The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 
-The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. For real-fixture coverage, prepare the checkout exactly as the standard CI `check` and `test-macos` jobs do:
+The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. Its native composition guard requires the isolated OMP 18.18.8 test package above; if d69 exists but that host is missing or mismatched, the guard fails rather than adding a skip. For real-fixture coverage, prepare both exact dependencies as the standard CI `check` and `test-macos` jobs do:
 
 ```sh
 pin="$(tr -d '[:space:]' < omp-ulw.lock)"
 git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
 git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
 test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+(cd test/fixtures/omp-native-host && bun install --frozen-lockfile)
+export DORI_TEST_OMP_ROOT="$PWD/test/fixtures/omp-native-host/node_modules/@oh-my-pi/pi-coding-agent"
 bun run test:extension
 ```
 
-Fixture preparation needs network access unless an exact local checkout is already available. Confirm that the real-fixture tests ran without being skipped: role gating and both Sol composition orders must execute. The composition guard follows OMP's public `ExtensionRunner.emitBeforeAgentStart` contract: each returned prompt becomes the next handler's input. It requires the final prompt to retain one model preset, one bookkeeping block and downstream context, with the host role replaced. A fixture-free run supplies no pinned-dependency proof, and this handler-level guard remains separate from a native OMP host smoke. Git commit metadata alone supplies neither. These checks do not run a provider or establish live session, messenger or container compatibility.
+Fixture preparation needs network access unless the exact packages are already available. Confirm that the real-fixture tests ran without being skipped: role gating and native Sol composition must execute. The guard invokes the real OMP `loadExtensionFromFactory` and `ExtensionRunner.emitBeforeAgentStart`, asserting on the combined result, not FakePI's per-handler returns. It covers an imported dependency and both standalone extension orders, retains one model preset, one bookkeeping block and downstream context, replaces the host role, leaves the base untouched and stays stable across repeated turns. A final declining handler must preserve the earlier winner; excluded roles, models and subagents leave the prompt they receive unchanged. A fail-on-access model registry and forbidden action callbacks prevent auth, provider and unrelated work. The private fixture package and its lock are test-only: root/consumer dependencies, model defaults and installer pins are unchanged. These checks do not establish live TUI, messenger or provider behavior; no performance gain is claimed.
 
 ## A pull request
 

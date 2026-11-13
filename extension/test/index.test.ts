@@ -457,33 +457,53 @@ describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
     expect(lane.userMessages).toEqual(["ulw fix it"]);
   });
 
-  test("Sol bookkeeping survives the pinned model preset in either extension order", async () => {
-    for (const order of ["dori-first", "ulw-first"]) {
-      useConfig(REAL_ULW);
-      const lane = await load({
-        session: session(`lane-preset-${order}`),
-        flags: { "dori-role": "lane" },
-        model: { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai-codex" },
-      });
-      await lane.emit("session_start");
-      // A standalone host-loaded ULW can precede Dori; keep each extension's own handler order.
-      if (order === "ulw-first") {
-        const handlers = lane.handlers.get("before_agent_start") ?? [];
-        lane.handlers.set("before_agent_start", [...handlers.slice(1), ...handlers.slice(0, 1)]);
-      }
-      // OMP's runner passes each replacement to the next handler. Inspect the final result, not independent returns.
-      const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
-      const results = await lane.emit("before_agent_start", {
-        ...agentStart,
-        systemPrompt: [host, "Retained downstream context"],
-      });
-      const final = results.at(-1);
-      expect(final).toHaveProperty("systemPrompt");
-      const prompt = JSON.stringify(final);
+  test("native OMP composes Sol bookkeeping with the pinned preset and preserves excluded prompts", async () => {
+    if (!process.env["DORI_TEST_OMP_ROOT"])
+      throw new Error("the real d69 fixture requires the exact native OMP host fixture; see CONTRIBUTING.md");
+    // Fixture-free runs keep the existing skips; load this isolated SDK only inside the real-dependency guard.
+    const { nativeComposition, SOL_MODEL } = await import("../../test/fixtures/omp-native-host/compose.ts");
+    const dori = join(import.meta.dir, "../index.ts");
+    const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
+    const parent = { kind: "main", id: "NativeParent", name: "Main", depth: 0 } as const;
+    for (const { embedded, entries } of [
+      { embedded: true, entries: [dori] },
+      { embedded: false, entries: [dori, REAL_ULW] },
+      { embedded: false, entries: [REAL_ULW, dori] },
+    ]) {
+      useConfig(embedded ? REAL_ULW : "");
+      const base = [host, "Retained downstream context"];
+      const original = [...base];
+      const result = await nativeComposition(entries, base, { role: "lane", agent: parent });
+      expect(result.first).toBeArray();
+      expect(result.first).toEqual(result.afterAll[0]);
+      expect(result.second).toEqual(result.first);
+      expect(result.afterAll[1]).toEqual(result.first);
+      expect(base).toEqual(original);
+      const prompt = JSON.stringify(result.first);
       expect(prompt.match(/<omp-model-preset>/g)).toHaveLength(1);
       expect(prompt.match(/<omp-dori-lane-bookkeeping>/g)).toHaveLength(1);
       expect(prompt).not.toContain("HOST_ROLE");
       expect(prompt).toContain("Retained downstream context");
     }
-  });
+    for (const excluded of [
+      { role: "dori" as const },
+      {},
+      { role: "lane" as const, model: { ...SOL_MODEL, id: "gpt-6.1-terra", name: "GPT-6.1 Terra" } },
+      {
+        role: "lane" as const,
+        agent: { kind: "sub" as const, id: "NativeSub", name: "Sub", depth: 1, parentId: parent.id },
+      },
+    ]) {
+      useConfig("");
+      const base = [host, "Retained downstream context"];
+      const original = [...base];
+      const result = await nativeComposition([REAL_ULW, dori], base, { ...excluded, observeBefore: dori });
+      expect(result.beforeDori).toHaveLength(2);
+      expect(result.afterAll).toEqual(result.beforeDori);
+      expect(result.second).toEqual(result.first);
+      if (result.first !== undefined) expect(result.first).toEqual(result.afterAll[0]);
+      expect(JSON.stringify(result.afterAll)).not.toContain("<omp-dori-lane-bookkeeping>");
+      expect(base).toEqual(original);
+    }
+  }, 30_000);
 });

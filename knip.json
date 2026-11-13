@@ -23,5 +23,11 @@
     "skills/dori-mode/scripts/src/**/*.ts",
     "skills/dori-mode/scripts/test/**/*.ts"
   ],
+  "workspaces": {
+    "test/fixtures/omp-native-host": {
+      "entry": ["compose.ts"],
+      "project": ["compose.ts"]
+    }
+  },
   "ignoreExportsUsedInFile": true
 }

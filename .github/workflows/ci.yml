@@ -26,6 +26,14 @@ jobs:
           git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
           git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
           test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+      - name: Install exact native OMP test host
+        run: bun install --frozen-lockfile
+        working-directory: test/fixtures/omp-native-host
+      - name: Bind exact native OMP test host
+        run: |
+          host="$GITHUB_WORKSPACE/test/fixtures/omp-native-host/node_modules/@oh-my-pi/pi-coding-agent"
+          bun -e 'const p = await Bun.file(process.argv[1] + "/package.json").json(); if (p.version !== "18.18.8") throw new Error("unexpected native OMP fixture version: " + p.version)' "$host"
+          printf 'DORI_TEST_OMP_ROOT=%s\n' "$host" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: skills/dori-mode/scripts
@@ -44,6 +52,14 @@ jobs:
           git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
           git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
           test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+      - name: Install exact native OMP test host
+        run: bun install --frozen-lockfile
+        working-directory: test/fixtures/omp-native-host
+      - name: Bind exact native OMP test host
+        run: |
+          host="$GITHUB_WORKSPACE/test/fixtures/omp-native-host/node_modules/@oh-my-pi/pi-coding-agent"
+          bun -e 'const p = await Bun.file(process.argv[1] + "/package.json").json(); if (p.version !== "18.18.8") throw new Error("unexpected native OMP fixture version: " + p.version)' "$host"
+          printf 'DORI_TEST_OMP_ROOT=%s\n' "$host" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: skills/dori-mode/scripts
