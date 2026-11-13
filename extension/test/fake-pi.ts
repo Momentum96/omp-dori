@@ -13,7 +13,13 @@ export type Entry = {
 };
 export type FakeSession = { id: string; file?: string; entries: Entry[] };
 type Agent = DoriContext["agent"];
-export type FakeOptions = { session: FakeSession; flags?: Record<string, string>; agent?: Agent; active?: string[] };
+export type FakeOptions = {
+  session: FakeSession;
+  flags?: Record<string, string>;
+  agent?: Agent;
+  active?: string[];
+  model?: DoriContext["model"];
+};
 
 export type FakePi = {
   api: DoriApi;
@@ -49,6 +55,7 @@ export const fakePi = (options: FakeOptions): FakePi => {
       cwd: tmpdir(),
       mode: "print",
       agent,
+      model: options.model,
       sessionManager: {
         getSessionId: () => fake.session.id,
         getSessionFile: () => fake.session.file,
