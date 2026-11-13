@@ -106,7 +106,9 @@ export const prepareLaunch = async (
     // A lesson the cap kept out is named too: a brief that silently lacks a standing rule is the bug this catches.
     warnings: [
       ...problems.map((problem) => `LESSON_WARNING ${problem}`),
-      ...omitted.map((lesson) => `LESSON_OMITTED ${lesson.id} (${lesson.scope === "global" ? "global" : lesson.cwd}) ${lesson.rule}`),
+      ...omitted.map(
+        (lesson) => `LESSON_OMITTED ${lesson.id} (${lesson.scope === "global" ? "global" : lesson.cwd}) ${lesson.rule}`,
+      ),
     ],
     preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities)}`,
   };

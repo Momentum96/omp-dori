@@ -244,12 +244,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   const paneHeldByAnother = (paneId: string): boolean => {
     if (stateDir === undefined) return false;
     const existing = readPaneState(stateDir, paneId);
-    if (
-      existing === null ||
-      !Number.isSafeInteger(existing.pid) ||
-      existing.pid <= 0 ||
-      existing.pid === process.pid
-    )
+    if (existing === null || !Number.isSafeInteger(existing.pid) || existing.pid <= 0 || existing.pid === process.pid)
       return false;
     try {
       process.kill(existing.pid, 0);

@@ -66,8 +66,7 @@ export class Telegram {
     let body: { ok?: boolean; result?: T; description?: string; error_code?: number };
     try {
       const parsed: unknown = JSON.parse(res.body || "{}");
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
-        throw new Error("expected an object");
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("expected an object");
       body = parsed as typeof body;
     } catch {
       throw new MessengerError(`telegram ${method}: malformed API response`, res.status);
