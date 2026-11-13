@@ -39,9 +39,11 @@ bun run ci
 - `typecheck` — `tsc --noEmit` for the harness, skill scripts and extension.
 - `knip` — no unused files, exports or dependencies.
 - `lint:loc` — the TypeScript file-length gate, with a 250-line limit per capped file.
-- `test` — the harness suite.
+- `test:ci` — the harness suite in two isolated Bun worker processes.
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
+
+`bun run test` remains the sequential harness command for debugging. CI uses Bun's native `--parallel=2` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit two-worker limit avoids scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged.
 
 The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 
