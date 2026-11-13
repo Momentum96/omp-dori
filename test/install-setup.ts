@@ -58,10 +58,7 @@ export function setup() {
     `#!/bin/sh\ncase "$1" in\n--version) echo "\${INSTALL_TEST_BUN_VERSION:-1.4.4}" ;;\n-e) exec ${JSON.stringify(process.execPath)} "$@" ;;\n*) echo "$*" >> ${JSON.stringify(join(root, "bun.log"))} ;;\nesac\n`,
   );
   chmodSync(join(bin, "bun"), 0o755);
-  writeFileSync(
-    join(bin, "omp"),
-    "#!/bin/sh\ncase \"$1\" in\n--version) echo 'omp 18.18.8' ;;\n*) exit 64 ;;\nesac\n",
-  );
+  writeFileSync(join(bin, "omp"), "#!/bin/sh\ncase \"$1\" in\n--version) echo 'omp 18.18.8' ;;\n*) exit 64 ;;\nesac\n");
   chmodSync(join(bin, "omp"), 0o755);
   const upstreamCommit = (text: string) => {
     writeFileSync(join(upstream, cli), text);

@@ -31,7 +31,10 @@ function snapshot(path: string): string {
   return JSON.stringify({ mode: stat.mode, bytes: readFileSync(path).toString("base64") });
 }
 
-const protectedSnapshot = (paths: ConsumerPaths) => [snapshot(paths.dori), ...paths.links.map(([path]) => snapshot(path))];
+const protectedSnapshot = (paths: ConsumerPaths) => [
+  snapshot(paths.dori),
+  ...paths.links.map(([path]) => snapshot(path)),
+];
 const consumerEnv = (paths: ConsumerPaths) => ({
   HOME: paths.home,
   SKILLS_DIR: join(paths.home, ".agents/skills"),
