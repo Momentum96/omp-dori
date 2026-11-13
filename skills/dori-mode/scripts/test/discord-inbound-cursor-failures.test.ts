@@ -55,7 +55,14 @@ const cursorWorld = async (explicit: boolean, onEmit?: (message: DiscordInbound)
   const socket = sockets[0];
   if (!socket) throw new Error("gateway did not open");
   return {
-    rest, intake, live, socket, sockets, timers, received, outcome,
+    rest,
+    intake,
+    live,
+    socket,
+    sockets,
+    timers,
+    received,
+    outcome,
     finished: () => finished,
     cursor: (channel: string) => storeFor(channel).load(),
     path: (channel: string) => join(state.dir, "discord-inbound", `${channel}.json`),
@@ -196,7 +203,11 @@ test("a first-seen scope-all channel still seeds its own cursor and deduplicates
     world.socket.ready(1);
     await settle();
     expect(existsSync(world.path("50"))).toBe(false);
-    for (const [seq, id] of [[2, "201"], [3, "201"], [4, "202"]] as const) {
+    for (const [seq, id] of [
+      [2, "201"],
+      [3, "201"],
+      [4, "202"],
+    ] as const) {
       world.socket.receive({ op: 0, t: "MESSAGE_CREATE", s: seq, d: ownerMessage(id, { channel_id: "50" }) });
     }
     await settle();
