@@ -1,5 +1,5 @@
 import { afterEach } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -92,4 +92,28 @@ export function setup() {
     return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() };
   };
   return { root, upstream, src, home, ulw, cli, upstreamCommit, env, install };
+}
+
+// A local omp-ulw remote with one commit per call, and omp-dori's lock pointing at its first commit.
+export function withUlwRemote() {
+  const s = setup();
+  const remote = join(s.root, "ulw-remote");
+  mkdirSync(remote);
+  git(remote, "init", "-q", "-b", "main");
+  writeFileSync(join(remote, "presets.ts"), "export {};\n");
+  const commit = (text: string): string => {
+    writeFileSync(join(remote, "index.ts"), `export default () => {}; // ${text}\n`);
+    git(remote, "add", ".");
+    git(remote, "commit", "-qm", text);
+    return git(remote, "rev-parse", "HEAD");
+  };
+  const first = commit("u1");
+  writeFileSync(join(s.upstream, "omp-ulw.lock"), `${first}\n`);
+  git(s.upstream, "add", "omp-ulw.lock");
+  git(s.upstream, "commit", "-qm", "lock");
+  const config = () => JSON.parse(readFileSync(join(s.home, ".dori/config.json"), "utf8"));
+  const ulwHead = () => git(join(s.home, ".dori/omp-ulw"), "rev-parse", "HEAD");
+  const install = (extra: Record<string, string> = {}) =>
+    s.install({ OMP_ULW_SRC: "", OMP_ULW_REPO: remote, ...extra });
+  return { ...s, remote, first, commit, config, ulwHead, install };
 }
