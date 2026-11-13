@@ -19,6 +19,20 @@ omp-dori è un port modificato per OMP che trasforma le richieste via chat in la
 - Salva worklog, checkpoint delle lane e registri su disco, così `dori boot` può esaminarli dopo un riavvio.
 - Conserva lezioni e backlog e offre pianificazione oraria facoltativa e supervisione dell'host e delle attività in stallo per il lavoro continuativo.
 
+## Dalla richiesta al risultato
+
+```mermaid
+flowchart TD
+    request["Il tuo messaggio"] --> route{"Attività piccola?"}
+    route -->|Sì| direct["Dori la gestisce direttamente"]
+    route -->|No| lane["Brief e lane di lavoro dedicata"]
+    direct --> verify{"Risultato e prove verificati?"}
+    lane --> verify
+    verify -->|Sì| report["Rapporto nel thread originale"]
+    verify -->|No| resolve["Correggere il problema o chiedere"]
+    resolve --> verify
+```
+
 ## Anteprima supportata
 
 **`v0.1.2` è una prerelease GitHub per Linux x64 + herdr + Discord.** Bun **1.4.4** e OMP nativo **18.18.8** sono la base testata e le versioni minime. Versioni più recenti e altre distribuzioni Linux non sono automaticamente verificate.
