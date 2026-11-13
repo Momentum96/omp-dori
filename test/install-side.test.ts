@@ -68,7 +68,6 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
   expect(readlinkSync(join(side, "skills/omp-dori-mode/references"))).toBe(join(src, "skills/dori-mode/references"));
 });
 
-
 test("an omp-dori install from before the marker, with its checkout elsewhere, is updated without asking", () => {
   // Given an unmanaged source home whose earlier source installer linked the external checkout's extension.
   const { home, src, install } = setup();
