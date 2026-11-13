@@ -207,7 +207,8 @@ elif ! git -C "$src" merge --ff-only --quiet '@{u}'; then
   exit 1
 fi
 
-if [ "$mode" = primary ] && [ -n "$other" ]; then
+if [ "$mode" = primary ] && { [ -n "$other" ] ||
+  { [ -L "$bin_dir/dori" ] && [ ! "$bin_dir/dori" -ef "$src/skills/dori-mode/scripts/src/cli.ts" ]; }; }; then
   backup="$primary_home/backups/omp-dori-install-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup"
   [ -f "$primary_home/config.json" ] && cp -p "$primary_home/config.json" "$backup/config.json"
@@ -270,8 +271,12 @@ fi
 # In primary mode the skill owns the installed dori name; a side install never links a global dori.
 (cd "$src" && bun install --frozen-lockfile --silent)
 (cd "$src/skills/dori-mode/scripts" && bun install --frozen-lockfile --silent)
-[ "$mode" = primary ] && (cd "$src/skills/dori-mode/scripts" && bun link --silent)
 (cd "$src/extension" && bun install --frozen-lockfile --silent)
+if [ "$mode" = primary ]; then
+  mkdir -p "$bin_dir"
+  link "$src/skills/dori-mode/scripts/src/cli.ts" "$bin_dir/dori" ||
+    fail "dori command was not installed; move $bin_dir/dori aside or choose another OMP_DORI_BIN_DIR."
+fi
 
 mkdir -p "$base"
 if [ "$mode" = side ] && [ -n "$ulw_explicit" ] && [ "$ulw" != "$base/omp-ulw" ]; then

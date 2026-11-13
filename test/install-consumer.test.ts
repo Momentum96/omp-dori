@@ -104,7 +104,6 @@ test("a separate side source install and its reinstall preserve an installed con
   expect(protectedSnapshot(paths)).toEqual(before);
   expect(JSON.parse(readFileSync(configPath, "utf8")).defaultModel).toBe("fixture/preserved");
   expect(readlinkSync(join(options.OMP_DORI_BIN_DIR, "omp-dori"))).toBe(join(side, "bin/omp-dori"));
-  expect(readFileSync(join(source.root, "bun.log"), "utf8")).not.toContain("link");
 });
 
 test("side mode holds when its selected home is a consumer home or a symlink alias outside the primary home", async () => {
