@@ -57,6 +57,14 @@ consumer_home() {
       const physical = realpathSync(base);
       const target = resolve(physical, readlinkSync(join(base, "src")));
       managed ||= dirname(target) === join(physical, "releases/releases");
+      if (!managed) {
+        try {
+          // Resolve only the parent; the release itself may be absent or unreadable.
+          managed = realpathSync(dirname(target)) === join(physical, "releases/releases");
+        } catch (error) {
+          if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+        }
+      }
     }
     if (managed) console.log("consumer");
   ' "$1")" || fail "Could not inspect consumer ownership at $1; nothing was changed."
