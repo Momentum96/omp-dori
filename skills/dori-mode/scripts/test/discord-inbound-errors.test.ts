@@ -3,7 +3,7 @@ import { discordInbound } from "../src/messenger/discord-inbound.ts";
 import { MessengerError } from "../src/messenger/http.ts";
 import { discordRestWorld, memoryDiscordCursor, ownerMessage } from "./discord-inbound-fakes.ts";
 
-const options = { ownerId: "10", channelId: "20" };
+const options = { ownerId: "10", channelIds: ["20"] };
 
 test("authentication and channel permissions fail initialization with actionable sanitized errors", async () => {
   for (const [path, status, expected] of [
@@ -14,7 +14,7 @@ test("authentication and channel permissions fail initialization with actionable
     const world = discordRestWorld([ownerMessage("101")]);
     const cursor = memoryDiscordCursor("100");
     world.state.failure.set(path, status);
-    const error: unknown = await discordInbound(world.discord, cursor.store, options).catch(
+    const error: unknown = await discordInbound(world.discord, () => cursor.store, options).catch(
       (failure: unknown) => failure,
     );
     expect(error).toBeInstanceOf(MessengerError);
@@ -29,17 +29,19 @@ test("authentication and channel permissions fail initialization with actionable
 test("only authenticated bots with Message Content Intent initialize owner intake", async () => {
   const user = discordRestWorld();
   user.state.bot = false;
-  await expect(discordInbound(user.discord, memoryDiscordCursor().store, options)).rejects.toThrow("bot identity");
+  await expect(discordInbound(user.discord, () => memoryDiscordCursor().store, options)).rejects.toThrow(
+    "bot identity",
+  );
   expect(user.requests).toHaveLength(1);
   const self = discordRestWorld();
   await expect(
-    discordInbound(self.discord, memoryDiscordCursor().store, { ownerId: "99", channelId: "20" }),
+    discordInbound(self.discord, () => memoryDiscordCursor().store, { ownerId: "99", channelIds: ["20"] }),
   ).rejects.toThrow("human owner, not the bot");
   for (const flags of [0, 1 << 17, Number.NaN]) {
     const world = discordRestWorld();
     world.state.flags = flags;
     const cursor = memoryDiscordCursor();
-    await expect(discordInbound(world.discord, cursor.store, options)).rejects.toThrow("Message Content Intent");
+    await expect(discordInbound(world.discord, () => cursor.store, options)).rejects.toThrow("Message Content Intent");
     expect(cursor.saved).toEqual([]);
     expect(world.requests).toHaveLength(2);
   }
@@ -47,7 +49,7 @@ test("only authenticated bots with Message Content Intent initialize owner intak
     const world = discordRestWorld();
     world.state.flags = flags;
     const cursor = memoryDiscordCursor();
-    await discordInbound(world.discord, cursor.store, options);
+    await discordInbound(world.discord, () => cursor.store, options);
     expect(cursor.store.load()).toBe("0");
   }
 });
@@ -57,7 +59,7 @@ test("missing owner content is actionable and remains uncommitted", async () => 
   delete message.content;
   const world = discordRestWorld([message]);
   const cursor = memoryDiscordCursor("100");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   const received: string[] = [];
   await expect(intake.poll((inbound) => received.push(inbound.message))).rejects.toThrow(
     "enable Message Content Intent",
@@ -70,7 +72,7 @@ test("missing owner content is actionable and remains uncommitted", async () => 
 test("a history endpoint that does not advance fails without delivery or cursor loss", async () => {
   const world = discordRestWorld(Array.from({ length: 150 }, (_, index) => ownerMessage(String(index + 1))));
   const cursor = memoryDiscordCursor("0");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   world.state.stuckBefore = true;
   const received: string[] = [];
   await expect(intake.poll((message) => received.push(message.message))).rejects.toThrow("pagination did not advance");
@@ -82,15 +84,16 @@ test("a history endpoint that does not advance fails without delivery or cursor 
 test("disappearing state and a mismatched channel cannot silently rebaseline or emit unrelated history", async () => {
   const world = discordRestWorld([ownerMessage("101")]);
   const cursor = memoryDiscordCursor("100");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   cursor.store.load = () => undefined;
   const requests = world.requests.length;
   await expect(intake.poll(() => {})).rejects.toThrow("cursor disappeared");
   expect(world.requests).toHaveLength(requests);
   expect(cursor.saved).toEqual([]);
   const foreign = discordRestWorld([ownerMessage("100", { channel_id: "21", content: "private foreign history" })]);
+  foreign.state.mixChannels = true;
   const fresh = memoryDiscordCursor();
-  await expect(discordInbound(foreign.discord, fresh.store, options)).rejects.toThrow(
+  await expect(discordInbound(foreign.discord, () => fresh.store, options)).rejects.toThrow(
     "channel response does not match",
   );
   expect(fresh.saved).toEqual([]);

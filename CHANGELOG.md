@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `dori inbound discord --gateway` delivers owner messages the moment they are posted over a Gateway connection (intents `GUILD_MESSAGES`, `DIRECT_MESSAGES` and the privileged `MESSAGE_CONTENT`; it does not change presence). The REST path stays as backfill: after every `READY`/`RESUMED` each watched channel is read from its cursor, so nothing posted during an outage is lost, and a shared per-channel cursor emits every message exactly once and in order. Without `--gateway` the behaviour is unchanged.
+- Discord intake can watch several channels and threads: `DORI_DISCORD_CHANNEL_IDS` adds comma-separated IDs and `DORI_DISCORD_SCOPE=all` adds every readable text channel, active thread and the owner DM. A single `DORI_DISCORD_CHANNEL_ID` configuration, its output and its cursor file are unchanged.
+- The Discord Gateway connection logic now lives in `discord-gateway.ts`, shared by presence and intake; `dori presence discord` behaviour and output are unchanged.
+
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
 
 This preview targets the first public release for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.

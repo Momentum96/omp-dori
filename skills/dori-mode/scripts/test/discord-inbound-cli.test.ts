@@ -70,6 +70,12 @@ test("public Discord intake defaults to three seconds and honors --loop in minut
   }
 });
 
+test("an extra channel list naming the same channel is read once and announced once", async () => {
+  const { out, err, code } = await inboundCli(["--loop", "0"], { DORI_DISCORD_CHANNEL_IDS: " 20 ,20" });
+  expect({ code, err }).toEqual({ code: 0, err: "" });
+  expect(out.trim().split("\n")[0]).toBe("INBOUND_READY discord owner=10 channel=20 bot=99");
+});
+
 test("explicit --loop 0 performs one poll and exits with its cursor persisted", async () => {
   const { out, err, code, cursor } = await inboundCli(["--loop", "0"]);
   expect({ code, err, cursor }).toEqual({ code: 0, err: "", cursor: "102" });
@@ -85,6 +91,8 @@ test("invalid owner, authentication, permission and content-intent setup never a
     [{ DORI_DISCORD_TOKEN: "invalid-token" }, "valid bot token"],
     [{ DORI_TEST_DISCORD_CASE: "permissions" }, "View Channel, Read Message History"],
     [{ DORI_TEST_DISCORD_CASE: "intent" }, "Message Content Intent"],
+    [{ DORI_DISCORD_SCOPE: "everything" }, "DORI_DISCORD_SCOPE must be all or unset"],
+    [{ DORI_DISCORD_CHANNEL_IDS: "20,abc" }, "DORI_DISCORD_CHANNEL_ID"],
   ] as const) {
     const { out, err, code, cursor } = await inboundCli(["--loop", "0"], environment);
     expect({ code, out, cursor }).toEqual({ code: 1, out: "", cursor: undefined });

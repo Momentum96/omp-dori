@@ -46,6 +46,11 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
     stuckBefore: false,
     failure: new Map<string, number>(),
     unrelated: [] as TestDiscordMessage[],
+    /** Guild text channels, active threads and the owner DM, for scope=all discovery. */
+    guilds: [] as { id: string; channels: string[]; threads: string[] }[],
+    dm: undefined as string | undefined,
+    denied: new Set<string>(),
+    mixChannels: false,
   };
   const requests: HttpRequest[] = [];
   const http: Http = async (request) => {
@@ -60,13 +65,32 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
     let body: unknown;
     if (path === "/users/@me") body = { id: state.botId, bot: state.bot };
     else if (path === "/applications/@me") body = { flags: state.flags };
-    else if (path === "/channels/20/messages") {
+    else if (path === "/users/@me/guilds") body = state.guilds.map((guild) => ({ id: guild.id }));
+    else if (path === "/users/@me/channels") {
+      if (request.method !== "POST" || JSON.parse(String(request.body ?? "{}")).recipient_id !== "10") {
+        throw new Error("unexpected DM request");
+      }
+      body = { id: state.dm };
+    } else if (/^\/guilds\/\d+\/channels$/.test(path)) {
+      body = (state.guilds.find((guild) => path.includes(`/${guild.id}/`))?.channels ?? []).map((id) => ({
+        id,
+        type: 0,
+      }));
+    } else if (/^\/guilds\/\d+\/threads\/active$/.test(path)) {
+      body = {
+        threads: (state.guilds.find((guild) => path.includes(`/${guild.id}/`))?.threads ?? []).map((id) => ({ id })),
+      };
+    } else if (/^\/channels\/\d+\/messages$/.test(path)) {
+      const channel = path.split("/")[2] ?? "";
+      if (state.denied.has(channel)) return { status: 403, headers: {}, body: "{}" };
       const before = url.searchParams.get("before");
       if (before && state.failBefore) {
         return { status: 503, headers: {}, body: '{"diagnostic":"private second page body"}' };
       }
       const limit = Number(url.searchParams.get("limit"));
-      const all = [...state.messages].sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? -1 : 1));
+      const all = state.messages
+        .filter((message) => state.mixChannels || message.channel_id === channel)
+        .sort((a, b) => (BigInt(a.id) > BigInt(b.id) ? -1 : 1));
       if (before && state.stuckBefore) body = all.slice(0, limit);
       else {
         const eligible = all.filter((message) => before === null || BigInt(message.id) < BigInt(before));

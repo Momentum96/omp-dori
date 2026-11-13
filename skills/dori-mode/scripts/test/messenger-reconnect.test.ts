@@ -92,5 +92,5 @@ test("a terminal Gateway rejection exits nonzero with one sanitized error and no
   expect(out).toBe("");
   expect(err.trim().split("\n")).toHaveLength(1);
   expect(err).toContain("Discord gateway closed code=4014 (disallowed intents)");
-  expect(err).not.toMatch(/\"op\"|Error:| at /);
+  expect(err).not.toMatch(/"op"|Error:| at /);
 });

@@ -1,9 +1,8 @@
 /** dori send, presence, inbound and transcribe: the messengers. */
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
+import { discordClock, discordInboundCommand, openDiscordSocket, untilStopped } from "./cli-discord.ts";
 import { Discord } from "./messenger/discord.ts";
 import { discordPresence } from "./messenger/discord-presence.ts";
-import { discordInbound, formatDiscordInbound } from "./messenger/discord-inbound.ts";
-import { discordInboundEnv, fileDiscordInboundStore } from "./messenger/discord-inbound-state.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
@@ -82,36 +81,7 @@ const presence: Command = async ({ key }) => {
     await every(1, async () => console.log(`PRESENCE slack ${await p.hold()}`));
   } else if (key === "discord") {
     const token = process.env["DORI_DISCORD_TOKEN"] ?? die("DORI_DISCORD_TOKEN is not set");
-    const p = discordPresence(
-      (url) => {
-        const ws = new WebSocket(url);
-        return {
-          send: (data) => ws.send(data),
-          close: (code) => ws.close(code),
-          onMessage: (cb) => ws.addEventListener("message", (event) => cb(String(event.data))),
-          onClose: (cb) => ws.addEventListener("close", (event) => cb(event.code)),
-          onError: (cb) => ws.addEventListener("error", () => cb()),
-        };
-      },
-      token,
-      {
-        now: realClock.now,
-        random: Math.random,
-        setTimeout: (cb, ms) => setTimeout(cb, ms),
-        clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-      },
-      (line) => console.log(line),
-    );
-    const stop = () => p.close();
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    try {
-      await p.done;
-    } finally {
-      process.removeListener("SIGINT", stop);
-      process.removeListener("SIGTERM", stop);
-      p.close();
-    }
+    await untilStopped(discordPresence(openDiscordSocket, token, discordClock, (line) => console.log(line)));
   } else die("presence needs slack or discord");
 };
 
@@ -150,21 +120,12 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
 const inbound: Command = async ({ key, loopMinutes, config, values }) => {
   const minutes = loopMinutes();
   if (key === "telegram") return await telegramInbound(config.stateDir, minutes);
-  if (key === "discord") {
-    const ownerId = discordInboundEnv("DORI_DISCORD_OWNER_ID", process.env["DORI_DISCORD_OWNER_ID"]);
-    const channelId = discordInboundEnv("DORI_DISCORD_CHANNEL_ID", process.env["DORI_DISCORD_CHANNEL_ID"]);
-    const token = process.env["DORI_DISCORD_TOKEN"] || die("DORI_DISCORD_TOKEN is not set");
-    const intake = await discordInbound(
-      new Discord(fetchHttp, realClock, token),
-      fileDiscordInboundStore(config.stateDir, channelId),
-      { ownerId, channelId },
+  if (key === "discord")
+    return await discordInboundCommand(
+      config.stateDir,
+      values["gateway"] === true,
+      values["loop"] === undefined ? 3 / 60 : minutes,
     );
-    console.log(`INBOUND_READY discord owner=${ownerId} channel=${channelId} bot=${intake.botId}`);
-    await every(values["loop"] === undefined ? 3 / 60 : minutes, async () => {
-      await intake.poll((message) => console.log(formatDiscordInbound(message)));
-    });
-    return;
-  }
   if (key !== "slack") die("inbound supports slack, telegram or discord");
   const auth = slackAuth(envSlackToken() ?? die(NO_SLACK_TOKEN));
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
