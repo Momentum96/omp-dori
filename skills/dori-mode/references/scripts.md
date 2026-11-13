@@ -172,6 +172,19 @@ Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN`
 
 `--edit` always updates one existing message in place. Input over 4096 UTF-16 code units fails with an instruction to shorten the text or send without `--edit`, before any API request or mutation. It never edits a prefix and posts the remainder. The library's `rich=true` send path retains one unsplit HTML request, leaving Telegram to validate markup and its rendered-length limit. Rich edits use the same conservative preflight bound on the complete raw HTML, including tags and entities; markup over that bound is rejected even if its rendered text would fit. Short rich sends and edits keep their existing HTML behavior. HTML-aware splitting and multi-message edits are not implemented.
 
+On Discord, `--to` accepts an exact channel ID. With `DORI_DISCORD_GUILD_ID` set, it also accepts a unique channel name, with or without `#` (`--to chat` or `--to '#chat'`). Missing or ambiguous names fail before sending. `--thread ID` needs no `--to` and selects the thread for both sending and `--edit`; an edit still updates one message without printing a `SENT` line. New messages disable mentions. Forum and media channels hold posts rather than messages, so direct sends point to `dori thread discord create`.
+
+### `dori thread discord create --to CHANNEL --title T [--text T] [--tag NAME]...`
+Creates a public thread in a text channel, or a post in a forum/media channel. `--to` uses the same ID/name lookup as Discord sends. A forum post uses `--text`, or the complete title when text is omitted, as its starter message. In a text channel, optional `--text` is sent inside the newly created thread. Authored whitespace is retained in titles and starter text; titles are limited to 100 characters. Starter messages disable mentions.
+
+Repeat `--tag NAME` to apply forum tags by name or ID. An unknown tag reports the forum's known tag names; tags on a text-channel thread are rejected. Success prints the API's `THREAD <thread-id>`, with ` mid=<message-id>` when the API returns a starter message ID or an optional text-channel starter is sent. Thread creation and a subsequent text-channel starter are separate API operations; if that send fails, the created thread remains.
+
+### `dori thread discord set <thread-id> [--title T] [--tag NAME]... [--archive|--unarchive]`
+Renames a thread, replaces a forum post's complete applied-tag list, archives it or reopens it. Tag names/IDs resolve against the parent forum; unknown tags include its known tag names in the error. Supply at least one change and choose at most one of `--archive` and `--unarchive`. Success prints the thread ID returned by the API as `THREAD <thread-id>`.
+
+### `dori react discord --to CHANNEL [--thread ID] --message ID [--emoji E] [--remove]`
+Adds the bot's own reaction, using the eyes emoji by default. `--to` is a channel ID; `--thread ID` selects a thread instead and needs no `--to`. `--emoji` accepts Unicode or a custom emoji in Discord's `name:id` form, URL-encoded for the API. `--remove` removes only the bot's own reaction. Success prints `REACTED <channel-or-thread-id> +` for add or `REACTED <channel-or-thread-id> -` for remove.
+
 ### `dori presence <slack|discord>`
 Keeps the account shown as online until explicitly stopped. Enable one instance per account under the owning OMP session's native `monitor` tool; two writers can compete.
 - **Discord:** use your own `DORI_DISCORD_TOKEN` in the child environment. REST inbound polling and message sending do not establish online presence. The Gateway keeper emits `PRESENCE_READY discord event=READY|RESUMED` only after that real dispatch, `PRESENCE_ACK discord seq=<number|->` only for the first actual heartbeat acknowledgement per connection and `PRESENCE_RECONNECT` while reconnecting. Later routine acknowledgements update lifecycle state silently. Authentication/configuration/intent failures exit nonzero with sanitized errors. SIGINT/SIGTERM ends retries, sockets and timers with `PRESENCE_STOPPED discord`; intentional monitor stop means offline. Restart only by explicit choice. See [operational details](../../../docs/releases.md#discord-online-presence).
@@ -223,8 +236,8 @@ Prints `LAG n=<count> p50=<ms>ms p90=<ms>ms p99=<ms>ms max=<ms>ms[ skipped=<n>]`
 - new journals are created with mode `0600`, following the state-journal convention. Records include chat and user IDs but no message text or bot token. Existing file permissions are retained, and records accumulate locally until removed by the owner;
 - `skipped=<n>` counts records without a finite numeric lag in the window, including missing dates, malformed JSON and the partial last line a kill mid-write leaves behind.
 
-### `dori transcribe <audio-file>`
-Runs `hooks.transcribe` and prints the transcript. A failed or empty transcription is an error, never an empty message.
+### `dori transcribe <audio-file|url>`
+Runs the existing `hooks.transcribe` argv with `{file}` and prints the transcript. Local paths pass through unchanged. An HTTP(S) URL is downloaded to a unique private temporary directory, with an owner-only audio file, before the same hook runs. The download and its directory are removed after success, failed downloads, and failed or empty transcription; local source files are retained. Failed downloads and failed or empty transcription exit with an error.
 
 ### `dori heavy <label> -- <command ...>`
 Waits until load is under `heavyMaxLoad` and one of `heavySlots` is free, then runs the command and frees the slot when it exits. A slot held by a process that no longer exists (or a zombie) is taken over. Use it for full builds and test suites. Installs, focused tests and git do not need it.

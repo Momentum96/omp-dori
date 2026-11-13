@@ -55,9 +55,14 @@ const USAGE = `dori <command> [options]
   heavy <label> -- <command ...>       run a heavy command when a slot is free and load is low
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
-                                       post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
+                                       Discord accepts channel names with DORI_DISCORD_GUILD_ID; --thread needs no --to and also targets edits
+  thread discord create --to CHANNEL --title T [--text T] [--tag NAME]...
+  thread discord set <thread> [--title T] [--tag NAME]... [--archive|--unarchive]
+                                       open a forum post or text-channel thread; rename, replace tags, archive or reopen
+  react discord --to CHANNEL [--thread ID] --message ID [--emoji E] [--remove]
+                                       add or remove the bot's own reaction (eyes by default); --thread needs no --to
   presence <slack|discord>             keep the account shown as online until stopped
-  transcribe <audio-file>              run hooks.transcribe and print the text
+  transcribe <audio-file|url>           run hooks.transcribe and print the text; HTTP(S) downloads are private and temporary
   inbound slack|telegram|discord [--loop MIN] [--gateway]
                                        print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
@@ -102,6 +107,12 @@ const flags = parseArgs({
     to: { type: "string" },
     text: { type: "string" },
     edit: { type: "string" },
+    tag: { type: "string", multiple: true },
+    archive: { type: "boolean" },
+    unarchive: { type: "boolean" },
+    message: { type: "string" },
+    emoji: { type: "string" },
+    remove: { type: "boolean" },
     kind: { type: "string" },
     step: { type: "string" },
     result: { type: "string" },

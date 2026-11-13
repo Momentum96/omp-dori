@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Discord operations resolve channel names within `DORI_DISCORD_GUILD_ID`, send/edit directly in threads, create text threads or tagged forum posts, rename/retag/archive/reopen threads, and add/remove bot reactions. HTTP(S) audio transcription uses the existing hook with private temporary downloads and cleanup; existing local transcription and the primary Discord intake remain unchanged.
 - GPT-6.1 Sol lane main agents receive idempotent guidance to batch required todo, goal and launch-footer bookkeeping with work when dependencies allow. Existing journals, forwarding guards and completion prerequisites remain required; strict review lanes without a launch footer keep their output contract. Other models, Dori, ordinary sessions and subagents retain their prompts.
 - Launch footers use the runtime already selected by `DORI_RUNTIME`, config or detection. With a known runtime and lead pane, one shell call records and forwards the report as one data argument after the live-agent/empty-input checks. Missing destinations leave a report-only command and explanatory prose; write-free previews need no running or installed runtime.
 - Opt-in `dori inbound discord --gateway` delivers owner text live with REST backfill before queued dispatches after every READY/RESUMED. Both paths share a per-channel cursor for deduplication and ascending delivery. Gateway mode ignores `--loop`, including `0`; default single-channel REST polling, output and cursor files remain compatible.

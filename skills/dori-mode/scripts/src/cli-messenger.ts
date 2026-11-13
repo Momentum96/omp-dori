@@ -1,9 +1,9 @@
-/** dori send, presence, inbound and transcribe: the messengers. */
+/** dori send, presence, inbound, thread, react and transcribe: the messengers. */
 import { existsSync } from "node:fs";
 
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
+import { reactDiscord, sendDiscord, threadDiscord, withLocalAudio } from "./cli-discord-ops.ts";
 import { discordClock, discordInboundCommand, openDiscordSocket, untilStopped } from "./cli-discord.ts";
-import { Discord } from "./messenger/discord.ts";
 import { discordPresence } from "./messenger/discord-presence.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
@@ -22,8 +22,10 @@ export const messengerErrors = [MessengerError, UnsafeMessageError, Transcriptio
 
 const NO_SLACK_TOKEN = "DORI_SLACK_TOKEN is not set (nor DORI_SLACK_TOKEN_FILE)";
 
-const send: Command = async ({ key, need, opt, values, config }) => {
+const send: Command = async (cli) => {
+  const { key, need, opt, values, config } = cli;
   const platform = key ?? die("send needs slack, telegram or discord");
+  if (platform === "discord") return await sendDiscord(cli);
   const to = need("to");
   const text = need("text");
   const thread = opt("thread");
@@ -56,10 +58,6 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
     if (messageId !== undefined) await tg.edit(target, messageId, text);
     else console.log(`SENT ${await tg.send(target, text)}`);
-  } else if (platform === "discord") {
-    const dc = new Discord(fetchHttp, realClock, token("DORI_DISCORD_TOKEN"));
-    if (edit) await dc.edit(to, edit, text);
-    else console.log(`SENT ${await dc.send(thread ?? to, text)}`);
   } else die(`unknown platform ${platform}`);
 };
 
@@ -167,6 +165,8 @@ export const messengerCommands: Readonly<Record<string, Command>> = {
   send,
   presence,
   inbound,
+  thread: async (cli) => (cli.key === "discord" ? await threadDiscord(cli) : die("thread supports discord")),
+  react: async (cli) => (cli.key === "discord" ? await reactDiscord(cli) : die("react supports discord")),
   "inbound-lag": async ({ opt, config }) => {
     // Read back what the receiver recorded: without this the jsonl is a file nobody can query.
     const limitText = opt("limit");
@@ -196,6 +196,7 @@ export const messengerCommands: Readonly<Record<string, Command>> = {
     );
   },
   transcribe: async ({ key, config }) => {
-    console.log(await transcribe(run, config.hooks.transcribe, key ?? die("transcribe needs an audio file path")));
+    const source = key ?? die("transcribe needs an audio file path");
+    console.log(await withLocalAudio(source, (file) => transcribe(run, config.hooks.transcribe, file)));
   },
 };
