@@ -36,14 +36,20 @@ bun run ci
 `bun run ci` is the same chain CI runs:
 
 - `check` — Biome lint and format.
-- `typecheck` — `tsc --noEmit` for the harness, skill scripts and extension.
+- `typecheck` — `tsc --noEmit` for the harness, skill scripts and extension, run concurrently.
 - `knip` — no unused files, exports or dependencies.
 - `lint:loc` — the TypeScript file-length gate, with a 250-line limit per capped file.
 - `test:ci` — the harness suite in two isolated Bun worker processes.
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
 
-`bun run test` remains the sequential harness command for debugging. Linux CI uses `test:ci` with two isolated Bun file workers; the macOS 15 ARM job runs `bun test --parallel=3 ./test/` with three. These use native `--parallel` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit worker limits avoid scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged. A same-run macOS ABBA comparison (2, 3, 3, 2 workers) observed identical results and lower root-suite time with three workers; two samples per setting are not a guarantee against timing flakes.
+`bun run test` remains the sequential harness command for debugging. Linux CI uses `test:ci` with two isolated Bun file workers; the macOS 15 ARM job runs `bun test --parallel=3 --timings=.bun-test-timings.json ./test/` with three. These use native `--parallel` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit worker limits avoid scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged. A same-run macOS ABBA comparison (2, 3, 3, 2 workers) observed identical results and lower root-suite time with three workers; two samples per setting are not a guarantee against timing flakes.
+
+`.bun-test-timings.json` holds measured per-file durations used as scheduling hints. They are intended to start slower files earlier and reduce worker imbalance; their effect on idle time and suite runtime has not been measured. A file missing from the manifest is still run; it only loses its ordering hint, so the file is a performance hint, never a coverage gate. Regenerate it whenever the suite's shape changes enough to matter:
+
+```sh
+bun test --parallel=1 --timings=.bun-test-timings.json --update-timings ./test/
+```
 
 The Linux herdr E2E installer uses the pinned REST release asset and verifies its SHA256 before atomically replacing the binary. Each download attempt is capped at 60 seconds (plus a 5-second termination grace); at most three attempts run, with 20/40-second backoff. A checksum failure fails immediately. The hc job requires its E2E file to exist; a missing file is an error, not a successful skip. These controls keep all four release gates mandatory and do not change macOS coverage or queue capacity.
 
