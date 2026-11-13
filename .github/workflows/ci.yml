@@ -26,6 +26,15 @@ jobs:
           git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
           git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
           test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+      - name: Check out exact explicit-override compatibility fixture
+        run: |
+          pin=cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d
+          compat="$RUNNER_TEMP/omp-dori-compat-ulw"
+          git clone --quiet --no-checkout --shared "$GITHUB_WORKSPACE/ref/omp-ulw" "$compat"
+          git -C "$compat" fetch --quiet --no-tags https://github.com/dbc-hbin/omp-ulw.git "$pin"
+          git -C "$compat" -c advice.detachedHead=false checkout --quiet "$pin"
+          test "$(git -C "$compat" rev-parse HEAD)" = "$pin"
+          printf 'DORI_TEST_COMPAT_ULW_ENTRY=%s/index.ts\n' "$compat" >> "$GITHUB_ENV"
       - name: Install exact native OMP test host
         run: bun install --frozen-lockfile
         working-directory: test/fixtures/omp-native-host
@@ -52,6 +61,15 @@ jobs:
           git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
           git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
           test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+      - name: Check out exact explicit-override compatibility fixture
+        run: |
+          pin=cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d
+          compat="$RUNNER_TEMP/omp-dori-compat-ulw"
+          git clone --quiet --no-checkout --shared "$GITHUB_WORKSPACE/ref/omp-ulw" "$compat"
+          git -C "$compat" fetch --quiet --no-tags https://github.com/dbc-hbin/omp-ulw.git "$pin"
+          git -C "$compat" -c advice.detachedHead=false checkout --quiet "$pin"
+          test "$(git -C "$compat" rev-parse HEAD)" = "$pin"
+          printf 'DORI_TEST_COMPAT_ULW_ENTRY=%s/index.ts\n' "$compat" >> "$GITHUB_ENV"
       - name: Install exact native OMP test host
         run: bun install --frozen-lockfile
         working-directory: test/fixtures/omp-native-host

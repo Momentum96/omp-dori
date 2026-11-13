@@ -45,19 +45,28 @@ bun run ci
 
 The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 
-The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. Its native composition guard requires the isolated OMP 18.18.8 test package above; if d69 exists but that host is missing or mismatched, the guard fails rather than adding a skip. For real-fixture coverage, prepare both exact dependencies as the standard CI `check` and `test-macos` jobs do:
+The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. Its native guard requires both the isolated OMP 18.18.8 host and the exact explicit-override compatibility entry; a missing fixture fails rather than adding a skip. Prepare the host and both dependency revisions as the standard CI `check` and `test-macos` jobs do:
 
 ```sh
 pin="$(tr -d '[:space:]' < omp-ulw.lock)"
 git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
 git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
 test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+compat_pin=cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d
+compat="$(mktemp -d /tmp/omp-dori-compat-ulw.XXXXXX)"
+git clone --quiet --no-checkout --shared "$PWD/ref/omp-ulw" "$compat"
+git -C "$compat" fetch --quiet --no-tags https://github.com/dbc-hbin/omp-ulw.git "$compat_pin"
+git -C "$compat" -c advice.detachedHead=false checkout --quiet "$compat_pin"
+test "$(git -C "$compat" rev-parse HEAD)" = "$compat_pin"
+export DORI_TEST_COMPAT_ULW_ENTRY="$compat/index.ts"
 (cd test/fixtures/omp-native-host && bun install --frozen-lockfile)
 export DORI_TEST_OMP_ROOT="$PWD/test/fixtures/omp-native-host/node_modules/@oh-my-pi/pi-coding-agent"
 bun run test:extension
 ```
 
 Fixture preparation needs network access unless the exact packages are already available. Confirm that the real-fixture tests ran without being skipped: role gating and native Sol composition must execute. The guard invokes the real OMP `loadExtensionFromFactory` and `ExtensionRunner.emitBeforeAgentStart`, asserting on the combined result, not FakePI's per-handler returns. It covers an imported dependency and both standalone extension orders, retains one model preset, one bookkeeping block and downstream context, replaces the host role, leaves the base untouched and stays stable across repeated turns. A final declining handler must preserve the earlier winner; excluded roles, models and subagents leave the prompt they receive unchanged. A fail-on-access model registry and forbidden action callbacks prevent auth, provider and unrelated work. The private fixture package and its lock are test-only: root/consumer dependencies, model defaults and installer pins are unchanged. These checks do not establish live TUI, messenger or provider behavior; no performance gain is claimed.
+
+The compatibility checkout stays outside the repository (`RUNNER_TEMP` in CI) and does not select a production dependency. Its exact `cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d` factory runs alone on the genuine native host to establish the legacy prompt as opaque baseline data. Dori's explicit embedded import must preserve that baseline plus exactly one Sol lane-main bookkeeping block, with unchanged base and stable repeated turns. Dori, ordinary, non-Sol and subagent prompts are compared with the applicable legacy behavior; ordinary sessions retain the existing role gate. The guard assumes no current model-preset marker in that legacy revision and promises no standalone legacy mode. Configured external dependency paths, global model/auth settings and consumer pins remain untouched.
 
 ## A pull request
 
