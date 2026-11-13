@@ -86,6 +86,12 @@ if (method === "GET" && Object.hasOwn(fixture.responses, path)) {
   if (url.pathname !== "/" + releasePath + "/assets" || !state.release?.draft) {
     throw new Error("Upload does not address the draft");
   }
+  const lengths = args
+    .filter((value, index) => args[index - 1] === "-H" && /^Content-Length:/i.test(value))
+    .map(value => value.slice("Content-Length:".length).trim());
+  if (lengths.length !== 1 || !/^[0-9]+$/.test(lengths[0]) || Number(lengths[0]) !== input?.byteLength) {
+    throw new Error("HTTP 400: Bad Content-Length");
+  }
   const name = url.searchParams.get("name");
   if (!name || Object.hasOwn(state.uploads, name)) throw new Error("Duplicate or invalid asset upload");
   state.uploads[name] = {

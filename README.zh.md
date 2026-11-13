@@ -8,7 +8,7 @@
 
 [English](README.md) | 简体中文 | [Deutsch](README.de.md) | [日本語](README.ja.md) | [Italiano](README.it.md)
 
-> **OMP 首个公开预览版 `v0.1.1` 面向 Linux x64 / herdr / Discord。** 测试基准为 Bun 1.4.4、native OMP 18.18.8，最低版本也分别相同。macOS/hc 的 CI 覆盖与首版实际消费者支持范围分开说明。以 [English](README.md)、[한국어](README.ko.md) 和[安装与支持指南](docs/releases.md)为准；没有宣称完成独立外部用户 beta。
+> **OMP 首个公开预览候选版 `v0.1.2` 面向 Linux x64 / herdr / Discord。** 目前尚未发布；release QA 和发布回读仍待完成。测试基准为 Bun 1.4.4、native OMP 18.18.8，最低版本也分别相同。macOS/hc 的 CI 覆盖与首版实际消费者支持范围分开说明。以 [English](README.md)、[한국어](README.ko.md) 和[安装与支持指南](docs/releases.md)为准；没有宣称完成独立外部用户 beta。
 >
 > 其余译文保留 [upstream `97d807b` 的历史参考](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.zh.md)。历史 omo 和架构说明并非当前 OMP 版安装步骤。
 
@@ -59,9 +59,9 @@ Slack、Discord 和 Telegram 都在 `skills/dori-mode/scripts/src/messenger/` �
 
 ### Dori mode，你对话的那个 bot
 
-公开预览需要 Linux x64、git、Bun 1.4.4、native OMP 18.18.8，以及 PATH 上的 herdr。请按[精确标签 `v0.1.1` 安装步骤](docs/releases.md#install-the-exact-preview)，核对发布者 `vntrevx/omp-dori`，下载同一 release 的四个 asset，先检查 `SHA256SUMS` 再执行安装器。
+公开预览需要 Linux x64、git、Bun 1.4.4、native OMP 18.18.8，以及 PATH 上的 herdr。发布后请按[精确标签 `v0.1.2` 安装步骤](docs/releases.md#install-the-exact-preview)，核对发布者 `vntrevx/omp-dori`，下载同一 release 的四个 asset，先检查 `SHA256SUMS` 再执行安装器。
 
-直接调用路径为 `~/.dori/bin/dori`，可将 `~/.dori/bin` 加入 PATH。`dori update check|install --version v0.1.1` 明确选择此预览版；默认 latest 只选择 stable release，不拉取任意 `main`。
+直接调用路径为 `~/.dori/bin/dori`，可将 `~/.dori/bin` 加入 PATH。`dori update check|install --version v0.1.2` 明确选择此预览版；默认 latest 只选择 stable release，不拉取任意 `main`。
 
 AI 与 Discord 认证由用户本人准备。安装不会启动 provider、messenger、watcher 或 service。Discord REST polling 和消息发送本身不会维持 bot online；有需要时应明确用 native OMP monitor 运行 `dori presence discord`，有意停止后应离线。检测到存活的 Dori 时，安装、更新与 rollback 的激活会保留等待。完整限制与恢复流程见支持指南。
 

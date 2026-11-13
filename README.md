@@ -15,9 +15,9 @@ Dori lives in your Slack, Discord or Telegram. You tell him what to do in a thre
 
 This is a modified OMP port of [`sisyphuslabs/dori-superagent`](https://github.com/sisyphuslabs/dori-superagent/tree/97d807b9037cb050a72129659cf6306d8055010d), based on upstream `97d807b9037cb050a72129659cf6306d8055010d` and the local OMP integration at `75a1b28de8caddb6d30b2e3d72ef3dec09450b47`. The Sustainable Use License and original notices remain; see [NOTICE](NOTICE).
 
-**`v0.1.1` is a GitHub prerelease for Linux x64 / herdr / Discord.** The tested baseline is Bun **1.4.4** and native OMP **18.18.8**; these are also the minimum versions, not a claim that every newer combination has been tested. Install an exact verified release, then choose when to start Dori. Installation prepares code, dependencies and links without starting a messenger, Gateway presence keeper, watcher, service, harness or model request.
+**`v0.1.2` is the candidate for the first public GitHub prerelease for Linux x64 / herdr / Discord.** It is not yet published; release QA and publication readback are pending. The tested baseline is Bun **1.4.4** and native OMP **18.18.8**; these are also the minimum versions, not a claim that every newer combination has been tested. Install an exact verified release, then choose when to start Dori. Installation prepares code, dependencies and links without starting a messenger, Gateway presence keeper, watcher, service, harness or model request.
 
-macOS and hc have CI coverage and retained source adapters; they are outside this first live consumer support scope. Slack and Telegram features remain in the source. Preview support does not imply an independent external-user beta or universal compatibility. See the [release installation and support guide](docs/releases.md), [release notes](CHANGELOG.md) and the canonical [`v0.1.1` release path](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.1).
+macOS and hc have CI coverage and retained source adapters; they are outside this first live consumer support scope. Slack and Telegram features remain in the source. Preview support does not imply an independent external-user beta or universal compatibility. See the [release installation and support guide](docs/releases.md), [release notes](CHANGELOG.md) and the intended canonical [`v0.1.2` release path](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.2).
 
 Dori mode (`skills/dori-mode`) is the bot you talk to: a skill for [OMP](https://github.com/can1357/oh-my-pi) plus the primary installed `dori` CLI that opens, tracks and closes work sessions and talks to Slack, Discord and Telegram.
 
@@ -67,22 +67,22 @@ For the supported Discord preview, create/invite your own bot through the [Disco
 
 Have git, [Bun](https://bun.sh) 1.4.4, [native OMP](https://github.com/can1357/oh-my-pi) 18.18.8 and [herdr](https://github.com/herdrdev/herdr) installed on Linux x64 and on `PATH`. The installer does not install or upgrade this toolchain. Download tools in this example are `curl`, `sha256sum` and `tar`. Installing or updating a release needs no `gh`, GitHub write permission or porting-model calls; AI use later needs your own provider authentication.
 
-Check that the release belongs to **`vntrevx/omp-dori`** and is tagged **`v0.1.1`**. Download all four assets from that exact release and verify the checksums before running its installer:
+Once published, check that the release belongs to **`vntrevx/omp-dori`** and is tagged **`v0.1.2`**. Download all four assets from that exact release and verify the checksums before running its installer:
 
 ```sh
 download_dir="$(mktemp -d)" || exit 1
 cd "$download_dir" || exit 1
-release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.1"
-for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.1.tar.gz; do
+release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.2"
+for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.2.tar.gz; do
   curl --proto '=https' --tlsv1.2 -fL "$release_url/$asset" -o "$asset" || exit 1
 done
 sha256sum --check SHA256SUMS || exit 1
-bash ./install.sh --version v0.1.1 --from "$download_dir" || exit 1
+bash ./install.sh --version v0.1.2 --from "$download_dir" || exit 1
 "$HOME/.dori/bin/dori" --version
 export PATH="$HOME/.dori/bin:$PATH"
 ```
 
-Keep the PATH export in your shell configuration if desired. The explicit launcher is always `~/.dori/bin/dori`; no global `bun link` is needed. Checksums bind the downloaded files together; the trusted identity comes from the canonical HTTPS repository/release. The installer also checks the tag, commit/tree, archive and extracted source manifest. There is no detached-signature claim. `DORI_RELEASE=v0.1.1 bash ./install.sh` selects the same preview explicitly for a network install; a default latest request selects stable releases only and can report that none exists.
+Keep the PATH export in your shell configuration if desired. The explicit launcher is always `~/.dori/bin/dori`; no global `bun link` is needed. Checksums bind the downloaded files together; the trusted identity comes from the canonical HTTPS repository/release. The installer also checks the tag, commit/tree, archive and extracted source manifest. There is no detached-signature claim. `DORI_RELEASE=v0.1.2 bash ./install.sh` selects the same preview explicitly for a network install; a default latest request selects stable releases only and can report that none exists.
 
 The installer creates config only when absent, preserves existing configuration/authentication/work/session data, fetches public omp-ulw at [`omp-ulw.lock`](omp-ulw.lock), and routes the CLI, skill and extension through the single `~/.dori/src` release pointer. Existing unmanaged source directories or conflicting non-link destinations are held for inspection. `--from` supplies local Dori assets; first-time pinned dependency retrieval can still need anonymous network access. See [layout, migration and troubleshooting](docs/releases.md).
 
@@ -101,8 +101,8 @@ The operating contract is [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.m
 ### Consumer updates and rollback
 
 ```sh
-dori update check --version v0.1.1
-dori update install --version v0.1.1
+dori update check --version v0.1.2
+dori update install --version v0.1.2
 dori update status
 dori update rollback
 ```

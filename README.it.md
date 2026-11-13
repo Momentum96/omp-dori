@@ -8,7 +8,7 @@ Il tuo ingegnere 24/7, nella chat che usi già.
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | [日本語](README.ja.md) | Italiano
 
-> **Anteprima pubblica OMP `v0.1.1`: Linux x64, herdr e Discord.** Le versioni testate sono Bun 1.4.4 e OMP nativo 18.18.8, anche versioni minime. macOS/hc hanno copertura CI, distinta dal supporto all'uso reale di questa prima anteprima. Fanno fede [English](README.md), [한국어](README.ko.md) e la [guida a installazione e supporto](docs/releases.md). Non viene dichiarata una beta indipendente con utenti esterni.
+> **Candidata alla prima anteprima pubblica OMP `v0.1.2`: Linux x64, herdr e Discord.** Non ancora pubblicata; QA della release e verifica della pubblicazione restano da eseguire. Le versioni testate sono Bun 1.4.4 e OMP nativo 18.18.8, anche versioni minime. macOS/hc hanno copertura CI, distinta dal supporto all'uso reale di questa prima anteprima. Fanno fede [English](README.md), [한국어](README.ko.md) e la [guida a installazione e supporto](docs/releases.md). Non viene dichiarata una beta indipendente con utenti esterni.
 >
 > Il resto della traduzione conserva il [riferimento upstream `97d807b`](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.it.md). Le descrizioni storiche di omo e dell'architettura non sono istruzioni attuali per installare la versione OMP.
 
@@ -59,9 +59,9 @@ La creazione del bot e il completamento del suo login passano da [agent-messenge
 
 ### Dori mode, il bot con cui parli
 
-Per l'anteprima pubblica servono Linux x64, git, Bun 1.4.4, OMP nativo 18.18.8 e herdr nel PATH. Segui la [guida al tag esatto `v0.1.1`](docs/releases.md#install-the-exact-preview): verifica il repository `vntrevx/omp-dori`, scarica i quattro asset della release e controlla `SHA256SUMS` prima di eseguire l'installer.
+Per l'anteprima pubblica servono Linux x64, git, Bun 1.4.4, OMP nativo 18.18.8 e herdr nel PATH. Dopo la pubblicazione segui la [guida al tag esatto `v0.1.2`](docs/releases.md#install-the-exact-preview): verifica il repository `vntrevx/omp-dori`, scarica i quattro asset della release e controlla `SHA256SUMS` prima di eseguire l'installer.
 
-Il comando esplicito è `~/.dori/bin/dori`; aggiungi `~/.dori/bin` al PATH. `dori update check|install --version v0.1.1` sceglie esplicitamente l'anteprima. La selezione predefinita di latest considera soltanto release stabili, mai un `main` arbitrario.
+Il comando esplicito è `~/.dori/bin/dori`; aggiungi `~/.dori/bin` al PATH. `dori update check|install --version v0.1.2` sceglie esplicitamente l'anteprima. La selezione predefinita di latest considera soltanto release stabili, mai un `main` arbitrario.
 
 Autenticazione AI e Discord sono dell'utente. L'installazione non avvia provider, messenger, watcher o servizi. Polling e invio REST su Discord non tengono il bot online: occorre abilitare esplicitamente `dori presence discord` come monitor nativo OMP; fermarlo intenzionalmente porta il bot offline. Attivazione e rollback restano in attesa finché Dori è vivo. Limiti e recupero sono nella guida di supporto.
 

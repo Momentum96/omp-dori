@@ -123,6 +123,8 @@ export async function uploadAsset(repository: string, release: number, name: str
       "-H",
       "Content-Type: application/octet-stream",
       "-H",
+      `Content-Length: ${bytes.byteLength}`,
+      "-H",
       "X-GitHub-Api-Version: 2022-11-28",
       "--input",
       "-",

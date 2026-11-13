@@ -6,7 +6,7 @@
 
 [English](README.md) | 한국어
 
-**첫 공개 릴리스 `v0.1.1`은 Linux x64 / herdr / Discord용 GitHub prerelease입니다.** 테스트한 기준은 Bun **1.4.4**, native OMP **18.18.8**이며 최소 버전도 각각 같습니다. 더 높은 모든 버전의 검증을 뜻하지 않습니다. macOS와 hc는 CI 범위와 소스 어댑터를 유지하지만 첫 공개판의 실제 소비자 지원 범위와는 구분합니다. Slack/Telegram 소스 기능도 보존합니다. 독립 외부 사용자 beta 완료나 모든 환경의 호환성을 보장하는 공개판은 아닙니다. [설치·지원 상세](docs/releases.md), [변경 기록](CHANGELOG.md), [정식 릴리스 경로](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.1)를 확인하세요.
+**첫 공개 릴리스 후보 `v0.1.2`는 Linux x64 / herdr / Discord용 GitHub prerelease로 준비 중입니다.** 아직 공개되지 않았으며 릴리스 QA와 공개 결과 확인이 남아 있습니다. 테스트한 기준은 Bun **1.4.4**, native OMP **18.18.8**이며 최소 버전도 각각 같습니다. 더 높은 모든 버전의 검증을 뜻하지 않습니다. macOS와 hc는 CI 범위와 소스 어댑터를 유지하지만 첫 공개판의 실제 소비자 지원 범위와는 구분합니다. Slack/Telegram 소스 기능도 보존합니다. 독립 외부 사용자 beta 완료나 모든 환경의 호환성을 보장하는 공개판은 아닙니다. [설치·지원 상세](docs/releases.md), [변경 기록](CHANGELOG.md), [예정된 정식 릴리스 경로](https://github.com/vntrevx/omp-dori/releases/tag/v0.1.2)를 확인하세요.
 
 Dori는 Slack, Discord, Telegram에서 요청을 받아 일마다 별도의 코딩 세션을 열고, 완료 증거를 확인한 뒤 같은 대화에 보고하는 상시 엔지니어입니다. 이 저장소는 [sisyphuslabs/dori-superagent](https://github.com/sisyphuslabs/dori-superagent/tree/97d807b9037cb050a72129659cf6306d8055010d)의 전체 공개 소스를 OMP로 포트한 수정본입니다. 기준은 upstream `97d807b9037cb050a72129659cf6306d8055010d`, 기존 OMP 소스 `75a1b28de8caddb6d30b2e3d72ef3dec09450b47`입니다.
 
@@ -74,22 +74,22 @@ harness 기록은 `DORI_HOME`(기본 `~/.dori`), 스킬 장부·확장 기록은
 
 Linux x64에 git, Bun 1.4.4, native OMP 18.18.8, herdr를 먼저 설치하고 `PATH`에 두세요. 아래 다운로드에는 `curl`, `sha256sum`, `tar`도 필요합니다. 릴리스 설치기는 toolchain을 설치·업그레이드하지 않습니다. 소비자 설치·업데이트에는 `gh`, GitHub 쓰기 권한이나 upstream 포팅용 모델 호출이 필요하지 않습니다.
 
-저장소가 **`vntrevx/omp-dori`**, 태그가 **`v0.1.1`**인지 확인한 뒤 그 릴리스의 네 asset을 함께 받아 checksum을 검증하고 실행하세요.
+공개된 뒤 저장소가 **`vntrevx/omp-dori`**, 태그가 **`v0.1.2`**인지 확인한 다음 그 릴리스의 네 asset을 함께 받아 checksum을 검증하고 실행하세요.
 
 ```sh
 download_dir="$(mktemp -d)" || exit 1
 cd "$download_dir" || exit 1
-release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.1"
-for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.1.tar.gz; do
+release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.2"
+for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.2.tar.gz; do
   curl --proto '=https' --tlsv1.2 -fL "$release_url/$asset" -o "$asset" || exit 1
 done
 sha256sum --check SHA256SUMS || exit 1
-bash ./install.sh --version v0.1.1 --from "$download_dir" || exit 1
+bash ./install.sh --version v0.1.2 --from "$download_dir" || exit 1
 "$HOME/.dori/bin/dori" --version
 export PATH="$HOME/.dori/bin:$PATH"
 ```
 
-PATH export는 원하면 shell 설정에 보존하세요. 직접 실행 경로는 `~/.dori/bin/dori`이며 global `bun link`는 필요하지 않습니다. 신뢰 근거는 canonical HTTPS 저장소와 릴리스의 신원이며, checksum은 받은 파일들의 무결성을 묶습니다. 별도 전자서명을 주장하지 않습니다. 설치기는 태그·commit/tree·archive와 추출한 소스 manifest도 검증합니다. 네트워크 설치의 명시적 preview 선택은 `DORI_RELEASE=v0.1.1 bash ./install.sh`로도 가능합니다. 버전 없는 latest는 stable만 선택하므로 첫 prerelease만 있을 때는 대상이 없다고 알릴 수 있습니다.
+PATH export는 원하면 shell 설정에 보존하세요. 직접 실행 경로는 `~/.dori/bin/dori`이며 global `bun link`는 필요하지 않습니다. 신뢰 근거는 canonical HTTPS 저장소와 릴리스의 신원이며, checksum은 받은 파일들의 무결성을 묶습니다. 별도 전자서명을 주장하지 않습니다. 설치기는 태그·commit/tree·archive와 추출한 소스 manifest도 검증합니다. 네트워크 설치의 명시적 preview 선택은 `DORI_RELEASE=v0.1.2 bash ./install.sh`로도 가능합니다. 버전 없는 latest는 stable만 선택하므로 첫 prerelease만 있을 때는 대상이 없다고 알릴 수 있습니다.
 
 config는 없을 때만 만들고 기존 설정·인증·작업·세션을 보존합니다. CLI·스킬·확장은 단일 `~/.dori/src` pointer를 따르며, public omp-ulw는 lock 커밋으로 받습니다. 기존 unmanaged 소스 디렉터리나 링크 위치 충돌은 보류합니다. `--from`은 로컬 Dori asset 입력이며, 최초 pinned 의존성 취득에는 익명 네트워크 접속이 필요할 수 있습니다. [설치 배치·전환·문제 해결](docs/releases.md)을 따르세요.
 
@@ -104,8 +104,8 @@ REST 수신·메시지 전송과 online 표시는 별개입니다. 사용 중 on
 ### 소비자 업데이트와 rollback
 
 ```sh
-dori update check --version v0.1.1
-dori update install --version v0.1.1
+dori update check --version v0.1.2
+dori update install --version v0.1.2
 dori update status
 dori update rollback
 ```
