@@ -23,7 +23,7 @@ Compose's build context is the candidate root (`../..` relative to the compose f
 | gh | `2.100.0` | Retained upstream version and per-architecture sha256 values |
 | agent-messenger | `2.40.0` | [Published npm metadata](https://registry.npmjs.org/agent-messenger/2.40.0), Node >=22.13.0 |
 | OMP | `@oh-my-pi/pi-coding-agent@18.18.8` | [Published npm metadata](https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/18.18.8), `omp` bin, Bun >=1.4.4 |
-| omp-ulw | `cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d` | Candidate `omp-ulw.lock`; [public source](https://github.com/dbc-hbin/omp-ulw/tree/cbfe5ee72e5b2783af01616e7f4d3da5e3f9180d) |
+| omp-ulw | `d69ad5fbe032c8aa49098c1d599c20df232bc474` | Candidate `omp-ulw.lock`; [public source](https://github.com/dbc-hbin/omp-ulw/tree/d69ad5fbe032c8aa49098c1d599c20df232bc474) |
 
 Bun's new asset sha256 values are `bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c` for `bun-linux-x64.zip` and `baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e` for `bun-linux-aarch64.zip`. These were read from the release metadata, not guessed or calculated from a substituted package. The other binary hashes are retained from upstream `97d807b`'s recipe; this port has not downloaded those assets or revalidated their bytes.
 

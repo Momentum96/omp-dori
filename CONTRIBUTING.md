@@ -16,7 +16,9 @@ The CLA Assistant workflow then records the signature and the check turns green;
 
 ## Source development and public releases
 
-Consumers follow the [verified release installation and support guide](docs/releases.md) and use `dori update check|install|status|rollback`. Maintainers work in a separate ordinary checkout; the checkout installer is now `scripts/install-source.sh`. To install the current checkout without pulling, use `DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh`. Do not develop inside a frozen installed release.
+Consumers follow the [verified release installation and support guide](docs/releases.md) and use `dori update check|install|status|rollback`. Maintainers work in a separate ordinary checkout; the source-only installer is `scripts/install-source.sh`. To install the current checkout beside an existing Dori without pulling, use `DORI_INSTALL_MODE=side DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh`. `OMP_DORI_HOME` selects the side config/state/wrapper home (default `~/.omp-dori`); `OMP_DORI_BIN_DIR` selects the `omp-dori` command destination. The wrappers and `omp-dori-mode` skill keep lanes in that home, with `HC_SESSION=omp-dori` by default (`OMP_DORI_HC_SESSION` overrides it). See the [source installation guide](docs/releases.md#source-checkouts-for-maintainers) for modes, backups and path overrides.
+
+Consumer control metadata and the managed source pointer protect the selected installation home in both modes, including aliases: `primary` source installation holds on consumer-managed `~/.dori`, and `side` requires a separate destination. An unmanaged source home retains the existing primary workflow; another unmanaged Dori prompts in a terminal or holds without one unless a mode is explicit. Do not develop inside a frozen installed release. Source fixture checks, real OMP wrapper/skill isolation and provider or messenger QA are separate evidence; this change claims no new live QA.
 
 Upstream porting and candidate/recovery operations use `dori upstream ... --config FILE`. That interface can use configured models and maintainer publication permissions; consumer release management uses neither. Build fixed public assets with `bun scripts/release.ts build --out DIST --prerelease`, then follow the [exact-commit review/QA/CI/tag publication procedure](docs/releases.md#building-and-publishing-releases). Source checks, real runtime/messenger evidence and independent external-user testing are distinct claims.
 
@@ -39,7 +41,19 @@ bun run ci
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
 
-The unit suites need `bun` and `git`, run offline, and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
+The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
+
+The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. For real-fixture coverage, prepare the checkout exactly as the standard CI `check` and `test-macos` jobs do:
+
+```sh
+pin="$(tr -d '[:space:]' < omp-ulw.lock)"
+git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
+git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
+test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+bun run test:extension
+```
+
+Fixture preparation needs network access unless an exact local checkout is already available. Confirm that the real-fixture tests ran without being skipped: both role gating and the current `⁂` prompt-marker regression must execute. A fixture-free run covers the local FakePI seam but supplies no runtime proof that the pinned dependency replaces `HOST_ROLE` with an `<omp-model-preset>` result. Git commit metadata alone also supplies no such proof. This fixture test does not run an OMP provider or establish live session, messenger or container compatibility.
 
 ## A pull request
 

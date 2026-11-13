@@ -30,7 +30,7 @@ Needs: Bun 1.4.4+, OMP 18.18.8+, herdr or hc, git, and the GitHub CLI (`gh`) for
 | `goalMarker` | `Pursuing goal` | launch goal-check policy; OMP activity is confirmed from the trusted extension goal record, while an explicitly empty marker keeps upstream's opt-out |
 | `startupWaitSeconds` | 180 | `launch`: how long after the start it waits for the agent's ready status and goal; raise it on a slow host. A value that is not a nonnegative number uses the default |
 | `sessionsDir` | `~/.omp/agent/sessions` | OMP session-id lookup |
-| `ompUlwPath` | `~/.dori/omp-ulw/index.ts` | role-gated extension loading; the pin is recorded in `omp-ulw.lock` |
+| `ompUlwPath` | `~/.dori/omp-ulw/index.ts` | nonempty paths retain the role-gated import; consumers use their manifest-bound cache pin, while `scripts/install-source.sh` sets `""` and loads the selected checkout once as an OMP extension (globally for primary, explicitly for side) |
 | `nudgeAfterMin`, `postAfterMin` | 15, 20 | `freshness` |
 | `closeAfterMin` | 5 | `watch` |
 | `heavySlots`, `heavyMaxLoad` | 1, 80 | `heavy` |
