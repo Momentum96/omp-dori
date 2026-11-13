@@ -102,3 +102,67 @@ test("CLI list and launch --dry-run name a damaged line, keep going, and write n
     state.done();
   }
 });
+
+test("launch preview ships twelve standing rules plus repo lessons and names every over-cap rule", async () => {
+  const state = withState();
+  try {
+    const config = join(state.dir, "config.json");
+    writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {} }));
+    const journal = new Lessons(state.dir);
+    const globals = Array.from({ length: 13 }, (_, i) =>
+      journal.add(
+        { lane: "lead", scope: "global", rule: `Global standing rule ${i}`, evidence: `/evidence/global-${i}` },
+        T0 + i,
+      ),
+    );
+    const repo = Array.from({ length: 10 }, (_, i) =>
+      journal.add(
+        { lane: "qa-lessons", cwd: state.dir, rule: `Repo rule ${i}`, evidence: `/evidence/repo-${i}` },
+        T0 + 100 + i,
+      ),
+    );
+    journal.mark(globals[1]!.id, "helped");
+    const retired = journal.add(
+      { lane: "lead", scope: "global", rule: "Retired global rule", evidence: "/evidence/retired" },
+      T0 + 1000,
+    );
+    journal.mark(retired.id, "encoded");
+    const brief = join(state.dir, "brief.md");
+    writeFileSync(brief, "Keep the owner's original task.");
+    const before = readFileSync(journal.path, "utf8");
+    const preview = await run([
+      "env",
+      `DORI_CONFIG=${config}`,
+      `DORI_STATE_DIR=${state.dir}`,
+      process.execPath,
+      cli,
+      "launch",
+      "qa-new",
+      "--title",
+      "QA",
+      "--brief",
+      brief,
+      "--done",
+      "merged acme/app#1",
+      "--dry-run",
+    ]);
+    expect(preview.code).toBe(0);
+    for (const lesson of [...globals.slice(-12), ...repo.slice(-8)]) {
+      expect(preview.out).toContain(`] ${lesson.rule}\n`);
+    }
+    for (const lesson of [globals[0]!, repo[0]!, repo[1]!, retired]) {
+      expect(preview.out).not.toContain(lesson.rule);
+    }
+    expect(preview.err.split("\n")).toEqual([
+      `LESSON_OMITTED ${globals[0]!.id} (global) ${globals[0]!.rule}`,
+      `LESSON_OMITTED ${repo[1]!.id} (${repo[1]!.cwd}) ${repo[1]!.rule}`,
+      `LESSON_OMITTED ${repo[0]!.id} (${repo[0]!.cwd}) ${repo[0]!.rule}`,
+    ]);
+    expect(preview.out).toContain("Keep the owner's original task.");
+    expect(readFileSync(brief, "utf8")).toBe("Keep the owner's original task.");
+    expect(readFileSync(journal.path, "utf8")).toBe(before);
+    expect(existsSync(join(state.dir, "lanes"))).toBe(false);
+  } finally {
+    state.done();
+  }
+});

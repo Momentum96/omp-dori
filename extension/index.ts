@@ -235,6 +235,31 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
     paneWritten = undefined;
   };
 
+  /**
+   * Only the process that owns the pane reports it. `HERDR_PANE_ID` and `HC_TERMINAL_ID` are inherited by every
+   * child, so a nested `omp` run (a `-p` check, a subagent's own session) would otherwise take the pane record of
+   * the live session above it and delete that record on its own shutdown — which reads to the watchdog as a dead
+   * lead, so it restarts the lead every tick. An incumbent that is still alive keeps its record.
+   */
+  const paneHeldByAnother = (paneId: string): boolean => {
+    if (stateDir === undefined) return false;
+    const existing = readPaneState(stateDir, paneId);
+    if (
+      existing === null ||
+      !Number.isSafeInteger(existing.pid) ||
+      existing.pid <= 0 ||
+      existing.pid === process.pid
+    )
+      return false;
+    try {
+      process.kill(existing.pid, 0);
+      return true;
+    } catch (error) {
+      // EPERM still identifies a live owner. Dead processes and invalid pid arguments do not own this pane.
+      return (error as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+
   const savePane = (ctx: DoriContext): void => {
     const paneId = process.env.HC_TERMINAL_ID || process.env.HERDR_PANE_ID;
     if (!paneId || stateDir === undefined || !session) return;
@@ -243,6 +268,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       removePane();
       return;
     }
+    if (paneHeldByAnother(paneId)) return;
     const sessionFile = ctx.sessionManager.getSessionFile();
     writePaneState(stateDir, {
       paneId,

@@ -8,7 +8,7 @@ import {
   UnsafeMessageError,
 } from "../src/messenger/http.ts";
 import { Slack } from "../src/messenger/slack.ts";
-import { htmlTable, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
+import { htmlTable, splitForTelegram, startThinking, Telegram, THINKING } from "../src/messenger/telegram.ts";
 import { fakeClock } from "./fakes.ts";
 
 type Script = (req: HttpRequest, n: number) => HttpResponse;
@@ -154,4 +154,67 @@ test("Discord messages are sent without pinging anyone and edited in place; thre
     "POST /channels/C1/messages/M1/threads",
     "PATCH /channels/T1",
   ]);
+});
+
+test("a long Telegram report preserves every paragraph and returns the last part's message id", async () => {
+  const { http, seen } = fakeHttp((req, n) => {
+    const body = JSON.parse(String(req.body));
+    if (body.text.length > 4096 || Buffer.from(body.text).toString("utf8") !== body.text)
+      return ok({ ok: false, error_code: 400, description: "invalid message text" }, 400);
+    return ok({ ok: true, result: { message_id: 70 + n } });
+  });
+  const tg = new Telegram(http, sleeps().clock, "b");
+  const long = `${"x".repeat(199)}\n`.repeat(40);
+  expect(await tg.send({ chatId: 1, threadId: 9 }, long)).toBe(72);
+  const bodies = seen.map((r) => JSON.parse(String(r.body)));
+  const texts = bodies.map((b) => b.text as string);
+  expect(texts.map((text) => text.length)).toEqual([4000, 4000]);
+  expect(texts.join("")).toBe(long);
+  expect(bodies.every((b) => b.chat_id === 1 && b.message_thread_id === 9)).toBe(true);
+  expect(seen.every((r) => r.url.endsWith("/sendMessage"))).toBe(true);
+});
+
+test("an oversized Telegram edit fails before changing the target or posting another message", async () => {
+  let target = "original";
+  const posted: string[] = [];
+  const { http, seen } = fakeHttp((req) => {
+    const text = JSON.parse(String(req.body)).text as string;
+    if (req.url.endsWith("/editMessageText")) target = text;
+    else posted.push(text);
+    return ok({ ok: true, result: { message_id: 8 } });
+  });
+  const tg = new Telegram(http, sleeps().clock, "b");
+  await expect(tg.edit({ chatId: 1 }, 42, "y".repeat(4097))).rejects.toBeInstanceOf(MessengerError);
+  expect({ target, posted, requests: seen.length }).toEqual({ target: "original", posted: [], requests: 0 });
+});
+
+test("Telegram splits preserve exact text at the UTF-16 boundary without cutting a surrogate pair", () => {
+  expect(splitForTelegram("short")).toEqual(["short"]);
+  expect(splitForTelegram("")).toEqual([""]);
+  expect(splitForTelegram("z".repeat(4096))).toEqual(["z".repeat(4096)]);
+  expect(splitForTelegram("z".repeat(4097)).map((p) => p.length)).toEqual([4096, 1]);
+  for (const prefix of [4094, 4095, 4096]) {
+    const text = `${"x".repeat(prefix)}\u{1f600}tail`;
+    const parts = splitForTelegram(text);
+    expect(parts.every((part) => part.length <= 4096 && Buffer.from(part).toString("utf8") === part)).toBe(true);
+    expect(parts.join("")).toBe(text);
+  }
+});
+
+test("read receipts replace the message's single reaction without posting a message", async () => {
+  const reactions = new Map<number, string>();
+  const { http, seen } = fakeHttp((req) => {
+    const body = JSON.parse(String(req.body));
+    if (!req.url.endsWith("/setMessageReaction") || body.chat_id !== 1 || body.reaction.length !== 1)
+      return ok({ ok: false, error_code: 400, description: "invalid reaction target" }, 400);
+    reactions.set(body.message_id, body.reaction[0].emoji);
+    return ok({ ok: true, result: true });
+  });
+  const tg = new Telegram(http, sleeps().clock, "b");
+  await tg.react({ chatId: 1 }, 55, "👀");
+  await tg.react({ chatId: 1 }, 55, "👀");
+  await tg.react({ chatId: 1 }, 55, "👍");
+  expect([...reactions]).toEqual([[55, "👍"]]);
+  expect(seen).toHaveLength(3);
+  expect(seen.every((req) => req.url.endsWith("/setMessageReaction"))).toBe(true);
 });

@@ -28,7 +28,9 @@ export type Lesson = {
 };
 export type LessonInput = Pick<Lesson, "lane" | "rule" | "evidence"> &
   ({ readonly cwd: string; readonly scope?: undefined } | { readonly scope: "global"; readonly cwd?: undefined });
-export type LessonRead = { readonly lessons: Lesson[]; readonly problems: string[] };
+export type LessonRead = { readonly lessons: Lesson[]; readonly omitted: Lesson[]; readonly problems: string[] };
+/** What `read` returns: no cap applies to a raw read, so nothing is omitted. */
+export type LessonJournal = { readonly lessons: Lesson[]; readonly problems: string[] };
 export class LessonError extends Error {}
 
 export const isLessonOutcome = (value: unknown): value is LessonOutcome =>
@@ -39,7 +41,11 @@ const singleLine = (value: unknown, max: number): value is string =>
   typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
 
 export const REPO_LESSON_CAP = 8;
-export const GLOBAL_LESSON_CAP = 4;
+// A global lesson reaches every future brief, so this cap is a safety net against runaway growth, not a routine
+// filter: a rule the owner gave must not go missing because newer ones pushed it out. 12 leaves room for the
+// standing orders a real home accumulates (this one has 11 pending, 1089 rendered characters) while still bounding
+// every brief. Whatever still does not fit is returned as `omitted` and warned about, never dropped silently.
+export const GLOBAL_LESSON_CAP = 12;
 
 const FIELDS = ["id", "at", "lane", "cwd", "scope", "rule", "evidence", "outcome"] as const;
 const IMMUTABLE = ["at", "lane", "cwd", "scope", "rule", "evidence"] as const;
@@ -94,7 +100,7 @@ export class Lessons {
   }
 
   /** Every valid lesson, newest first, and a problem line for each damaged one. One bad line never hides the rest. */
-  read(cwd?: string): LessonRead {
+  read(cwd?: string): LessonJournal {
     if (!existsSync(this.path)) return { lessons: [], problems: [] };
     const latest = new Map<string, Lesson>();
     const problems: string[] = [];
@@ -147,13 +153,21 @@ export class Lessons {
   /**
    * The lessons a new lane in cwd gets, newest first: at most GLOBAL_LESSON_CAP global ones, then at most
    * REPO_LESSON_CAP for the repo. Each kind has its own cap, so global rules never push repo lessons out of a brief.
+   * `omitted` lists the eligible lessons a cap kept out, so a caller can say so instead of shipping a brief that
+   * quietly lacks a standing rule.
    */
   forRepo(cwd: string): LessonRead {
     const { lessons, problems } = this.read(cwd);
     const current = lessons.filter((lesson) => lesson.outcome === "pending" || lesson.outcome === "helped");
-    const global = current.filter((lesson) => lesson.scope === "global").slice(0, GLOBAL_LESSON_CAP);
-    const repo = current.filter((lesson) => lesson.scope !== "global").slice(0, REPO_LESSON_CAP);
-    return { lessons: [...global, ...repo], problems };
+    const globalAll = current.filter((lesson) => lesson.scope === "global");
+    const repoAll = current.filter((lesson) => lesson.scope !== "global");
+    const global = globalAll.slice(0, GLOBAL_LESSON_CAP);
+    const repo = repoAll.slice(0, REPO_LESSON_CAP);
+    return {
+      lessons: [...global, ...repo],
+      omitted: [...globalAll.slice(GLOBAL_LESSON_CAP), ...repoAll.slice(REPO_LESSON_CAP)],
+      problems,
+    };
   }
 
   private append(lesson: Lesson): void {

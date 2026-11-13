@@ -19,6 +19,8 @@ export type TgInbound = {
   readonly from: number;
   readonly username?: string;
   readonly text?: string;
+  /** Telegram's message date in unix seconds: what receive-lag is measured against. */
+  readonly date?: number;
   readonly media?: TgMedia;
 };
 
@@ -122,6 +124,8 @@ type TgMessage = {
   readonly message_thread_id?: number;
   readonly text?: string;
   readonly caption?: string;
+  /** Unix seconds Telegram recorded the message; absent on some old or edited payloads. */
+  readonly date?: number;
   readonly location?: unknown;
   readonly voice?: TgFile;
   readonly audio?: TgFile;
@@ -223,6 +227,7 @@ export const pollTelegramInbound = async (
       from: m!.from!.id,
       ...(m!.from!.username === undefined ? {} : { username: m!.from!.username }),
       ...(m!.text === undefined && m!.caption === undefined ? {} : { text: m!.text ?? m!.caption }),
+      ...(m!.date === undefined ? {} : { date: m!.date }),
       ...(() => {
         const media = mediaOf(m!);
         return media === undefined ? {} : { media };

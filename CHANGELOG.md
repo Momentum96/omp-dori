@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Lane briefs retain the newest 12 eligible global standing rules and 8 repo lessons under separate caps. Over-cap rules are returned as `omitted` and named in launch warnings with `global` or the canonical repo cwd.
+- Nested OMP runs preserve another live process's pane record. Positive safe-integer pid validation allows malformed and dead records to be replaced while retaining live-owner and `EPERM` protection.
+- Telegram plain-text sends split losslessly at a conservative 4096 UTF-16 code-unit bound without cutting surrogate pairs, returning the last part's message ID. Malformed API responses stop the send with a messenger error.
+- Telegram edits remain single-message updates: oversized raw input fails before any request or mutation. Rich sends retain one unsplit HTML request; rich edits count markup in the same conservative bound. HTML-aware splitting and multi-message edits are outside this change.
+- Telegram owner intake retains message dates, adds a single read-receipt reaction for new messages and records lag separately from the positional `INBOUND` line. New lag journals use mode `0600` and contain chat/user metadata, without message text or bot tokens. `inbound-lag --limit` reads backwards to the requested nonblank-record window and reports nearest-rank percentiles, skipping unusable readings.
+
+These source changes retain the existing release interfaces, dependency pins and minimum requirements. The published preview's live support boundary is unchanged.
+
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
 
 This preview targets the first public release for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.

@@ -62,7 +62,8 @@ const USAGE = `dori <command> [options]
                                        print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
                                        Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and DORI_DISCORD_CHANNEL_ID
-                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval`;
+                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval
+  inbound-lag [--limit N]              receive-lag percentiles from state/telegram-lag.jsonl (the meter behind the INBOUND lines)`;
 
 const [command = "", ...rest] = process.argv.slice(2);
 if (command === "harness") process.exit(await runHarness(rest));
@@ -113,6 +114,7 @@ const flags = parseArgs({
     global: { type: "boolean" },
     source: { type: "string" },
     open: { type: "boolean" },
+    limit: { type: "string" },
   },
 });
 
