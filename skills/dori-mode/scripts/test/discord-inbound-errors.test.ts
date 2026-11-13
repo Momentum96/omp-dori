@@ -28,7 +28,9 @@ test("authentication and channel permissions fail initialization with actionable
 test("only authenticated bots with Message Content Intent initialize owner intake", async () => {
   const user = discordRestWorld();
   user.state.bot = false;
-  await expect(discordInbound(user.discord, () => memoryDiscordCursor().store, options)).rejects.toThrow(MessengerError);
+  await expect(discordInbound(user.discord, () => memoryDiscordCursor().store, options)).rejects.toThrow(
+    MessengerError,
+  );
   expect(user.requests).toHaveLength(1);
   const self = discordRestWorld();
   await expect(
