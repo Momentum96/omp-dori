@@ -477,6 +477,7 @@ describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
       const base = [host, "Retained downstream context"];
       const original = [...base];
       const result = await nativeComposition(entries, base, { role: "lane", agent: parent });
+      if (!Array.isArray(result.first)) throw new Error("native OMP returned no combined prompt array");
       expect(result.first).toBeArray();
       expect(result.first).toEqual(result.afterAll[0]);
       expect(result.second).toEqual(result.first);
