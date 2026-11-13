@@ -41,7 +41,19 @@ bun run ci
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
 
-The unit suites need `bun` and `git`, run offline, and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
+The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
+
+The extension's `with the real omp-ulw` group executes `ref/omp-ulw/index.ts` and skips when that file is absent. For real-fixture coverage, prepare the checkout exactly as the standard CI `check` and `test-macos` jobs do:
+
+```sh
+pin="$(tr -d '[:space:]' < omp-ulw.lock)"
+git clone --quiet https://github.com/dbc-hbin/omp-ulw.git ref/omp-ulw
+git -C ref/omp-ulw -c advice.detachedHead=false checkout --quiet "$pin"
+test "$(git -C ref/omp-ulw rev-parse HEAD)" = "$pin"
+bun run test:extension
+```
+
+Fixture preparation needs network access unless an exact local checkout is already available. Confirm that the real-fixture tests ran without being skipped: both role gating and the current `⁂` prompt-marker regression must execute. A fixture-free run covers the local FakePI seam but supplies no runtime proof that the pinned dependency replaces `HOST_ROLE` with an `<omp-model-preset>` result. Git commit metadata alone also supplies no such proof. This fixture test does not run an OMP provider or establish live session, messenger or container compatibility.
 
 ## A pull request
 

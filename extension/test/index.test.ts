@@ -405,4 +405,23 @@ describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
     await lane.command("ulw", "fix it");
     expect(lane.userMessages).toEqual(["ulw fix it"]);
   });
+
+  test("a lane on the current OMP prompt layout gets its model preset", async () => {
+    useConfig(REAL_ULW);
+    const lane = await load({
+      session: session("lane-preset"),
+      flags: { "dori-role": "lane" },
+      model: { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai-codex" },
+    });
+    await lane.emit("session_start");
+    // OMP 18.18 marks its system-prompt sections with ⁂; a pin that only knows § leaves every preset unapplied.
+    const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
+    const results = await lane.emit("before_agent_start", { ...agentStart, systemPrompt: [host] });
+    const prompts = results.flatMap((result) =>
+      result && typeof result === "object" && "systemPrompt" in result ? [JSON.stringify(result.systemPrompt)] : [],
+    );
+    const preset = prompts.filter((prompt) => prompt.includes("<omp-model-preset>"));
+    expect(preset).toHaveLength(1);
+    expect(preset[0]).not.toContain("HOST_ROLE");
+  });
 });
