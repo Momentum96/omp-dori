@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test";
 import { discordInbound, formatDiscordInbound, type DiscordInbound } from "../src/messenger/discord-inbound.ts";
+import { MessengerError } from "../src/messenger/http.ts";
 import { discordRestWorld, memoryDiscordCursor, ownerMessage } from "./discord-inbound-fakes.ts";
 
-const options = { ownerId: "10", channelId: "20" };
+const options = { ownerId: "10", channelIds: ["20"] };
 
 test("cold start baselines latest history, then admits only owner text in the exact configured channel", async () => {
   const world = discordRestWorld([ownerMessage("99"), ownerMessage("100")]);
   const cursor = memoryDiscordCursor();
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   expect(intake.botId).toBe("99");
   expect(cursor.saved).toEqual(["100"]);
   const received: DiscordInbound[] = [];
@@ -47,7 +48,7 @@ test("cold start baselines latest history, then admits only owner text in the ex
 test("an empty cold channel persists zero and delivers the first later message", async () => {
   const world = discordRestWorld();
   const cursor = memoryDiscordCursor();
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   expect(cursor.saved).toEqual(["0"]);
   world.state.messages.push(ownerMessage("1"));
   const received: DiscordInbound[] = [];
@@ -62,7 +63,7 @@ test("restart drains every page after the cursor in numeric order without duplic
   const world = discordRestWorld([ownerMessage(String(base)), ...ids.map((id) => ownerMessage(id))]);
   world.state.overlap = true;
   const cursor = memoryDiscordCursor(String(base));
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   expect(cursor.saved).toEqual([]);
   const received: DiscordInbound[] = [];
   await intake.poll((message) => received.push(message));
@@ -86,7 +87,7 @@ test("restart drains every page after the cursor in numeric order without duplic
 test("duplicate messages within a history page emit and checkpoint only once", async () => {
   const world = discordRestWorld([ownerMessage("101"), ownerMessage("101"), ownerMessage("102")]);
   const cursor = memoryDiscordCursor("100");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   const received: string[] = [];
   await intake.poll((message) => received.push(message.message));
   expect(received).toEqual(["101", "102"]);
@@ -96,7 +97,7 @@ test("duplicate messages within a history page emit and checkpoint only once", a
 test("a failed emitter leaves the failed message uncommitted and resumes without replaying successful delivery", async () => {
   const world = discordRestWorld([ownerMessage("101"), ownerMessage("102"), ownerMessage("103")]);
   const cursor = memoryDiscordCursor("100");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   const received: string[] = [];
   await expect(
     intake.poll((message) => {
@@ -114,12 +115,10 @@ test("a failed emitter leaves the failed message uncommitted and resumes without
 test("a later-page failure emits nothing and retains the cursor for a complete retry", async () => {
   const world = discordRestWorld(Array.from({ length: 150 }, (_, index) => ownerMessage(String(index + 1))));
   const cursor = memoryDiscordCursor("0");
-  const intake = await discordInbound(world.discord, cursor.store, options);
+  const intake = await discordInbound(world.discord, () => cursor.store, options);
   world.state.failBefore = true;
   const received: string[] = [];
-  await expect(intake.poll((message) => received.push(message.message))).rejects.toThrow(
-    "Discord inbound request failed",
-  );
+  await expect(intake.poll((message) => received.push(message.message))).rejects.toThrow(MessengerError);
   expect(received).toEqual([]);
   expect(cursor.store.load()).toBe("0");
   expect(cursor.saved).toEqual([]);
