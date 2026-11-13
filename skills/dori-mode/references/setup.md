@@ -33,7 +33,7 @@ For the supported Discord preview, use the shipped native Dori bot commands. You
 For other retained messenger integrations, [agent-messenger](https://github.com/agent-messenger/agent-messenger) remains optional platform-specific tooling with its own prerequisites and login procedures. Ask the owner which platform/identity to use before setting up those integrations.
 
 - Telegram: stream a reply as it grows and show "Thinking…" with message drafts, send rich messages for tables and headings, and use topics in the private chat (turn on threaded mode in BotFather's mini app; there is no API for that switch).
-- Discord: edit your own messages to grow them, and use threads.
+- Discord: send or edit messages in channels/threads, create text-channel threads or tagged forum posts, rename/archive/reopen threads, and add or remove the bot's own reactions.
 
 ### If the owner picks Slack: user token or bot token
 
@@ -56,9 +56,11 @@ For Discord, create/invite the owner's own bot through the Developer Portal and 
 
 - **Telegram**: @BotFather → `/setuserpic` → pick the bot → send the image.
 - **Discord**: Developer Portal → your application → **General Information** → App Icon, and **Bot** → Icon.
-  - Grant **View Channel** and **Read Message History** on the chosen channel. Replies need **Send Messages**; thread replies need **Send Messages in Threads**, and creating public threads additionally needs **Create Public Threads**. Channel permission overrides still apply. See [Discord permissions](https://docs.discord.com/developers/topics/permissions).
+  - Grant **View Channel** and **Read Message History** on the chosen channel. Replies need **Send Messages**; thread replies need **Send Messages in Threads**, and creating public threads additionally needs **Create Public Threads**. Grant **Add Reactions** for read receipts and **Manage Threads** where the bot needs to manage forum tags or rename/archive/reopen other threads. Forum post creation needs the forum's send permissions; channel overrides and moderated-tag permissions still apply. See [Discord permissions](https://docs.discord.com/developers/topics/permissions).
   - Under **Bot → Privileged Gateway Intents**, enable **Message Content Intent** for ordinary owner text. Discord applies content access across APIs, including REST; an online bot or successful API call is not proof that message content is available. Complete any approval Discord requires for the application. See [Message Content Intent](https://docs.discord.com/developers/events/gateway#message-content-intent).
   - Store the token alone in an owned regular `~/.dori/discord-token` file with mode `0600`. Keep its value out of chat, source, command arguments and monitor receipts. The native monitor recipes in the release guide load that file inside the child process, rather than exporting the token into the parent OMP session.
+  - Set the non-secret `DORI_DISCORD_GUILD_ID` in the operation command's child environment to resolve `send discord --to '#name'` or `thread discord create --to '#name'`. Exact channel IDs and `--thread ID` work without it. This variable enables operation name lookup only; owner intake retains its explicit channel/scope settings and `--gateway` opt-in.
+  - Use one thread/post per task: `dori thread discord create --to CHANNEL_ID --title "Task" --text "Starter"`, then `dori send discord --thread THREAD_ID --text "Update"`. Forum posts can add repeated `--tag NAME`; `thread discord set THREAD_ID --tag NAME --archive` replaces tags and archives the post. See [the operation commands](scripts.md#dori-thread-discord-create---to-channel---title-t---text-t---tag-name) for exact output and permission/error behavior.
 - **Slack**:
   - bot token: the app's **Basic Information** → Display Information → App icon;
   - user token: the member's profile photo (`users.setPhoto`, or the profile page).
