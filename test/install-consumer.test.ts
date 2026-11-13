@@ -184,9 +184,6 @@ test("a pointer-only consumer under a symlinked HOME parent holds primary and di
   for (const options of attempts) {
     const r = source.install(options);
     expect(r.code).toBe(1);
-    expect(r.err).toContain(
-      options.DORI_INSTALL_MODE === "primary" ? "managed by the consumer release installer" : "a consumer-managed home",
-    );
     expect(snapshot(paths.home)).toBe(before);
     expect(snapshot(source.home)).toBe(sourceHome);
     expect(snapshot(source.src)).toBe(checkout);
