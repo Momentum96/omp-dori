@@ -130,7 +130,7 @@ if [ -z "$ulw_explicit" ] && [ -f "$base/config.json" ]; then
     const config = await Bun.file(process.env.CONFIG).json();
     const path = typeof config.ompUlwPath === "string" ? config.ompUlwPath.replace(/^~(?=\/|$)/, process.env.HOME) : "";
     const dir = path ? resolve(dirname(path)) : "";
-    if (path && path !== process.env.HOME + "/.dori/omp-ulw/index.ts" && dir !== process.env.ULW_DIR) console.log(dir);')"
+    if (path && resolve(path) !== resolve(process.env.HOME, ".dori/omp-ulw/index.ts") && dir !== resolve(process.env.ULW_DIR)) console.log(dir);')"
   if [ -n "$custom_ulw" ]; then
     ulw="$custom_ulw"
     ulw_explicit=1
@@ -287,8 +287,12 @@ if [ "$mode" = primary ]; then
 fi
 
 mkdir -p "$base"
-if [ "$mode" = side ] && [ -n "$ulw_explicit" ] && [ "$ulw" != "$base/omp-ulw" ]; then
-  link "$ulw" "$base/.omp-dori-ulw" || fail "omp-ulw checkout choice was not saved"
+if [ "$mode" = side ] && [ -n "$ulw_explicit" ]; then
+  if [ "$ulw" -ef "$base/omp-ulw" ]; then
+    [ ! -L "$base/.omp-dori-ulw" ] || rm "$base/.omp-dori-ulw"
+  else
+    link "$ulw" "$base/.omp-dori-ulw" || fail "omp-ulw checkout choice was not saved"
+  fi
 fi
 config="$base/config.json"
 created=""

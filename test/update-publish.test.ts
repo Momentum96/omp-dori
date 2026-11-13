@@ -10,6 +10,7 @@ import { gitIdentity } from "../src/update/source.ts";
 import { readState, saveJson } from "../src/update/state.ts";
 import { fixture, git, publicationFixture } from "./update-setup.ts";
 
+// Real Git setup and multiple publication passes include fixture subprocesses with 10-second deadlines.
 test("public export uses only the checked manifest, preserves modes and independent owner history", async () => {
   const f = await publicationFixture();
   const before = gitIdentity(f.job.candidate);
@@ -68,7 +69,7 @@ test("public export uses only the checked manifest, preserves modes and independ
   const config = join(f.directory, "updater.json");
   saveJson(config, f.config);
   expect(await runUpdate(["check", "--config", config])).toBe(0);
-});
+}, 30_000);
 
 test("the next detected candidate uses the persisted successful baseline while configured base remains unchanged", async () => {
   const f = await publicationFixture();
