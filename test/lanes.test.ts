@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { groupId } from "../src/runtime/group.ts";
+import { Store } from "../src/store.ts";
 import { Refusal } from "../src/refusal.ts";
 import { done, ready, startLane } from "../src/lanes.ts";
 import { href } from "./fake.ts";
@@ -74,7 +77,10 @@ describe("startLane group fallback", () => {
   });
 
   test("an hc lane gets this home's group label, never the caller's herdr workspace id", async () => {
-    const { w, d, brief } = setup({ runtime: "hc" });
+    const { w, d: base, brief } = setup({ runtime: "hc" });
+    // Keep the foreign workspace text in an unrelated path to catch substring-based false positives.
+    const d = { ...base, store: new Store(join(base.store.root, "home-w9")) };
+    d.store.setRole("lead", href("w1:p1"));
     await withEnv({ ...clear, HERDR_PANE_ID: "w9:p9", HERDR_WORKSPACE_ID: "w9" }, async () => {
       await startLane(d, "hc-lane", brief);
     });
@@ -82,6 +88,10 @@ describe("startLane group fallback", () => {
     expect(run).toBeDefined();
     const group = run.find((a) => a.startsWith("dori.group="))!;
     expect(group).toMatch(/^dori\.group=[0-9a-f]{8}$/);
-    expect(run.join(" ")).not.toContain("w9");
+    expect(run.filter((a) => a.startsWith("dori.group="))).toEqual([`dori.group=${groupId(d.store.root)}`]);
+    expect(run).toContain(`DORI_HOME=${d.store.root}`);
+    expect(run).not.toContain("w9");
+    expect(run).not.toContain("w9:p9");
+    expect(run).not.toContain("--workspace");
   });
 });

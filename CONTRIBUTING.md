@@ -39,9 +39,13 @@ bun run ci
 - `typecheck` — `tsc --noEmit` for the harness, skill scripts and extension.
 - `knip` — no unused files, exports or dependencies.
 - `lint:loc` — the TypeScript file-length gate, with a 250-line limit per capped file.
-- `test` — the harness suite.
+- `test:ci` — the harness suite in two isolated Bun worker processes.
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
+
+`bun run test` remains the sequential harness command for debugging. CI uses Bun's native `--parallel=2` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit two-worker limit avoids scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged.
+
+The Linux herdr E2E installer uses the pinned REST release asset and verifies its SHA256 before atomically replacing the binary. Each download attempt is capped at 60 seconds (plus a 5-second termination grace); at most three attempts run, with 20/40-second backoff. A checksum failure fails immediately. The hc job requires its E2E file to exist; a missing file is an error, not a successful skip. These controls keep all four release gates mandatory and do not change macOS coverage or queue capacity.
 
 The unit suites need `bun` and `git` and use recorded stand-ins for `herdr` and `gh`. `test/e2e.test.ts` starts a real `herdr` server and is skipped when `herdr` is not on `PATH`.
 

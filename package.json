@@ -15,9 +15,10 @@
     "lint:loc": "bun scripts/check-loc.ts",
     "knip": "knip",
     "test": "bun test ./test/",
+    "test:ci": "bun test --parallel=2 ./test/",
     "test:skill": "cd skills/dori-mode/scripts && bun test",
     "test:extension": "cd extension && bun test",
-    "ci": "bun run check && bun run typecheck && bun run knip && bun run lint:loc && bun run test && bun run test:skill && bun run test:extension"
+    "ci": "bun run check && bun run typecheck && bun run knip && bun run lint:loc && bun run test:ci && bun run test:skill && bun run test:extension"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.6",
