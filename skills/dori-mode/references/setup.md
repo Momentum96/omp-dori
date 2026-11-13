@@ -72,10 +72,18 @@ For public releases, follow the [exact-tag install and checksum procedure](../..
 Maintainers installing an ordinary source checkout use the separate checkout installer from that repository root:
 
 ```sh
-DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
+DORI_INSTALL_MODE=side DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
 ```
 
-This is not the release bootstrap and must not be run inside a frozen consumer release. See [source installation](../../../docs/releases.md#source-checkouts-for-maintainers) for fast-forward behavior and explicit path overrides.
+This source-only command uses `OMP_DORI_HOME` (default `~/.omp-dori`) for config, state and wrappers, with only `omp-dori` linked in `OMP_DORI_BIN_DIR` (default `${BUN_INSTALL:-$HOME/.bun}/bin`). It leaves the primary Dori's config, links and command alone. The selected side home and its paths must be separate from the primary home; consumer-managed homes and their aliases are protected in either mode.
+
+For unmanaged source homes, `DORI_INSTALL_MODE=primary` installs into `~/.dori`; taking over another Dori saves its config and link targets first, and a foreign default source checkout stops installation before changes. Without a mode, another unmanaged Dori prompts in a terminal (default side) or stops without one; an existing side marker keeps side mode on reinstall. Consumer-managed `~/.dori` always holds primary source installation, even with an omp-dori extension link. Use its `dori update check|install|status|rollback`, or keep a separate side source install.
+
+For side operation, edit `<OMP_DORI_HOME>/config.json`, keep its generated `stateDir` and `agentCommand`, and use `omp-dori <command>`, `omp-dori omp ...` and `omp-dori hc ...`. The wrappers source `env.sh`, set the side Dori environment and `HC_SESSION` (default `omp-dori`, set through `OMP_DORI_HC_SESSION`), and put the side `bin/` first on `PATH`. The OMP overlay hides `dori-mode`, adds the renamed `omp-dori-mode` skill and loads only this checkout's extension with its pinned omp-ulw import. Use a separate messenger bot/channel. The hc lead command is `omp-dori hc run --name omp-dori-lead -- omp-dori omp --dori-role dori`; installation starts none of these processes.
+
+The root `install.sh` remains the consumer release bootstrap. Run source installation only from an ordinary checkout outside frozen releases. See [source installation](../../../docs/releases.md#source-checkouts-for-maintainers) for fast-forward behavior and path overrides, and the [README](../../../README.md#source-installation-next-to-an-existing-dori) for the complete side layout. These source instructions add no real OMP, provider or messenger QA claim.
+
+For the verified consumer preview, configure its home as follows:
 
 Edit `~/.dori/config.json`: for this preview choose `runtime: "herdr"`, `leadPane` (from `herdr pane current`), `laneWorkspace`, `defaultCwd`, a provider-qualified `defaultModel` available to your account and messenger hooks. Keep the installer's `agentCommand`, `sessionsDir` and `ompUlwPath`; `references/scripts.md` explains every field. Authenticate OMP yourself. Before starting `omp --dori-role dori` in herdr, set the non-secret `DORI_DISCORD_OWNER_ID` and `DORI_DISCORD_CHANNEL_ID` as positive decimal ID strings in that shell. The channel is the exact destination to read, including a thread only when its own ID is chosen. Keep `DORI_DISCORD_TOKEN` in the protected token file for child-only loading; no maintainer authentication is supplied.
 
