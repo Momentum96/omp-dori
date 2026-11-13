@@ -145,6 +145,16 @@ describe("role", () => {
     expect(lane.notes[0]).toContain("omp-ulw not loaded from /nonexistent/omp-ulw/index.ts");
     expect(readPaneState(stateDir, PANE)?.role).toBe("lane");
   });
+
+  test("an empty ompUlwPath leaves omp-ulw to a standalone extension: nothing is imported and nothing warns", async () => {
+    stateDir = useConfig("");
+    const lane = await load({ session: session("lane"), flags: { "dori-role": "lane" } });
+    await lane.emit("session_start");
+    expect(await lane.emit("before_agent_start", agentStart)).toEqual([undefined]);
+    expect(lane.tools.has("fake_ulw_tool")).toBe(false);
+    expect(lane.notes).toEqual([]);
+    expect(readPaneState(stateDir, PANE)?.role).toBe("lane");
+  });
 });
 
 describe("goal tool", () => {
