@@ -43,7 +43,7 @@ bun run ci
 - `test:skill` — the skill's script suite.
 - `test:extension` — the OMP extension suite.
 
-`bun run test` remains the sequential harness command for debugging. CI uses Bun's native `--parallel=2` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit two-worker limit avoids scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged.
+`bun run test` remains the sequential harness command for debugging. Linux CI uses `test:ci` with two isolated Bun file workers; the macOS 15 ARM job runs `bun test --parallel=3 ./test/` with three. These use native `--parallel` file workers, not `--concurrent`: tests within each file remain sequential, and each file has an isolated global/module registry. The explicit worker limits avoid scaling subprocess-heavy tests to every available CPU. Test discovery, timeouts and the four required CI job names are unchanged. A same-run macOS ABBA comparison (2, 3, 3, 2 workers) observed identical results and lower root-suite time with three workers; two samples per setting are not a guarantee against timing flakes.
 
 The Linux herdr E2E installer uses the pinned REST release asset and verifies its SHA256 before atomically replacing the binary. Each download attempt is capped at 60 seconds (plus a 5-second termination grace); at most three attempts run, with 20/40-second backoff. A checksum failure fails immediately. The hc job requires its E2E file to exist; a missing file is an error, not a successful skip. These controls keep all four release gates mandatory and do not change macOS coverage or queue capacity.
 

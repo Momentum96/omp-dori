@@ -81,7 +81,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile
         working-directory: skills/dori-mode/scripts
-      - run: bun run test:ci
+      - run: bun test --parallel=3 ./test/
       - run: bun run test:skill
       - run: bun run test:extension
 
