@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { arch, platform, release } from "node:os";
+import packageMetadata from "../package.json";
 
 import type { TelemetryEvent } from "./telemetry.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = packageMetadata.version;
 
 export const isOn = (v: string | undefined) => v !== undefined && ["1", "true", "yes"].includes(v.trim().toLowerCase());
 

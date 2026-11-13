@@ -2,7 +2,7 @@
 
 ## Preview support boundary
 
-The first public release, `v0.1.0`, is a GitHub **prerelease** for **Linux x64, herdr and Discord**. The project retains the full messenger skill, harness and OMP extension; retained features and CI jobs do not expand this preview's live consumer support scope.
+The first public release, `v0.1.1`, is a GitHub **prerelease** for **Linux x64, herdr and Discord**. The project retains the full messenger skill, harness and OMP extension; retained features and CI jobs do not expand this preview's live consumer support scope.
 
 | Component | Minimum requirement | Tested preview baseline |
 |---|---|---|
@@ -24,13 +24,13 @@ Install git, Bun, native OMP and herdr yourself and put their binaries on `PATH`
 
 Consumers need neither the GitHub CLI nor GitHub write permission to install, check, update or roll back Dori. These operations do not call porting/review models or change global provider settings. Later AI sessions use your own configured provider and quota; Discord uses your own application/bot account and token. No maintainer credentials, private session history or model authentication ship in the assets.
 
-Use the canonical repository **https://github.com/vntrevx/omp-dori** and the exact tag **`v0.1.0`**. Its intended canonical release path is **https://github.com/vntrevx/omp-dori/releases/tag/v0.1.0**. Check the repository owner, tag and release commit there before downloading. Do not substitute a fork, an arbitrary `main` script or an unverified mirror.
+Use the canonical repository **https://github.com/vntrevx/omp-dori** and the exact tag **`v0.1.1`**. Its intended canonical release path is **https://github.com/vntrevx/omp-dori/releases/tag/v0.1.1**. Check the repository owner, tag and release commit there before downloading. Do not substitute a fork, an arbitrary `main` script or an unverified mirror.
 
 Each release has four fixed assets:
 
 | Asset | Purpose |
 |---|---|
-| `omp-dori-v0.1.0.tar.gz` | Public source archive, rooted at `omp-dori-0.1.0/` |
+| `omp-dori-v0.1.1.tar.gz` | Public source archive, rooted at `omp-dori-0.1.1/` |
 | `release-manifest.json` | Product/version/tag, commit/tree, archive digest/size, public source manifest, requirements and exact public omp-ulw dependency |
 | `SHA256SUMS` | SHA-256 checksums for the release payload files |
 | `install.sh` | Release bootstrap, separate from the source-checkout installer |
@@ -44,17 +44,17 @@ Use an account with its own home and no existing running Dori. First inspect an 
 ```sh
 download_dir="$(mktemp -d)" || exit 1
 cd "$download_dir" || exit 1
-release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.0"
-for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.0.tar.gz; do
+release_url="https://github.com/vntrevx/omp-dori/releases/download/v0.1.1"
+for asset in install.sh release-manifest.json SHA256SUMS omp-dori-v0.1.1.tar.gz; do
   curl --proto '=https' --tlsv1.2 -fL "$release_url/$asset" -o "$asset" || exit 1
 done
 sha256sum --check SHA256SUMS || exit 1
-bash ./install.sh --version v0.1.0 --from "$download_dir" || exit 1
+bash ./install.sh --version v0.1.1 --from "$download_dir" || exit 1
 "$HOME/.dori/bin/dori" --version
 export PATH="$HOME/.dori/bin:$PATH"
 ```
 
-Only run the installer after every checksum passes. Preserve the PATH export in your shell configuration if desired; `~/.dori/bin/dori` is the explicit invocation and does not depend on global `bun link` registration. With that checked installer, `bash ./install.sh --version v0.1.0` or `DORI_RELEASE=v0.1.0 bash ./install.sh` fetches the exact network release instead. A request without an explicit version selects a stable release only; it does not silently opt into this preview.
+Only run the installer after every checksum passes. Preserve the PATH export in your shell configuration if desired; `~/.dori/bin/dori` is the explicit invocation and does not depend on global `bun link` registration. With that checked installer, `bash ./install.sh --version v0.1.1` or `DORI_RELEASE=v0.1.1 bash ./install.sh` fetches the exact network release instead. A request without an explicit version selects a stable release only; it does not silently opt into this preview.
 
 `--from DIRECTORY` is a supported local release-asset input for the bootstrap and for consumer `check`/`install`. Copy the four matching assets together. It is **not** a completely air-gapped first-install promise: git may still need anonymous network access to obtain the exact public omp-ulw commit. A previously provisioned, owned dependency is reused only after validation. There is no separate opaque dependency bundle format.
 
@@ -151,11 +151,11 @@ dori update <check|install|status|rollback> [--version TAG] [--from DIST]
 
 | Command | Behavior and options |
 |---|---|
-| `dori update check --version v0.1.0` | Inspect an exact release without activating it; `check` also accepts `--from DIST` |
-| `dori update install --version v0.1.0` | Verify and install the selected release; `install` also accepts `--from DIST` |
+| `dori update check --version v0.1.1` | Inspect an exact release without activating it; `check` also accepts `--from DIST` |
+| `dori update install --version v0.1.1` | Verify and install the selected release; `install` also accepts `--from DIST` |
 | `dori update status` | Inspect installed state and reconcile an interrupted activation journal |
 | `dori update rollback` | Verify and restore the retained previous release |
-| `dori update rollback --version v0.1.0` | Assert that the retained rollback target is exactly this tag |
+| `dori update rollback --version v0.1.1` | Assert that the retained rollback target is exactly this tag |
 
 `status` and `rollback` do not accept `--from`. Rollback is a retained-source operation; use `install --from DIST` to select a local candidate. Network `check`/`install` without `--version` selects stable latest only. No consumer command ports upstream, runs review models, fetches arbitrary `main`, publishes GitHub changes or grants repository write access.
 
@@ -165,7 +165,7 @@ Failed download, integrity verification or preparation leaves the previously act
 
 ## Troubleshooting and support reports
 
-- **No stable latest release:** select the preview explicitly with `--version v0.1.0`. A prerelease is not an automatic latest fallback.
+- **No stable latest release:** select the preview explicitly with `--version v0.1.1`. A prerelease is not an automatic latest fallback.
 - **Missing/wrong toolchain:** compare `bun --version`, `omp --version` and `git --version` with the baseline, and check that herdr is on `PATH`. Correct your toolchain yourself; the bootstrap does not replace global tools.
 - **Checksum/manifest/archive failure:** stop using that download. Retain the error, confirm the canonical owner/tag, and download the complete matching asset set again. Do not disable checks or combine files from different releases.
 - **Live actor, unmanaged source or path collision:** keep the existing source/state intact and resolve the reported ownership or session condition. A hold is a nonzero result, not an installed update.
@@ -209,5 +209,7 @@ The general interface is `bun scripts/release.ts build --out DIST [--prerelease]
 Before publication, maintainers perform isolated real-binary install/update/failure-recovery QA without personal HOME/auth/history mounts, review the change freshly and obtain the required CI evidence for the exact release commit. Report the actual results separately: source checks or a historical port replay are not a future clean-consumer run, a provider test or an independent external-user beta.
 
 The `.github/workflows/release.yml` tag workflow validates the tag against the canonical package version. It requires successful **`check`**, **`test-macos`**, **`e2e-herdr`** and **`e2e-hc`** results for that exact commit from the repository's own CI workflow and the trusted GitHub Actions app **15368**. A tag push alone does not prove `ci.yml` ran. The first release is explicitly marked prerelease. Existing tags, releases and assets must not be overwritten; publication needs maintainer permissions and consumers need none.
+
+Every maintainer draft mutation names the tag and commit identity explicitly and reads back the known release ID rather than re-resolving a draft by tag; a body-only draft update can drop that draft's tag binding. The local producer publication path uses the GitHub CLI and needs a `gh` that supports `--paginate` together with `--slurp` for release-asset listing, which the trusted Actions runner provides; an older host `gh` without `--slurp` is not a supported producer environment. This is a maintainer tool requirement only: consumer install, check, update and rollback still need no `gh`.
 
 After publishing, read back the actual release metadata/assets, checksums and tag/commit identity before claiming publication complete. Add the actual QA/CI evidence to the release notes. This procedure makes no claim that an unrun check or an unpublished asset already exists. [LICENSE](../LICENSE), [LICENSE.omp-dori](../LICENSE.omp-dori), [NOTICE](../NOTICE) and third-party pin/notices remain in force; the source-available upstream license has not been replaced.

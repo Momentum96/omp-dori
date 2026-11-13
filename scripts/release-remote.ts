@@ -7,6 +7,29 @@ import { githubApi, githubAsset, githubPages } from "./release-process.ts";
 export type Release = Record<string, unknown>;
 const PREFIX = `repos/${RELEASE_REPOSITORY}`;
 
+export function releaseIdentity(manifest: ReleaseManifest) {
+  return {
+    tag_name: manifest.tag,
+    target_commitish: manifest.commit,
+    name: `OMP-Dori ${manifest.tag}`,
+    prerelease: manifest.prerelease,
+  };
+}
+
+export function updateReleaseMetadata(
+  manifest: ReleaseManifest,
+  id: number,
+  body: string,
+  draft: boolean,
+): Promise<unknown> {
+  return githubApi(`${PREFIX}/releases/${id}`, "PATCH", {
+    ...releaseIdentity(manifest),
+    body,
+    draft,
+    make_latest: draft || manifest.prerelease ? "false" : "true",
+  });
+}
+
 export function notes(manifest: ReleaseManifest): string {
   return [
     `OMP-Dori ${manifest.tag}${manifest.prerelease ? " Linux x64 preview" : ""}.`,
@@ -32,7 +55,10 @@ export async function findRelease(manifest: ReleaseManifest): Promise<Release | 
   );
   if (matches.length > 1) throw new Error("Multiple releases bind this tag; publication is ambiguous");
   if (!matches.length) return undefined;
-  const id = (matches[0] as Release)["id"];
+  return getRelease(manifest, (matches[0] as Release)["id"]);
+}
+
+export async function getRelease(manifest: ReleaseManifest, id: unknown): Promise<Release> {
   if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new Error("Release ID is invalid");
   const release = await githubApi(`${PREFIX}/releases/${id}`);
   if (!object(release) || release["id"] !== id || release["tag_name"] !== manifest.tag) {
@@ -44,6 +70,7 @@ export async function findRelease(manifest: ReleaseManifest): Promise<Release | 
 export function validateRelease(release: Release, manifest: ReleaseManifest, body: string, names: string[]): void {
   const allowedBodies = [body, marker(body, "publish"), ...names.map((name) => marker(body, `upload:${name}`))];
   if (
+    release["tag_name"] !== manifest.tag ||
     release["target_commitish"] !== manifest.commit ||
     release["name"] !== `OMP-Dori ${manifest.tag}` ||
     release["prerelease"] !== manifest.prerelease ||

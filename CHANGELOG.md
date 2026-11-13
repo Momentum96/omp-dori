@@ -1,13 +1,19 @@
 # Changelog
 
-## 0.1.0 — Linux x64 preview (`v0.1.0`, prerelease)
+## 0.1.1 — Linux x64 preview (`v0.1.1`, prerelease)
 
 This is the first public-release interface for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.
 
+### Superseded 0.1.0 tag
+
+`v0.1.0` was tagged before the producer correction but was not published. A body-only draft metadata update changed the draft's tag binding, so publication verification stopped with zero assets. The Git tag is retained immutably as an unpublished attempt; use `v0.1.1` for this preview.
+
+The producer now names the tag and commit identity explicitly in every draft mutation, including the release-update path that previously sent only the body, and reads back the known release ID instead of re-resolving a draft by tag. This is a producer interface change; consumer commands and the asset contract are unchanged.
+
 ### Release installation and recovery
 
-- The root `install.sh` installs an exact verified release instead of cloning or pulling arbitrary `main`. Select this preview explicitly with `--version v0.1.0` or `DORI_RELEASE=v0.1.0`; default latest selects stable releases only.
-- Fixed assets are `omp-dori-v0.1.0.tar.gz`, `release-manifest.json`, `SHA256SUMS` and `install.sh`. Version/tag, commit/tree, archive digest and the extracted public source manifest are checked before activation. Unsafe archive paths, links and special files are rejected.
+- The root `install.sh` installs an exact verified release instead of cloning or pulling arbitrary `main`. Select this preview explicitly with `--version v0.1.1` or `DORI_RELEASE=v0.1.1`; default latest selects stable releases only.
+- Fixed assets are `omp-dori-v0.1.1.tar.gz`, `release-manifest.json`, `SHA256SUMS` and `install.sh`. Version/tag, commit/tree, archive digest and the extracted public source manifest are checked before activation. Unsafe archive paths, links and special files are rejected.
 - The explicit launcher is `~/.dori/bin/dori`. CLI, skill and extension use one active `~/.dori/src` pointer, with verified previous releases retained for rollback. Existing configuration, authentication, work and sessions are preserved.
 - `dori update check|install|status|rollback` is the consumer release API. `--version` selects an exact release; `check` and `install` also accept `--from DIST` for local assets. First-time pinned public omp-ulw retrieval can still require anonymous network access.
 - Consumer-managed dependency cache paths resolve from the executing release's own `omp-ulw.lock`, including after update or rollback, without rewriting saved configuration. Explicit dependency paths outside that managed cache remain user-owned.

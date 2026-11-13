@@ -1,8 +1,19 @@
+import { object } from "../src/update/config.ts";
 import type { Distribution } from "./release-build.ts";
 import { RELEASE_REPOSITORY, releaseGate } from "./release-gate.ts";
 import { ReleaseJournal } from "./release-journal.ts";
 import { githubApi, uploadAsset } from "./release-process.ts";
-import { assets, findRelease, marker, notes, type Release, validateRelease } from "./release-remote.ts";
+import {
+  assets,
+  findRelease,
+  getRelease,
+  marker,
+  notes,
+  type Release,
+  releaseIdentity,
+  updateReleaseMetadata,
+  validateRelease,
+} from "./release-remote.ts";
 
 const PREFIX = `repos/${RELEASE_REPOSITORY}`;
 
@@ -15,8 +26,8 @@ export async function publishRelease(directory: string, distribution: Distributi
   const journal = new ReleaseJournal(directory, manifest);
   let release = await findRelease(manifest);
   let prepared: string | undefined;
-  const readback = async (): Promise<Release | undefined> => {
-    const current = await findRelease(manifest);
+  const readback = async (id: unknown = release?.["id"]): Promise<Release | undefined> => {
+    const current = id === undefined ? await findRelease(manifest) : await getRelease(manifest, id);
     if (current) validateRelease(current, manifest, body, names);
     release = current;
     return current;
@@ -52,19 +63,21 @@ export async function publishRelease(directory: string, distribution: Distributi
         "Fresh workflow retry has no durable draft; use the retained local journal after inspecting GitHub",
       );
     }
+    let createdId: number | undefined;
     await journal.effect(
       "create",
-      () =>
-        githubApi(`${PREFIX}/releases`, "POST", {
-          tag_name: manifest.tag,
-          target_commitish: manifest.commit,
-          name: `OMP-Dori ${manifest.tag}`,
+      async () => {
+        const created = await githubApi(`${PREFIX}/releases`, "POST", {
+          ...releaseIdentity(manifest),
           body,
           draft: true,
-          prerelease: manifest.prerelease,
           make_latest: "false",
-        }),
-      async () => (await readback())?.["draft"] === true,
+        });
+        const id = object(created) ? created["id"] : undefined;
+        if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new Error("Release ID is invalid");
+        createdId = id;
+      },
+      async () => (await readback(createdId))?.["draft"] === true,
     );
   }
   const prepare = async (operation: string): Promise<void> => {
@@ -75,10 +88,7 @@ export async function publishRelease(directory: string, distribution: Distributi
     }
     await journal.effect(
       `prepare:${operation}`,
-      () =>
-        githubApi(`${PREFIX}/releases/${release!["id"]}`, "PATCH", {
-          body: marker(body, operation),
-        }),
+      () => updateReleaseMetadata(manifest, Number(release!["id"]), marker(body, operation), true),
       async () => {
         const current = await readback();
         return current?.["draft"] === true && current["body"] === marker(body, operation);
@@ -110,13 +120,7 @@ export async function publishRelease(directory: string, distribution: Distributi
   }
   await journal.effect(
     "publish",
-    () =>
-      githubApi(`${PREFIX}/releases/${release!["id"]}`, "PATCH", {
-        draft: false,
-        prerelease: manifest.prerelease,
-        body,
-        make_latest: manifest.prerelease ? "false" : "true",
-      }),
+    () => updateReleaseMetadata(manifest, Number(release!["id"]), body, false),
     async () => {
       const published = await readback();
       return published?.["draft"] === false && (await assets(published, expected)).size === names.length;

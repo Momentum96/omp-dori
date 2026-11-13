@@ -8,7 +8,7 @@
 
 [English](README.md) | [简体中文](README.zh.md) | [Deutsch](README.de.md) | 日本語 | [Italiano](README.it.md)
 
-> **OMP 初公開プレビュー `v0.1.0` の対象は Linux x64 / herdr / Discord です。** テスト基準は Bun 1.4.4、native OMP 18.18.8 で、最低バージョンも同じです。macOS/hc の CI 対象と、この初版の実運用サポート範囲は区別します。正式な手順は [English](README.md)、[한국어](README.ko.md)、[インストール・サポートガイド](docs/releases.md)を参照してください。独立した外部ユーザー beta の実施は主張していません。
+> **OMP 初公開プレビュー `v0.1.1` の対象は Linux x64 / herdr / Discord です。** テスト基準は Bun 1.4.4、native OMP 18.18.8 で、最低バージョンも同じです。macOS/hc の CI 対象と、この初版の実運用サポート範囲は区別します。正式な手順は [English](README.md)、[한국어](README.ko.md)、[インストール・サポートガイド](docs/releases.md)を参照してください。独立した外部ユーザー beta の実施は主張していません。
 >
 > 残りの翻訳は [upstream `97d807b` の参考資料](https://github.com/sisyphuslabs/dori-superagent/blob/97d807b9037cb050a72129659cf6306d8055010d/README.ja.md)を保持しています。歴史的な omo・構成の説明は、現在の OMP 版のインストール手順ではありません。
 
@@ -59,9 +59,9 @@ Slackでは、Doriをどう見せるかをセットアップ時に選びます�
 
 ### Dori mode、あなたが話しかけるボット
 
-公開プレビューには Linux x64、git、Bun 1.4.4、native OMP 18.18.8、PATH 上の herdr が必要です。[正確なタグ `v0.1.0` の手順](docs/releases.md#install-the-exact-preview)に従い、`vntrevx/omp-dori` の公開元を確認して 4 つの release asset を取得し、`SHA256SUMS` を検証してから installer を実行してください。
+公開プレビューには Linux x64、git、Bun 1.4.4、native OMP 18.18.8、PATH 上の herdr が必要です。[正確なタグ `v0.1.1` の手順](docs/releases.md#install-the-exact-preview)に従い、`vntrevx/omp-dori` の公開元を確認して 4 つの release asset を取得し、`SHA256SUMS` を検証してから installer を実行してください。
 
-直接の実行パスは `~/.dori/bin/dori` です。`~/.dori/bin` を PATH に追加できます。`dori update check|install --version v0.1.0` はこのプレビューを明示的に選びます。既定の latest は stable のみを選択し、任意の `main` は取得しません。
+直接の実行パスは `~/.dori/bin/dori` です。`~/.dori/bin` を PATH に追加できます。`dori update check|install --version v0.1.1` はこのプレビューを明示的に選びます。既定の latest は stable のみを選択し、任意の `main` は取得しません。
 
 AI と Discord の認証は利用者自身のものを使います。インストールは provider、messenger、watcher、service を開始しません。Discord の REST polling・送信だけでは online 表示は維持されません。必要な場合だけ native OMP monitor で `dori presence discord` を明示的に動かし、意図的に停止したら offline に戻します。生きている Dori がある間、更新・rollback の有効化は保留されます。制限と復旧はサポートガイドにあります。
 

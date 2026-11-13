@@ -1,6 +1,6 @@
 {
   "name": "dori-superagent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dori's complete upstream harness and messenger skill ported to OMP.",
   "type": "module",
   "license": "SUL-1.0",
