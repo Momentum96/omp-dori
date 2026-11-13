@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The source-only `scripts/install-source.sh` supports explicit `primary` and `side` modes. Side installs use their own config/state, `omp-dori` wrappers, OMP skill overlay and hc namespace without replacing the primary Dori's command or links; the mode marker keeps reinstalls in place.
+- Source installation preserves unmanaged legacy/fork recognition, terminal choice and EOF holds, foreign-checkout and failed-pull guards, and config/link-target backups for explicit unmanaged primary takeovers.
+- Primary source installation links the executable skill CLI directly in `OMP_DORI_BIN_DIR` instead of using Bun global package registration. It backs up foreign command symlink targets before replacement and preserves conflicting regular files with an actionable error.
+- Consumer release metadata and source pointers protect the selected installation home in either mode, including symlink aliases. Primary source installation holds on a consumer home; side paths must be separate. The consumer bootstrap, release runtime and dependency pin are unchanged.
+- Installer regression fixtures cover data/permission/link preservation and managed consumer isolation. The new source workflow has no new real OMP, provider, messenger, consumer QA or CI result claimed here; those results belong with the exact candidate's evidence.
+
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
 
 This preview targets the first public release for the OMP port. Live consumer support is scoped to Linux x64, herdr and Discord. The tested clean-consumer baseline is Ubuntu 24.04 x64 with Bun 1.4.4, native OMP 18.18.8 and herdr 0.9.5; Bun and OMP versions are also the minimum requirements. Newer versions, other Linux distributions, macOS, hc and other messengers do not inherit an unperformed live consumer test from that baseline. See the [installation and support guide](docs/releases.md) for the support boundary and the canonical release path.

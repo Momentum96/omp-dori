@@ -1,90 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readlinkSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-
-// The real source installer over a local upstream; Bun install/link are isolated from the host.
-const script = resolve(import.meta.dir, "../scripts/install-source.sh");
-const gitEnv = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_AUTHOR_NAME: "t",
-  GIT_AUTHOR_EMAIL: "t@example.com",
-  GIT_COMMITTER_NAME: "t",
-  GIT_COMMITTER_EMAIL: "t@example.com",
-};
-const roots: string[] = [];
-afterEach(() => {
-  for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
-});
-
-const git = (cwd: string, ...argv: string[]): string => {
-  const r = Bun.spawnSync(["git", ...argv], { cwd, env: gitEnv });
-  if (r.exitCode !== 0) throw new Error(`git ${argv.join(" ")}: ${r.stderr}`);
-  return r.stdout.toString().trim();
-};
-
-function setup() {
-  const root = mkdtempSync(join(tmpdir(), "dori-install-"));
-  roots.push(root);
-  const upstream = join(root, "upstream");
-  const src = join(root, "src");
-  const home = join(root, "home");
-  const bin = join(root, "bin");
-  const ulw = join(root, "omp-ulw");
-  const cli = "skills/dori-mode/scripts/src/cli.ts";
-  mkdirSync(join(upstream, "skills/dori-mode/scripts/src"), { recursive: true });
-  mkdirSync(join(upstream, "skills/dori-mode/references"), { recursive: true });
-  mkdirSync(join(upstream, "extension"));
-  writeFileSync(join(upstream, "extension/index.ts"), "export default () => {};\n");
-  mkdirSync(ulw);
-  writeFileSync(join(ulw, "index.ts"), "export default () => {};\n");
-  writeFileSync(join(upstream, cli), "v1\n");
-  writeFileSync(join(upstream, "skills/dori-mode/references/config.example.json"), "{}\n");
-  git(upstream, "init", "-q", "-b", "main");
-  git(upstream, "add", ".");
-  git(upstream, "commit", "-qm", "v1");
-  git(root, "clone", "-q", upstream, src);
-  mkdirSync(home);
-  mkdirSync(bin);
-  writeFileSync(
-    join(bin, "bun"),
-    `#!/bin/sh\ncase "$1" in\n--version) echo "\${INSTALL_TEST_BUN_VERSION:-1.4.4}" ;;\n-e) exec ${JSON.stringify(process.execPath)} "$@" ;;\nesac\n`,
-  );
-  chmodSync(join(bin, "bun"), 0o755);
-  writeFileSync(join(bin, "omp"), "#!/bin/sh\necho 'omp 18.18.8'\n");
-  chmodSync(join(bin, "omp"), 0o755);
-  const upstreamCommit = (text: string) => {
-    writeFileSync(join(upstream, cli), text);
-    git(upstream, "commit", "-qam", text.trim());
-  };
-  const install = (env: Record<string, string> = {}) => {
-    const r = Bun.spawnSync([script], {
-      env: {
-        ...gitEnv,
-        HOME: home,
-        DORI_SRC: src,
-        SKILLS_DIR: join(home, "skills"),
-        OMP_EXTENSIONS_DIR: join(home, "extensions"),
-        OMP_ULW_SRC: ulw,
-        PATH: `${bin}:${process.env["PATH"]}`,
-        ...env,
-      },
-    });
-    return { code: r.exitCode, err: r.stderr.toString() };
-  };
-  return { root, upstream, src, home, ulw, cli, upstreamCommit, install };
-}
+import { expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { git, setup } from "./install-setup.ts";
 
 test("a second install over a clean checkout pulls upstream", () => {
   // Given an installed checkout and a newer upstream commit.
@@ -180,6 +97,7 @@ test("a failed fetch is not taken for local work: no reset is suggested", () => 
 test("the OMP extension and explicit ULW path install without replacing existing owner configuration", () => {
   const { home, src, ulw, install } = setup();
   mkdirSync(join(home, ".dori"));
+  writeFileSync(join(home, ".dori/.omp-dori"), "primary\n");
   const path = join(home, ".dori/config.json");
   writeFileSync(
     path,

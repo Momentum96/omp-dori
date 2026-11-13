@@ -113,6 +113,32 @@ Plan downtime before installation, update or rollback: activation holds while a 
 
 Consumer-managed `ompUlwPath` values under `~/.dori/releases/consumer-dependencies/omp-ulw-<commit>` follow the loaded release's own lock pin across update and rollback without config writes. Explicit paths outside that cache shape remain user choices; source checkouts and the maintainer source container keep their configured paths.
 
+### Source installation next to an existing Dori
+
+The source-only installer is `scripts/install-source.sh`; the root `install.sh` remains the verified consumer release bootstrap. Run the source installer from an ordinary checkout:
+
+```sh
+git clone https://github.com/vntrevx/omp-dori.git "$HOME/src/omp-dori"
+cd "$HOME/src/omp-dori"
+DORI_INSTALL_MODE=side DORI_NO_PULL=1 DORI_SRC="$PWD" bash scripts/install-source.sh
+```
+
+For an unmanaged `$HOME/.dori`, a `config.json` or a foreign source checkout counts as another Dori. A home holding only `omp-ulw/` or `state/` does not. Earlier unmanaged omp-dori source installs are recognized by their marker, their checkout's `omp-ulw.lock` and skill CLI files (including forks), or their omp-dori extension link. A new install next to another Dori asks in a terminal, with side as the default; without a terminal it stops without changes. Set `DORI_INSTALL_MODE` to choose explicitly:
+
+- `primary` installs source into `$HOME/.dori`, takes over the global `dori` command and `dori-mode` skill/OMP extension links, and updates the configured dependency path. Before taking over another unmanaged Dori it saves the previous config and link targets under `$HOME/.dori/backups/omp-dori-install-*`. A foreign default `$HOME/.dori/src` stops installation before changes.
+- `side` uses `OMP_DORI_HOME` (default `$HOME/.omp-dori`) for its config, state, generated skill and wrappers, with source and pinned omp-ulw there unless explicit paths select separate checkouts. The only global entry is `omp-dori` in `OMP_DORI_BIN_DIR` (default `${BUN_INSTALL:-$HOME/.bun}/bin`); it leaves `$HOME/.dori`, the global `dori`, `dori-mode` link and discovered OMP extensions alone.
+
+Consumer release control records and the managed source pointer protect a consumer home even when its omp-dori extension link or a source marker exists. Source `primary` installation always holds there: use `dori update check|install|status|rollback` for that home, or choose `side` from a separate checkout. A selected `OMP_DORI_HOME` that is itself a consumer home, including a symlink alias, is also protected. Side paths must stay outside the primary home; source installation does not migrate consumer data or alter its frozen source, config, dependency pin or links.
+
+In a side install:
+
+- `bin/dori`, `bin/omp` and `bin/omp-dori` source the generated `env.sh`. `omp-dori <command>` uses this installation's CLI; `omp-dori omp ...` uses its OMP wrapper; `omp-dori hc ...` uses its hc namespace. They set `DORI_HOME`, `DORI_CONFIG`, `DORI_STATE_DIR`, `DORI_AGENT_CMD`, put the side `bin/` first on `PATH`, and set `HC_SESSION` to `omp-dori` (override with `OMP_DORI_HC_SESSION`).
+- `omp-dori omp` passes `--no-extensions -e <src>/extension --config <home>/omp.yml`. The overlay adds `<home>/skills` and hides `dori-mode`; the generated skill is named `omp-dori-mode` with a distinct description. Use `/skill:omp-dori-mode` or ask for "omp-dori mode". The extension retains the lock-pinned omp-ulw import.
+- New side configs set `stateDir` inside the side home and start lanes through its `bin/omp`, so their `dori` calls and hc terminals use that installation. Existing config choices are retained on reinstall. The generated wrappers, overlay and skill copy are refreshed, and the `.omp-dori` marker keeps later runs in side mode.
+- Use a separate messenger bot and channel. Installation starts no messenger, watcher or hc server.
+
+After configuring that home's runtime and hooks, the hc source workflow starts the lead with `omp-dori hc run --name omp-dori-lead -- omp-dori omp --dori-role dori`. On macOS, hc privacy permissions follow the process that first starts its server. Source wrappers and isolation are separate from the supported consumer baseline; this documentation makes no new real OMP, provider or messenger QA claim. See the [source setup guide](docs/releases.md#source-checkouts-for-maintainers) for checkout updates and path overrides.
+
 ### The harness
 
 Use the same prerequisites and extension/omp-ulw installation as Dori mode. `gh` supplies PR head SHAs, checks and merges. The following commands start real sessions and loops; do not start a second harness against an existing installation's runtime and state.
