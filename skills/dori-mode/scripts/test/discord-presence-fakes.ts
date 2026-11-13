@@ -1,4 +1,5 @@
-import { discordPresence, type GatewayClock, type GatewaySocket } from "../src/messenger/discord-presence.ts";
+import type { GatewayClock, GatewaySocket } from "../src/messenger/discord-gateway.ts";
+import { discordPresence } from "../src/messenger/discord-presence.ts";
 
 type Frame = { op: number; d: unknown };
 export class FakeGateway implements GatewaySocket {
@@ -46,12 +47,11 @@ export class FakeGateway implements GatewaySocket {
   }
 }
 
-export const gatewayWorld = (openFailures = 0) => {
+/** A manual clock: timers fire only when `advance` reaches them. */
+export const gatewayTimers = () => {
   let now = 0;
   let id = 0;
   const pending = new Map<number, { at: number; cb: () => void }>();
-  const sockets: FakeGateway[] = [];
-  const logs: string[] = [];
   const clock: GatewayClock = {
     now: () => now,
     random: () => 0.5,
@@ -63,6 +63,24 @@ export const gatewayWorld = (openFailures = 0) => {
       pending.delete(handle as number);
     },
   };
+  const advance = (ms: number) => {
+    const target = now + ms;
+    for (;;) {
+      const next = [...pending].sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!next || next[1].at > target) break;
+      now = next[1].at;
+      pending.delete(next[0]);
+      next[1].cb();
+    }
+    now = target;
+  };
+  return { clock, pending, advance };
+};
+
+export const gatewayWorld = (openFailures = 0) => {
+  const { clock, pending, advance } = gatewayTimers();
+  const sockets: FakeGateway[] = [];
+  const logs: string[] = [];
   const presence = discordPresence(
     (url) => {
       if (sockets.some((socket) => !socket.closed)) throw new Error("overlapping gateway sockets");
@@ -75,16 +93,5 @@ export const gatewayWorld = (openFailures = 0) => {
     clock,
     (line) => logs.push(line),
   );
-  const advance = (ms: number) => {
-    const target = now + ms;
-    for (;;) {
-      const next = [...pending].sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
-      if (!next || next[1].at > target) break;
-      now = next[1].at;
-      pending.delete(next[0]);
-      next[1].cb();
-    }
-    now = target;
-  };
   return { presence, sockets, logs, pending, advance };
 };
