@@ -1,4 +1,4 @@
-import { discordInbound, type DiscordInboundOptions } from "../src/messenger/discord-inbound.ts";
+import { discordInbound, type DiscordInboundOptions, formatDiscordInbound } from "../src/messenger/discord-inbound.ts";
 import { discordInboundLive } from "../src/messenger/discord-inbound-live.ts";
 import { discordRestWorld, memoryDiscordCursor, type TestDiscordMessage } from "./discord-inbound-fakes.ts";
 import { FakeGateway, gatewayTimers } from "./discord-presence-fakes.ts";
@@ -24,6 +24,7 @@ export const liveWorld = async (
   const sockets: FakeGateway[] = [];
   const logs: string[] = [];
   const received: string[] = [];
+  const lines: string[] = [];
   const live = discordInboundLive(
     intake,
     (url) => {
@@ -36,6 +37,7 @@ export const liveWorld = async (
     (message) => {
       onEmit?.();
       received.push(`${message.channel}:${message.message}`);
+      lines.push(formatDiscordInbound(message));
     },
     (line) => logs.push(line),
   );
@@ -48,6 +50,7 @@ export const liveWorld = async (
     sockets,
     logs,
     received,
+    lines,
     advance: timers.advance,
     pending: timers.pending,
     cursor: (channel: string) => store(channel).load(),

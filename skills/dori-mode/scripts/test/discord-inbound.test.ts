@@ -28,8 +28,8 @@ test("cold start baselines latest history, then admits only owner text in the ex
   );
   await intake.poll((message) => received.push(message));
   expect(received).toEqual([
-    { channel: "20", message: "101", reference: null, text: 'hello\n"quoted" $(data)' },
-    { channel: "20", message: "107", reference: "101", text: "reply" },
+    { channel: "20", message: "101", reference: null, text: 'hello\n"quoted" $(data)', replyTo: null, attachments: [] },
+    { channel: "20", message: "107", reference: "101", text: "reply", replyTo: null, attachments: [] },
   ]);
   expect(received.map(formatDiscordInbound)).toEqual([
     'INBOUND discord 20 101 from=owner ref=- "hello\\n\\"quoted\\" $(data)"',
@@ -95,21 +95,52 @@ test("duplicate messages within a history page emit and checkpoint only once", a
 });
 
 test("a failed emitter leaves the failed message uncommitted and resumes without replaying successful delivery", async () => {
-  const world = discordRestWorld([ownerMessage("101"), ownerMessage("102"), ownerMessage("103")]);
+  const world = discordRestWorld([
+    ownerMessage("101"),
+    ownerMessage("102", {
+      type: 19,
+      content: "",
+      message_reference: { message_id: "90" },
+      referenced_message: { id: "90", author: { id: "99" }, content: "context" },
+      attachments: [{ filename: "notes", size: 1, url: "https://cdn.discordapp.com/notes?ex=1&hm=2" }],
+    }),
+    ownerMessage("103"),
+  ]);
   const cursor = memoryDiscordCursor("100");
   const intake = await discordInbound(world.discord, () => cursor.store, options);
   const received: string[] = [];
+  const groups: string[] = [];
   await expect(
     intake.poll((message) => {
-      if (message.message === "102") throw new Error("delivery failed");
+      const group = formatDiscordInbound(message);
+      if (message.message === "102") {
+        expect(cursor.store.load()).toBe("101");
+        groups.push(group);
+        throw new Error("delivery failed");
+      }
       received.push(message.message);
     }),
   ).rejects.toThrow("delivery failed");
   expect(received).toEqual(["101"]);
   expect(cursor.store.load()).toBe("101");
-  await intake.poll((message) => received.push(message.message));
+  await intake.poll((message) => {
+    if (message.message === "102") {
+      expect(cursor.store.load()).toBe("101");
+      groups.push(formatDiscordInbound(message));
+    }
+    received.push(message.message);
+  });
   expect(received).toEqual(["101", "102", "103"]);
   expect(cursor.saved).toEqual(["101", "102", "103"]);
+  expect(groups).toHaveLength(2);
+  expect(groups[0]).toBe(
+    [
+      'INBOUND discord 20 102 from=owner ref=90 ""',
+      'INBOUND_REPLY discord 20 102 {"id":"90","author":"99","text":"context"}',
+      'INBOUND_ATTACHMENT discord 20 102 {"filename":"notes","size":1,"url":"https://cdn.discordapp.com/notes?ex=1&hm=2"}',
+    ].join("\n"),
+  );
+  expect(groups[1]).toBe(groups[0]);
 });
 
 test("a later-page failure emits nothing and retains the cursor for a complete retry", async () => {

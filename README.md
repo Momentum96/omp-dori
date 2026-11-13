@@ -14,6 +14,7 @@ omp-dori is a modified OMP port that turns messenger requests into owned coding-
 
 - Gives longer jobs their own brief, agent session and tracked lane; the lead handles small requests directly.
 - Keeps one voice in the conversation: lanes report to the lead, who replies in the request's thread.
+- Receives owner Discord messages with reply context and attachment metadata, including signed media URLs and voice duration when available.
 - Checks live agent identity, input and approval state before delivery; holds or queues messages when a session is busy or its state is unknown.
 - Requires completion evidence and checks live done signals, such as merged PRs, published versions, passing commands or matching files.
 - Saves worklogs, lane checkpoints and registries on disk so `dori boot` can inspect them after a restart.
