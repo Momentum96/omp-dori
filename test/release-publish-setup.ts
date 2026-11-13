@@ -115,9 +115,12 @@ export function publisherFixture(options: Options = {}) {
   mkdirSync(bin);
   writeFileSync(join(bin, "gh"), `#!${process.execPath}\n${api}`, { mode: 0o755 });
   const f = githubFixture();
-  const { manifest, prefix } = f;
+  const { prefix } = f;
   const archive = Buffer.from("fixture archive");
-  manifest.archive = { ...manifest.archive, sha256: digest(archive), bytes: archive.length };
+  const manifest = {
+    ...f.manifest,
+    archive: { ...f.manifest.archive, sha256: digest(archive), bytes: archive.length },
+  };
   const assets: Record<string, Buffer> = {
     [manifest.archive.name]: archive,
     "install.sh": Buffer.from("#!/bin/sh\n"),

@@ -25,7 +25,7 @@ test.each([false, true])(
     expect(state.listsAfterCreate).toBeGreaterThan(0);
     expect(Object.keys(state.uploads).sort()).toEqual(Object.keys(f.assets).sort());
     for (const [name, bytes] of Object.entries(f.assets)) {
-      expect(Buffer.from(state.uploads[name]!.bytes, "base64")).toEqual(bytes);
+      expect(Buffer.from(state.uploads[name]!.bytes, "base64").equals(bytes)).toBe(true);
     }
     expect(new ReleaseJournal(f.directory, f.manifest).pending).toBeUndefined();
     if (!staleList) {
