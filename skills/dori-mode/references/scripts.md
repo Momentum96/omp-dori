@@ -164,13 +164,22 @@ Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN`
 
 `--edit` always updates one existing message in place. Input over 4096 UTF-16 code units fails with an instruction to shorten the text or send without `--edit`, before any API request or mutation. It never edits a prefix and posts the remainder. The library's `rich=true` send path retains one unsplit HTML request, leaving Telegram to validate markup and its rendered-length limit. Rich edits use the same conservative preflight bound on the complete raw HTML, including tags and entities; markup over that bound is rejected even if its rendered text would fit. Short rich sends and edits keep their existing HTML behavior. HTML-aware splitting and multi-message edits are not implemented.
 
+On Discord, `--to` is a channel id or, with `DORI_DISCORD_GUILD_ID` set, a channel name (`--to auction` or `--to '#도리'`); `--thread ID` posts in (or with `--edit`, edits in) that thread or forum post instead, and needs no `--to`. Messages are sent with mentions disabled, so nobody is pinged. A forum channel has no messages of its own: `send` refuses it and points at `dori thread discord create`. Ids must be digits only; a mistyped id is refused before anything is sent.
+
+### `dori thread discord create --to CHANNEL --title T [--text T] [--tag NAME]...`
+### `dori thread discord set <thread-id> [--title T] [--tag NAME]... [--archive|--unarchive]`
+One project per channel and one thread per task. `create` opens a post in a forum channel, with `--text` (or the title) as its first message and `--tag` applying the forum's tags by name (`--tag 작업중`), or a public thread in a text channel, posting `--text` inside when given. It prints `THREAD <thread-id>` and, when a first message was posted, ` mid=<message-id>`. `set` renames (for a status prefix: `--title "[done] fix login"`), replaces the post's tags with the given ones (`--tag 완료`), and archives or reopens it; it prints `THREAD <thread-id>`. A tag the forum does not have is refused with the forum's tag list. Titles are cut to Discord's 100 characters.
+
+### `dori react discord --to CHANNEL [--thread ID] --message ID [--emoji E] [--remove]`
+Adds the bot's reaction to a message, 👀 by default: the read receipt for an `INBOUND` line. Pass the line's thread as `--thread` when it is not `-` (the message lives in the thread), else its channel as `--to`. `--remove` takes the reaction back. Prints `REACTED <channel> +` (or `-`).
+
 ### `dori presence <slack|discord>`
 Keeps the account shown as online until explicitly stopped. Enable one instance per account under the owning OMP session's native `monitor` tool; two writers can compete.
 - **Discord:** use your own `DORI_DISCORD_TOKEN` in the child environment. REST inbound polling and message sending do not establish online presence. The Gateway keeper emits `PRESENCE_READY discord event=READY|RESUMED` only after that real dispatch, `PRESENCE_ACK discord seq=<number|->` only for the first actual heartbeat acknowledgement per connection and `PRESENCE_RECONNECT` while reconnecting. Later routine acknowledgements update lifecycle state silently. Authentication/configuration/intent failures exit nonzero with sanitized errors. SIGINT/SIGTERM ends retries, sockets and timers with `PRESENCE_STOPPED discord`; intentional monitor stop means offline. Restart only by explicit choice. See [operational details](../../../docs/releases.md#discord-online-presence).
 - **Slack, user token:** it opens one web-client-type socket and tickles it every minute. Slack shows a user active only while such a socket is open, and auto-aways an idle one after about 30 minutes. This retained source feature is outside the first Discord preview's live support scope.
 
-### `dori inbound discord [--loop MINUTES]`
-The supported Discord text intake is built into Dori and uses the owner's bot token directly. It needs no Node, agent-messenger CLI, SDK adapter or private helper. Required child environment: `DORI_DISCORD_TOKEN`, `DORI_DISCORD_OWNER_ID`, `DORI_DISCORD_CHANNEL_ID`. The two IDs are positive decimal snowflake strings, never JavaScript numbers.
+### `dori inbound discord [--loop MINUTES]` with `DORI_DISCORD_CHANNEL_ID`: one channel over REST
+The supported Discord text intake is built into Dori and uses the owner's bot token directly. It needs no Node, agent-messenger CLI, SDK adapter or private helper. Required child environment: `DORI_DISCORD_TOKEN`, `DORI_DISCORD_OWNER_ID`, `DORI_DISCORD_CHANNEL_ID`. The two IDs are positive decimal snowflake strings, never JavaScript numbers. Without `DORI_DISCORD_CHANNEL_ID`, the gateway intake below runs instead.
 
 Without `--loop`, it polls continuously every three seconds. `--loop 0.1` is six seconds; `--loop 0` is one-shot. Startup validates the authenticated bot, application Message Content Intent, channel access and View Channel/Read Message History permissions before printing `INBOUND_READY discord owner=<id> channel=<id> bot=<id>`. Sending replies additionally needs the relevant send/thread permissions.
 
@@ -209,8 +218,27 @@ Prints `LAG n=<count> p50=<ms>ms p90=<ms>ms p99=<ms>ms max=<ms>ms[ skipped=<n>]`
 - new journals are created with mode `0600`, following the state-journal convention. Records include chat and user IDs but no message text or bot token. Existing file permissions are retained, and records accumulate locally until removed by the owner;
 - `skipped=<n>` counts records without a finite numeric lag in the window, including missing dates, malformed JSON and the partial last line a kill mid-write leaves behind.
 
-### `dori transcribe <audio-file>`
-Runs `hooks.transcribe` and prints the transcript. A failed or empty transcription is an error, never an empty message.
+### `dori inbound discord [--loop MIN]` without `DORI_DISCORD_CHANNEL_ID`: every channel over the gateway
+Reads every channel, thread, forum post and DM the bot can see. Requires `DORI_DISCORD_TOKEN` and `DORI_DISCORD_OWNER_ID`. Prints `INBOUND <source> <channel> <thread> <event-id> mid=<message-id> <from> <text>[ file=<kind>:<url>]...`, in `dori inbound telegram`'s field order:
+- `source` is `dm`, `channel` or `thread` (a thread or a forum post), with `edit:` in front for an edit;
+- `channel` is the DM channel or the text/forum channel; for a thread it is the parent, and `thread` is the thread id (`-` otherwise), so a reply goes to `dori send discord --thread <thread>`;
+- `event-id` is the message id for a new message and, for an edit, a snowflake of the edit time, so every line has its own id; `mid=` is the message the line is about, so an edit pairs with its original line;
+- the full text, JSON-escaped on one line; each attachment appends ` file=<kind>:<url>` (`voice` for a voice message, else `audio`, `video`, `photo` or `document` by content type). Attachment URLs are signed and expire after about a day: transcribe or save them when they arrive (`dori transcribe <url>`).
+
+What passes:
+- only the owner's messages (`DORI_DISCORD_OWNER_ID`), plain messages and replies; bots (the Dori itself included), webhooks and system messages never do;
+- the owner's DMs to the bot always pass; in servers, every channel the bot can read passes unless `DORI_DISCORD_GUILD_ID` limits it to one server and `DORI_DISCORD_CHANNEL_IDS` (comma-separated) to some channels, threads and forum posts of those channels included;
+- edits pass once each when the content changed (embed previews that refresh a message do not).
+
+Delivery:
+- With `--loop MIN` it holds a gateway session (intents Guilds, Guild Messages, Direct Messages and the privileged Message Content) and prints `INBOUND_READY discord owner=<id> guild=<id|-> channels=<ids|-> mode=gateway` once, after the first session is up. Closed connections resume where they left off (Discord replays what was missed), with backoff from 1 s doubling to 120 s; a connection whose heartbeat goes unanswered is dropped and resumed. Close codes Discord documents as final stop it with one line naming the cause and exit 1: 4004 (bad token), 4010-4013. For 4014 (Message Content Intent off) it warns and reads the channels over REST every `MIN` minutes instead, printing `mode=rest`.
+- At-least-once, like Telegram: `<stateDir>/discord-cursor.json` holds, per channel and thread, the last message whose line is out, and a watermark up to which every channel has been read. A new session (not a resume) first reads every visible channel since the cursor over REST, so a restart neither replays nor loses messages; duplicates after a crash carry the same ids. A channel that cannot be read keeps the watermark back and is retried every `MIN` minutes. While the gateway keeps failing (three closes in a row), the channels are also read over REST every `MIN` minutes.
+- The first run starts from now; a corrupt cursor warns and starts fresh rather than replaying history. Edits made while it was down are not replayed; the edited message's current text arrives with it when it was new.
+- Without `--loop` it is one-shot: one REST read of every visible channel since the cursor (`mode=rest`), then exit.
+- Env ids are validated at start: digits only; anything else is refused with an error naming the variable.
+
+### `dori transcribe <audio-file|url>`
+Runs `hooks.transcribe` and prints the transcript. An `http(s)` URL, such as the one in a Discord `INBOUND` line's `file=voice:<url>`, is downloaded to a private temp directory first and removed afterwards. A failed or empty transcription is an error, never an empty message.
 
 ### `dori heavy <label> -- <command ...>`
 Waits until load is under `heavyMaxLoad` and one of `heavySlots` is free, then runs the command and frees the slot when it exits. A slot held by a process that no longer exists (or a zombie) is taken over. Use it for full builds and test suites. Installs, focused tests and git do not need it.

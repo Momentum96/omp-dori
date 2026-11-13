@@ -50,6 +50,19 @@ Ask which mode, give the trade-off as a short list, and wait for the choice:
 
 Record the choice. With a user token, set `DORI_SLACK_TOKEN` and `DORI_SLACK_COOKIE` (the `d` cookie from that member's browser session). With a bot token, set `DORI_SLACK_TOKEN` to the `xoxb-` token. If you run a second Dori home on the same machine, also write that home's token to `slack-token` next to its `config.json` (`chmod 600`): `dori launch` then hands its lanes the file's path, never the token (see `dori launch` in `scripts.md`).
 
+### If the owner picks Discord
+
+The owner does these in the browser; the Dori checks each one afterwards.
+
+1. Discord Developer Portal → **New Application** → **Bot**: reset and copy the token into `DORI_DISCORD_TOKEN`. Turn **Public Bot** off.
+2. **Bot** → Privileged Gateway Intents: turn on **Message Content Intent**. Without it the gateway refuses the session (close 4014) and messages arrive without text; Presence and Server Members intents are not needed.
+3. **OAuth2** → URL Generator: scope `bot`; permissions View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads (rename, tag and archive posts), Read Message History (catch-up after a restart) and Add Reactions (the 👀 read receipt). Open the URL and add the bot to the server.
+4. Server layout: one channel per project (a forum channel with tags such as 작업중 / 대기 / 완료, or a text channel) and one thread or post per task, plus a text channel for quick chat. The owner can also DM the bot.
+5. Discord → User Settings → Advanced → **Developer Mode** on; right-click the owner's name → Copy User ID into `DORI_DISCORD_OWNER_ID`, and the server → Copy Server ID into `DORI_DISCORD_GUILD_ID`. Optionally limit inbound to some channels with `DORI_DISCORD_CHANNEL_IDS` (comma-separated ids).
+6. Check: with `DORI_DISCORD_CHANNEL_ID` unset, `dori inbound discord --loop 1` prints `INBOUND_READY discord … mode=gateway`, and a DM from the owner prints an `INBOUND dm …` line.
+
+Discord can run beside Telegram: start both inbound monitors and reply on the platform a message came from.
+
 ## 3. Bot
 
 For Discord, create/invite the owner's own bot through the Developer Portal and finish the explicit bot setup below. Other retained messengers have their own browser/login flows. Then give the bot its avatar: the default is `assets/dori-avatar.png` in this skill, and the owner can swap in any image.
@@ -104,6 +117,7 @@ Enable only the monitors the owner explicitly wants, using the OMP Dori extensio
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT\|STALLED\|JOURNAL-ERROR\|WORKING-WHILE-PAUSED)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
 | Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
+| Discord inbound, all channels (Discord only) | `DORI_DISCORD_TOKEN=… DORI_DISCORD_OWNER_ID=… DORI_DISCORD_GUILD_ID=… dori inbound discord --loop 1` (no `DORI_DISCORD_CHANNEL_ID`) | `^INBOUND` |
 | presence (opt-in) | `dori presence discord` (or retained Slack: `dori presence slack`) | `^PRESENCE_` |
 
 The supported public receiver is **`dori inbound discord`**. It requires the owner's bot token and the two configured IDs, polls every three seconds by default, and emits only that owner's text from the exact channel. `--loop` is in minutes: `--loop 0.1` polls every six seconds and `--loop 0` runs once. First start saves a latest-message baseline without replay; wait for `INBOUND_READY discord owner=... channel=... bot=...`, then send a fresh owner message. Later records are `INBOUND discord <channel> <message> from=owner ref=<id|-> <JSON text>`. An owned per-channel cursor survives an explicit restart.
@@ -111,6 +125,8 @@ The supported public receiver is **`dori inbound discord`**. It requires the own
 Use the [concrete native monitor argv recipe](../../../docs/releases.md#discord-owner-intake), which loads the protected token file only inside the child shell and inherits the two non-secret IDs from the owning OMP environment. No private helper, external CLI watcher, Node or agent-messenger is required. Startup checks bot authentication, Message Content Intent and View Channel/Read Message History access. Non-owner/bot/webhook/system messages do not become owner requests. Send permissions are required only for replies. See `scripts.md` for cursor/error details.
 
 Discord REST inbound polling and message sending alone do not keep the bot online. While Dori is used, an explicitly enabled `dori presence discord` Gateway keeper must remain running under native monitor supervision, with `DORI_DISCORD_TOKEN` supplied only in its child environment. Genuine Gateway READY/RESUMED produces `PRESENCE_READY`; only the first actual heartbeat acknowledgement per connection produces `PRESENCE_ACK`, while later acknowledgements update lifecycle state silently. Explicit monitor stop ends its sockets/retries and prints `PRESENCE_STOPPED discord`, so offline is the intended result. The inbound watcher is a separate opt-in process. Do not restore unrelated paused watchers or the maintainer updater to fix presence. See [presence operation and errors](../../../docs/releases.md#discord-online-presence).
+
+Without `DORI_DISCORD_CHANNEL_ID`, `dori inbound discord` holds a gateway session instead and reads every channel, thread, forum post and DM the bot can see, scoped by `DORI_DISCORD_GUILD_ID` and `DORI_DISCORD_CHANNEL_IDS`. Its lines keep `dori inbound telegram`'s field order (`INBOUND <dm|channel|thread> <channel> <thread|-> <event-id> mid=<id> <from> <JSON text>`) and its cursor is `<stateDir>/discord-cursor.json`; see `scripts.md`.
 
 ## 6. First look around
 

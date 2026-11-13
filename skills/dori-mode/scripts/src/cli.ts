@@ -56,13 +56,19 @@ const USAGE = `dori <command> [options]
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
+  thread discord create --to CHANNEL --title T [--text T] [--tag NAME]...
+  thread discord set <thread> [--title T] [--tag NAME]... [--archive|--unarchive]
+                                       open a forum post or channel thread; rename it, replace its forum tags, archive it
+  react discord --to CHANNEL [--thread ID] --message ID [--emoji E] [--remove]
+                                       add (or remove) the bot's reaction; 👀 by default, the read receipt
   presence <slack|discord>             keep the account shown as online until stopped
-  transcribe <audio-file>              run hooks.transcribe and print the text
+  transcribe <audio-file|url>          run hooks.transcribe and print the text (a URL is downloaded first)
   inbound slack|telegram|discord [--loop MIN]
                                        print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
-                                       Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and DORI_DISCORD_CHANNEL_ID
-                                       Discord polls every 3 seconds by default; --loop MIN overrides the interval
+                                       Discord requires DORI_DISCORD_TOKEN and DORI_DISCORD_OWNER_ID. With DORI_DISCORD_CHANNEL_ID it polls
+                                       that channel every 3 seconds (--loop MIN overrides); without it, a gateway session reads every
+                                       channel, thread, forum post and DM the bot sees (DORI_DISCORD_GUILD_ID / DORI_DISCORD_CHANNEL_IDS scope it)
   inbound-lag [--limit N]              receive-lag percentiles from state/telegram-lag.jsonl (the meter behind the INBOUND lines)`;
 
 const [command = "", ...rest] = process.argv.slice(2);
@@ -115,6 +121,12 @@ const flags = parseArgs({
     source: { type: "string" },
     open: { type: "boolean" },
     limit: { type: "string" },
+    tag: { type: "string", multiple: true },
+    archive: { type: "boolean" },
+    unarchive: { type: "boolean" },
+    message: { type: "string" },
+    emoji: { type: "string" },
+    remove: { type: "boolean" },
   },
 });
 
