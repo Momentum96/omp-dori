@@ -74,6 +74,7 @@ function githubBoundary(f: PublicationFixture, mode: WaitMode) {
   return { transport, api };
 }
 
+// Several real Git/detector cycles must not let the default 5s runner budget cancel a valid 10s child.
 test.each(["blocked", "missing", "pending", "unavailable", "legacy"] as const)(
   "a %s exact-head CI wait retains its first deadline, holds once and releases newer detection",
   async (mode) => {
@@ -208,4 +209,5 @@ test.each(["blocked", "missing", "pending", "unavailable", "legacy"] as const)(
       boundary.transport.mockRestore();
     }
   },
+  30_000,
 );
