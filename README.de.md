@@ -19,6 +19,20 @@ omp-dori ist eine angepasste Portierung auf OMP, die aus Messenger-Anfragen Arbe
 - Speichert Arbeitsprotokolle, Lane-Checkpoints und Registries auf der Festplatte, damit `dori boot` sie nach einem Neustart prüfen kann.
 - Bewahrt Lektionen und ein Backlog; optionale stündliche Planung und die Überwachung von Host und stockenden Aufgaben unterstützen laufende Arbeit.
 
+## Von der Anfrage zum Ergebnis
+
+```mermaid
+flowchart TD
+    request["Deine Nachricht"] --> route{"Kleine Aufgabe?"}
+    route -->|Ja| direct["Dori erledigt sie direkt"]
+    route -->|Nein| lane["Briefing und eigene Arbeits-Lane"]
+    direct --> verify{"Ergebnis und Belege geprüft?"}
+    lane --> verify
+    verify -->|Ja| report["Bericht im ursprünglichen Thread"]
+    verify -->|Nein| resolve["Problem beheben oder nachfragen"]
+    resolve --> verify
+```
+
 ## Unterstützte Vorschau
 
 **`v0.1.2` ist ein GitHub-Prerelease für Linux x64 + herdr + Discord.** Bun **1.4.4** und natives OMP **18.18.8** sind die getestete Basis und zugleich die Mindestversionen. Neuere Versionen und andere Linux-Distributionen sind nicht automatisch geprüft.

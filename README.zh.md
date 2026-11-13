@@ -19,6 +19,20 @@ omp-dori 是经修改的 OMP 移植版，可将聊天工具中的请求转为有
 - 将工作日志、通道检查点和注册表保存在磁盘上，供 `dori boot` 在重启后检查。
 - 保留经验和待办队列，提供可选的每小时调度，以及主机状态和任务停滞监控，以支持持续工作。
 
+## 从请求到完成
+
+```mermaid
+flowchart TD
+    request["通过聊天发送请求"] --> route{"是小任务吗？"}
+    route -->|是| direct["Dori 直接处理"]
+    route -->|否| lane["建立任务说明和专用工作通道"]
+    direct --> verify{"结果和完成证据已验证？"}
+    lane --> verify
+    verify -->|是| report["在原讨论串中汇报结果"]
+    verify -->|否| resolve["修正问题或询问用户"]
+    resolve --> verify
+```
+
 ## 受支持的预览版
 
 **`v0.1.2` 是面向 Linux x64 + herdr + Discord 的 GitHub 预发行版。** Bun **1.4.4** 和原生 OMP **18.18.8** 是经过测试的基准，也是最低版本要求。更新的版本和其他 Linux 发行版并不自动视为已验证。

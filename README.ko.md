@@ -19,6 +19,20 @@ omp-dori는 메신저 요청을 담당 코딩 에이전트 레인에 맡기고 �
 - worklog, 레인 checkpoint와 레지스트리를 디스크에 남겨 재시작 후 `dori boot`로 점검합니다.
 - lessons, backlog, 선택적 시간 단위 스케줄링과 호스트·정체 감시로 지속적인 작업을 지원합니다.
 
+## 요청이 완료될 때까지
+
+```mermaid
+flowchart TD
+    request["메신저로 요청"] --> route{"작은 작업인가?"}
+    route -->|예| direct["Dori가 직접 처리"]
+    route -->|아니요| lane["작업 설명과 전담 레인 생성"]
+    direct --> verify{"결과와 완료 증거 확인?"}
+    lane --> verify
+    verify -->|확인됨| report["원래 스레드에 결과 보고"]
+    verify -->|미확인| resolve["문제 수정 또는 사용자에게 질문"]
+    resolve --> verify
+```
+
 ## 지원하는 preview
 
 **`v0.1.2`는 Linux x64 + herdr + Discord용 GitHub prerelease입니다.** Bun **1.4.4**와 native OMP **18.18.8**은 테스트 기준이자 최소 버전입니다. 더 높은 버전과 다른 Linux 배포판이 자동으로 검증되는 것은 아닙니다.
