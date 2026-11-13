@@ -130,10 +130,20 @@ linux(
     try {
       const identity = processIdentity(child.pid)!;
       expect(identity).toBeDefined();
+      expect(identity.executable).toBe(image);
       renameSync(image, join(root, "preserved-sleep"));
-      expect(processIdentity(child.pid)?.executable).not.toBe(identity.executable);
+      expect(processIdentity(child.pid)?.executable).toBe(join(root, "preserved-sleep"));
       expect(sameProcess(identity)).toBe(true);
-      expect(terminateBoundProcess(identity)).toBe(true);
+      const terminated = terminateBoundProcess(identity);
+      expect(
+        terminated,
+        JSON.stringify({
+          expected: identity,
+          current: processIdentity(child.pid) ?? null,
+          exitCode: child.exitCode,
+          signalCode: child.signalCode,
+        }),
+      ).toBe(true);
       await child.exited;
       expect(processIdentity(child.pid)).toBeUndefined();
     } finally {
