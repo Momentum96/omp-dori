@@ -1,4 +1,6 @@
 /** dori send, presence, inbound and transcribe: the messengers. */
+import { existsSync } from "node:fs";
+
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord } from "./messenger/discord.ts";
 import { discordPresence } from "./messenger/discord-presence.ts";
@@ -11,6 +13,7 @@ import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { envInt, fileTgInboundStore, telegramInboundLoop } from "./messenger/telegram-inbound.ts";
 import { formatTelegramInbound } from "./messenger/telegram-line.ts";
+import { inboundLagLog, lagOfLine, readLagTail, summarizeLag } from "./messenger/telegram-lag.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 import { realClock, run } from "./run.ts";
@@ -130,9 +133,13 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
     }
   };
   const ownerId = num("DORI_TELEGRAM_OWNER_ID");
+  // One warning per process: a token that cannot react must not flood the receiver log on every message.
+  let reactWarned = false;
   const groupChatId = process.env["DORI_TELEGRAM_GROUP_ID"] === undefined ? undefined : num("DORI_TELEGRAM_GROUP_ID");
   const topicId = process.env["DORI_TELEGRAM_TOPIC_ID"] === undefined ? undefined : num("DORI_TELEGRAM_TOPIC_ID");
   console.log(`INBOUND_READY telegram owner=${ownerId} group=${groupChatId ?? "-"} topic=${topicId ?? "-"}`);
+  // The INBOUND line stays exactly as monitors parse it; receive lag goes to its own jsonl.
+  const recordLag = inboundLagLog(`${stateDir}/telegram-lag.jsonl`, (m) => console.log(`WARN ${m}`.slice(0, 300)));
   await telegramInboundLoop(
     tg,
     store,
@@ -142,7 +149,23 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
       ...(topicId !== undefined ? { topicId } : {}),
     },
     minutes,
-    (i) => console.log(formatTelegramInbound(i)),
+    (i) => {
+      console.log(formatTelegramInbound(i));
+      recordLag(i, realClock.now());
+      // Read receipt: the owner sees the message was picked up the moment it is received.
+      // One reaction only (never a bubble — it would clear the typing indicator), and a
+      // failed reaction must never cost the message, so it is warned once and dropped.
+      if (i.kind === "message" && i.messageId !== undefined) {
+        const target = { chatId: i.chat, ...(i.thread !== undefined && i.thread !== 1 ? { threadId: i.thread } : {}) };
+        void tg.react(target, i.messageId, "👀").catch((e: unknown) => {
+          if (reactWarned) return;
+          reactWarned = true;
+          console.log(
+            `WARN reaction failed (${e instanceof Error ? e.message : String(e)}); still answering`.slice(0, 300),
+          );
+        });
+      }
+    },
     (m) => console.log(`WARN ${m}`.slice(0, 300)),
   );
 };
@@ -183,6 +206,34 @@ export const messengerCommands: Readonly<Record<string, Command>> = {
   send,
   presence,
   inbound,
+  "inbound-lag": async ({ opt, config }) => {
+    // Read back what the receiver recorded: without this the jsonl is a file nobody can query.
+    const limitText = opt("limit");
+    const limit = limitText === undefined ? 1000 : Number(limitText);
+    if (!Number.isSafeInteger(limit) || limit <= 0) die("--limit must be a positive whole number of messages");
+    const path = `${config.stateDir}/telegram-lag.jsonl`;
+    if (!existsSync(path)) die(`no lag records yet at ${path}; messages record themselves as the receiver polls`);
+    const lags: number[] = [];
+    let skipped = 0;
+    // Read enough blocks from the end for the requested nonblank records, including malformed ones.
+    for (const line of readLagTail(path, limit)) {
+      const lag = lagOfLine(line);
+      if (lag === undefined) {
+        skipped++; // a truncated last line from a kill mid-write is expected
+        continue;
+      }
+      lags.push(lag);
+    }
+    const summary = summarizeLag(lags);
+    if (summary === undefined) {
+      die(`no lag readings in the last ${limit} records of ${path} (${skipped} unparseable)`);
+      return;
+    }
+    console.log(
+      `LAG n=${summary.n} p50=${summary.p50}ms p90=${summary.p90}ms p99=${summary.p99}ms max=${summary.max}ms` +
+        (skipped === 0 ? "" : ` skipped=${skipped}`),
+    );
+  },
   transcribe: async ({ key, config }) => {
     console.log(await transcribe(run, config.hooks.transcribe, key ?? die("transcribe needs an audio file path")));
   },

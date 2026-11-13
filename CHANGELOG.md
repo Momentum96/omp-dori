@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Lane briefs retain the newest 12 eligible global standing rules and 8 repo lessons under separate caps. Over-cap rules are returned as `omitted` and named in launch warnings with `global` or the canonical repo cwd.
+- Nested OMP runs preserve another live process's pane record. Positive safe-integer pid validation allows malformed and dead records to be replaced while retaining live-owner and `EPERM` protection.
+- Telegram plain-text sends split losslessly at a conservative 4096 UTF-16 code-unit bound without cutting surrogate pairs, returning the last part's message ID. Malformed API responses stop the send with a messenger error.
+- Telegram edits remain single-message updates: oversized raw input fails before any request or mutation. Rich sends retain one unsplit HTML request; rich edits count markup in the same conservative bound. HTML-aware splitting and multi-message edits are outside this change.
+- Telegram owner intake retains message dates, adds a single read-receipt reaction for new messages and records lag separately from the positional `INBOUND` line. New lag journals use mode `0600` and contain chat/user metadata, without message text or bot tokens. `inbound-lag --limit` reads backwards to the requested nonblank-record window and reports nearest-rank percentiles, skipping unusable readings.
 - Move the maintained source checkout's `omp-ulw.lock` to `d69ad5fbe032c8aa49098c1d599c20df232bc474` for OMP's `⁂` prompt sections while retaining the OMP 18.18.8 minimum. This source change does not replace the published `v0.1.2` assets or their dependency lock.
 - Pass an optional model through the extension's FakePI context and retain a real-omp-ulw regression requiring one model-preset result and replacement of the host role body on a `⁂`-marked prompt. The real-fixture group skips when its entry point is absent; a fixture-free run does not prove preset compatibility. See [the fixture requirements](CONTRIBUTING.md#run-the-gates).
 - The source-only `scripts/install-source.sh` supports explicit `primary` and `side` modes. Side installs use their own config/state, `omp-dori` wrappers, OMP skill overlay and hc namespace without replacing the primary Dori's command or links; the mode marker keeps reinstalls in place.
@@ -13,6 +18,8 @@
 - Side source installs can return from a retained external omp-ulw checkout to the existing managed default. Equivalent default paths in legacy configs stay managed, so later installs continue to select and update refs.
 - Multi-cycle real-Git publication integration tests use a test-local 30-second budget instead of Bun's 5-second default. Producer timeouts, CI wait deadlines, assertions and retry policy are unchanged.
 - Installer regression fixtures cover data/permission/link preservation and managed consumer isolation. The new source workflow has no new real OMP, provider, messenger, consumer QA or CI result claimed here; those results belong with the exact candidate's evidence.
+
+These source changes retain the existing consumer release interfaces and minimum requirements; source dependency policy and pin changes are described above. The published preview's live support boundary is unchanged.
 
 ## 0.1.2 — Linux x64 preview (`v0.1.2`)
 

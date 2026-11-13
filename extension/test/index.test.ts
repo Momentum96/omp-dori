@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { paneStatePath, readPaneState, writePaneState } from "../../skills/dori-mode/scripts/src/lane-state";
@@ -264,6 +264,57 @@ describe("monitor restore", () => {
 });
 
 describe("pane state", () => {
+  test("a nested run preserves the live owner's record and a later session can replace its dead record", async () => {
+    const owner = Bun.spawn(["sleep", "30"], { stdin: "ignore", stdout: "ignore", stderr: "inherit" });
+    try {
+      const lead = await load({ session: session("lead"), flags: { "dori-role": "dori" } });
+      await lead.emit("session_start");
+      const owned = readPaneState(stateDir, PANE);
+      if (owned === null) throw new Error("the lead session did not record its pane");
+      expect(owned).toMatchObject({ pid: process.pid, sessionId: "lead", role: "dori" });
+      writePaneState(stateDir, { ...owned, pid: owner.pid });
+
+      const nested = await load({ session: session("nested"), flags: { "dori-role": "lane" } });
+      await nested.emit("session_start");
+      await nested.emit("goal_updated", { goal: { objective: "nested work", status: "active" } });
+      expect(readPaneState(stateDir, PANE)).toEqual({ ...owned, pid: owner.pid });
+      await nested.emit("session_shutdown");
+      expect(readPaneState(stateDir, PANE)).toEqual({ ...owned, pid: owner.pid });
+
+      owner.kill();
+      await owner.exited;
+      const replacement = await load({ session: session("replacement"), flags: { "dori-role": "lane" } });
+      await replacement.emit("session_start");
+      expect(readPaneState(stateDir, PANE)).toMatchObject({ pid: process.pid, sessionId: "replacement" });
+      await replacement.emit("session_shutdown");
+      expect(readPaneState(stateDir, PANE)).toBeNull();
+      await lead.emit("session_shutdown");
+    } finally {
+      if (owner.exitCode === null) owner.kill();
+      await owner.exited;
+    }
+  });
+
+  test.each([0, undefined, "17", -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1])(
+    "an invalid incumbent pid %j cannot wedge pane recording or cleanup",
+    async (pid) => {
+      const first = await load({ session: session("first"), flags: { "dori-role": "lane" } });
+      await first.emit("session_start");
+      const owned = readPaneState(stateDir, PANE);
+      if (owned === null) throw new Error("the first session did not record its pane");
+      writeFileSync(paneStatePath(stateDir, PANE), JSON.stringify({ ...owned, pid }));
+
+      const next = await load({ session: session("next"), flags: { "dori-role": "lane" } });
+      await next.emit("session_start");
+      expect(readPaneState(stateDir, PANE)).toMatchObject({ pid: process.pid, sessionId: "next" });
+      await next.emit("goal_updated", { goal: { objective: "recover pane", status: "active" } });
+      expect(readPaneState(stateDir, PANE)?.goal).toEqual({ objective: "recover pane", status: "active" });
+      await next.emit("session_shutdown");
+      expect(readPaneState(stateDir, PANE)).toBeNull();
+      await first.emit("session_shutdown");
+    },
+  );
+
   test("records the session on start, goal updates and open approvals", async () => {
     const pi = await load({ session: session("lane-1"), flags: { "dori-role": "lane" } });
     await pi.emit("session_start");

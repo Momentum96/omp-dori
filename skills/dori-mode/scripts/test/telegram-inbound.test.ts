@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Http, HttpRequest, HttpResponse } from "../src/messenger/http.ts";
 import { Telegram } from "../src/messenger/telegram.ts";
 import { fileTgInboundStore, pollTelegramInbound } from "../src/messenger/telegram-inbound.ts";
+import { inboundLagLog } from "../src/messenger/telegram-lag.ts";
 import { fakeClock, withState } from "./fakes.ts";
 
 const OWNER = 5250;
@@ -193,4 +194,34 @@ test("a crash mid-emit replays the unprinted message, not the printed one", asyn
   expect(out3.map((i) => i.updateId)).toEqual([71, 72]);
   expect(bodies[2]!["offset"]).toBe(71);
   expect(store.load()).toBe(73);
+});
+
+test("dated owner intake records original-message lag without changing cursor or owner filtering", async () => {
+  const date = 1_700_000_000;
+  const { http } = telegramFake([
+    [
+      { update_id: 100, message: { ...msg(OWNER, OWNER, "private", "first"), date } },
+      {
+        update_id: 101,
+        edited_message: { ...msg(OWNER, OWNER, "private", "edited"), date, edit_date: date + 1000 },
+      },
+      { update_id: 102, message: msg(OWNER, OWNER, "private", "without date") },
+      { update_id: 103, message: { ...msg(OTHER, OTHER, "private", "not the owner"), date } },
+    ],
+  ]);
+  const path = join(state.dir, "telegram-lag.jsonl");
+  const record = inboundLagLog(path);
+  const store = fileTgInboundStore(join(state.dir, "telegram-offset"));
+  await pollTelegramInbound(mk(http), store, { ownerId: OWNER }, (inbound) => record(inbound, 1_700_000_002_250));
+  const records = readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { updateId: number; kind: string; lagMs?: number });
+  expect(records.map(({ updateId, kind, lagMs }) => [updateId, kind, lagMs])).toEqual([
+    [100, "message", 2250],
+    [101, "edit", 2250],
+    [102, "message", undefined],
+  ]);
+  expect(records[2]).not.toHaveProperty("lagMs");
+  expect(store.load()).toBe(104);
 });
