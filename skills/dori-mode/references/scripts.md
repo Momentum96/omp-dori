@@ -75,6 +75,10 @@ The lane never gets the Slack token itself: on hc every env value is a command-l
 
 `--dry-run` prints the brief as the lane would get it, lessons and footer included, and changes nothing.
 
+The footer uses the already selected runtime (`DORI_RUNTIME` > config > detection) for its report-forwarding command. It binds reports to this skill's CLI path and carries `kind`, `text` and the printed line as data arguments; supply values through environment variables or proper shell quoting, never by interpolating raw text into executable source. Before forwarding, verify the live agent, empty input and absence of approval/question prompts as described in [Messaging a session](sessions.md#messaging-a-session), then confirm delivery from a status transition or session record. Report text containing shell punctuation is still data, including when expanded through `"$line"`. If the lead pane or runtime is unavailable, the footer records and prints the report without a forwarding command. Preview runtime selection reads configuration/environment/PATH metadata and never starts a runtime.
+
+Sol lane main agents are encouraged to batch bookkeeping already required by the task and supplied launch footer. Checkpoints, reports, forwarding and claims remain mandatory when due; failed prerequisites stop dependent commands, and partial chains stay incomplete. A same-data checkpoint retry returns the existing record; a conflicting rewrite fails, and remote effects must never be replayed just to retry their journal entry. Strict one-line harness reviewers without a launch footer keep that output contract. The author's n=5-per-arm comparison used stubbed reporting/delivery on an earlier tree; it is not a reproduction or proof of turn or wall-time savings on the integrated tree.
+
 ### `dori adopt <key> --pane ID --title T --brief FILE --done "..." [--thread REF]`
 Registers a lane that is already running.
 

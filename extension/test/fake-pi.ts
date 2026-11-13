@@ -13,14 +13,12 @@ export type Entry = {
 };
 export type FakeSession = { id: string; file?: string; entries: Entry[] };
 type Agent = DoriContext["agent"];
-/** `model` is omp's ctx.model; omp-ulw picks its preset from it. */
-type Model = { id: string; name?: string; provider?: string };
 export type FakeOptions = {
   session: FakeSession;
   flags?: Record<string, string>;
   agent?: Agent;
   active?: string[];
-  model?: Model;
+  model?: DoriContext["model"];
 };
 
 export type FakePi = {
@@ -34,7 +32,7 @@ export type FakePi = {
   notes: string[];
   session: FakeSession;
   ctx(): DoriContext;
-  /** Runs handlers in registration order, like omp's runner; returns their results. */
+  /** Runs handlers in registration order, chaining before_agent_start prompt replacements as OMP does. */
   emit(event: string, payload?: unknown): Promise<unknown[]>;
   command(name: string, args?: string): Promise<void>;
 };
@@ -67,7 +65,23 @@ export const fakePi = (options: FakeOptions): FakePi => {
     }),
     emit: async (event, payload = { type: event }) => {
       const results: unknown[] = [];
-      for (const handler of [...(fake.handlers.get(event) ?? [])]) results.push(await handler(payload, fake.ctx()));
+      let current = payload;
+      for (const handler of [...(fake.handlers.get(event) ?? [])]) {
+        const result = await handler(current, fake.ctx());
+        results.push(result);
+        if (
+          event === "before_agent_start" &&
+          result &&
+          typeof result === "object" &&
+          "systemPrompt" in result &&
+          result.systemPrompt !== undefined
+        ) {
+          current = {
+            ...(typeof current === "object" && current !== null ? current : {}),
+            systemPrompt: typeof result.systemPrompt === "string" ? [result.systemPrompt] : result.systemPrompt,
+          };
+        }
+      }
       return results;
     },
     command: async (name, args = "") => {

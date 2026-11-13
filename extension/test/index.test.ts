@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { paneStatePath, readPaneState, writePaneState } from "../../skills/dori-mode/scripts/src/lane-state";
 import { type FakePi, type FakeSession, load, until, useConfig } from "./fake-pi";
@@ -457,22 +457,96 @@ describe.skipIf(!existsSync(REAL_ULW))("with the real omp-ulw", () => {
     expect(lane.userMessages).toEqual(["ulw fix it"]);
   });
 
-  test("a lane on the current OMP prompt layout gets its model preset", async () => {
-    useConfig(REAL_ULW);
-    const lane = await load({
-      session: session("lane-preset"),
-      flags: { "dori-role": "lane" },
-      model: { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", provider: "openai-codex" },
-    });
-    await lane.emit("session_start");
-    // OMP 18.18 marks its system-prompt sections with ⁂; a pin that only knows § leaves every preset unapplied.
+  test("native OMP composes Sol bookkeeping with the pinned preset and preserves excluded prompts", async () => {
+    if (!process.env["DORI_TEST_OMP_ROOT"])
+      throw new Error("the real d69 fixture requires the exact native OMP host fixture; see CONTRIBUTING.md");
+    const compat = process.env["DORI_TEST_COMPAT_ULW_ENTRY"];
+    if (!compat || !isAbsolute(compat))
+      throw new Error("the real d69 fixture also requires an absolute exact explicit-override fixture entry");
+    // Fixture-free runs keep the existing skips; load this isolated SDK only inside the real-dependency guard.
+    const { nativeComposition, SOL_MODEL } = await import("../../test/fixtures/omp-native-host/compose.ts");
+    const dori = join(import.meta.dir, "../index.ts");
     const host = "intro\n⁂ Role\nHOST_ROLE\n⁂ Runtime\nrt\n⁂ Tool Policy\npolicy\n⁂ Workflow\nwf";
-    const results = await lane.emit("before_agent_start", { ...agentStart, systemPrompt: [host] });
-    const prompts = results.flatMap((result) =>
-      result && typeof result === "object" && "systemPrompt" in result ? [JSON.stringify(result.systemPrompt)] : [],
-    );
-    const preset = prompts.filter((prompt) => prompt.includes("<omp-model-preset>"));
-    expect(preset).toHaveLength(1);
-    expect(preset[0]).not.toContain("HOST_ROLE");
-  });
+    const parent = { kind: "main", id: "NativeParent", name: "Main", depth: 0 } as const;
+    for (const { embedded, entries } of [
+      { embedded: true, entries: [dori] },
+      { embedded: false, entries: [dori, REAL_ULW] },
+      { embedded: false, entries: [REAL_ULW, dori] },
+    ]) {
+      useConfig(embedded ? REAL_ULW : "");
+      const base = [host, "Retained downstream context"];
+      const original = [...base];
+      const result = await nativeComposition(entries, base, { role: "lane", agent: parent });
+      if (!Array.isArray(result.first)) throw new Error("native OMP returned no combined prompt array");
+      expect(result.first).toBeArray();
+      expect(result.first).toEqual(result.afterAll[0]);
+      expect(result.second).toEqual(result.first);
+      expect(result.afterAll[1]).toEqual(result.first);
+      expect(base).toEqual(original);
+      const prompt = JSON.stringify(result.first);
+      expect(prompt.match(/<omp-model-preset>/g)).toHaveLength(1);
+      expect(prompt.match(/<omp-dori-lane-bookkeeping>/g)).toHaveLength(1);
+      expect(prompt).not.toContain("HOST_ROLE");
+      expect(prompt).toContain("Retained downstream context");
+    }
+    const exclusions = [
+      { role: "dori" as const },
+      {},
+      { role: "lane" as const, model: { ...SOL_MODEL, id: "gpt-6.1-terra", name: "GPT-6.1 Terra" } },
+      {
+        role: "lane" as const,
+        agent: { kind: "sub" as const, id: "NativeSub", name: "Sub", depth: 1, parentId: parent.id },
+      },
+    ];
+    for (const excluded of exclusions) {
+      useConfig("");
+      const base = [host, "Retained downstream context"];
+      const original = [...base];
+      const result = await nativeComposition([REAL_ULW, dori], base, { ...excluded, observeBefore: dori });
+      expect(result.beforeDori).toHaveLength(2);
+      expect(result.afterAll).toEqual(result.beforeDori);
+      expect(result.second).toEqual(result.first);
+      if (result.first !== undefined) expect(result.first).toEqual(result.afterAll[0]);
+      expect(JSON.stringify(result.afterAll)).not.toContain("<omp-dori-lane-bookkeeping>");
+      expect(base).toEqual(original);
+    }
+    // Legacy explicit imports are compared as opaque baseline data, without assuming current preset markers.
+    useConfig("");
+    const legacyBase = [host, "Retained downstream context"];
+    const original = [...legacyBase];
+    const legacy = await nativeComposition([compat], legacyBase, { role: "lane", agent: parent });
+    expect(legacy.second).toEqual(legacy.first);
+    if (legacy.first !== undefined) expect(legacy.first).toEqual(legacy.afterAll[0]);
+    expect(legacy.afterAll[1]).toEqual(legacy.afterAll[0]);
+    expect(legacyBase).toEqual(original);
+    useConfig(compat);
+    const embedded = await nativeComposition([dori], legacyBase, { role: "lane", agent: parent });
+    if (!embedded.first) throw new Error("embedded explicit override returned no native prompt");
+    const legacyPrompt = legacy.afterAll[0];
+    if (!legacyPrompt) throw new Error("the native runner did not observe the legacy baseline prompt");
+    expect(embedded.first).toEqual(embedded.afterAll[0]);
+    expect(embedded.second).toEqual(embedded.first);
+    expect(embedded.afterAll[1]).toEqual(embedded.first);
+    expect(legacyBase).toEqual(original);
+    expect(JSON.stringify(legacyPrompt)).not.toContain("<omp-dori-lane-bookkeeping>");
+    expect(JSON.stringify(embedded.first).match(/<omp-dori-lane-bookkeeping>/g)).toHaveLength(1);
+    expect(embedded.first.filter((block) => block.includes("<omp-dori-lane-bookkeeping>"))).toHaveLength(1);
+    expect(embedded.first.filter((block) => !block.includes("<omp-dori-lane-bookkeeping>"))).toEqual(legacyPrompt);
+    for (const excluded of exclusions) {
+      const base = [host, "Retained downstream context"];
+      const before = [...base];
+      useConfig("");
+      // Outside a role, the explicit dependency was already gated off; the applicable baseline is the bare host.
+      const baseline = await nativeComposition("role" in excluded ? [compat] : [], base, excluded);
+      expect(baseline.second).toEqual(baseline.first);
+      expect(base).toEqual(before);
+      useConfig(compat);
+      const result = await nativeComposition([dori], base, excluded);
+      expect(result.first).toEqual(baseline.first);
+      expect(result.second).toEqual(result.first);
+      expect(result.afterAll).toEqual(baseline.afterAll);
+      expect(JSON.stringify(result.afterAll)).not.toContain("<omp-dori-lane-bookkeeping>");
+      expect(base).toEqual(before);
+    }
+  }, 30_000);
 });

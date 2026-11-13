@@ -26,14 +26,39 @@ export const originalBrief = (text: string): string => {
   return brief.slice(start === -1 || start > foot ? 0 : start + BRIEF_START.length + 1, foot).replace(/\s*$/, "");
 };
 
-export const footer = (lane: Lane, leadPane: string, identities: DoriConfig["repoIdentities"] = {}): string =>
-  [
+// Name only the selected runtime; an unresolved preview still records reports without inventing a send command.
+const sendReport = (leadPane: string, runtime: DoriConfig["runtime"]): string | undefined => {
+  if (!leadPane || !runtime) return undefined;
+  const lead = quoteForPane(leadPane);
+  return runtime === "herdr" ? `herdr pane run ${lead} "$line"` : `hc send ${lead} -- "$line"`;
+};
+
+export const footer = (
+  lane: Lane,
+  leadPane: string,
+  identities: DoriConfig["repoIdentities"] = {},
+  runtime?: DoriConfig["runtime"],
+): string => {
+  const forward = sendReport(leadPane, runtime);
+  return [
     "",
     FOOTER_START,
     FOOTER_HEADING,
     `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
     `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
-    `- Persist each milestone, blocker, question, halt and completion with ${CLI} report ${lane.key} --kind milestone|blocker|question|halted|done --text "what, with evidence links". It appends reports.jsonl and prints the human [REPORT] line; send that line to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string.`,
+    "- Persist each milestone, blocker, question, halt and completion with the report command below. It appends reports.jsonl and prints the human [REPORT] line.",
+    "- Before forwarding, verify that the lead pane runs a live agent, its input is empty, and no approval or question prompt is open (references/sessions.md). A shell, unknown status or unconfirmed check holds forwarding.",
+    "- Supply kind (milestone, blocker, question, halted or done) and text (the report with evidence links) as data, such as environment variables. Never interpolate raw report text into shell source or evaluate the printed line. Record with the command below; when it includes forwarding, run that combined call only after the forwarding checks pass:",
+    "```sh",
+    `line=$(${CLI} report ${lane.key} --kind "$kind" --text "$text") && printf '%s\\n' "$line"${forward ? ` && ${forward}` : ""}`,
+    "```",
+    ...(forward
+      ? [
+          "- Confirm forwarding from the agent's status transition or session record; an exit code or echoed input alone is unconfirmed. Never resend just because no reply is visible.",
+        ]
+      : [
+          "- The lead pane or runtime is unavailable, so the command above only records and prints the report. Keep that line and resolve the missing destination with the lead before forwarding.",
+        ]),
     ...(Object.keys(identities).length
       ? [
           "- Before committing, set the repository's identity below for that command only; never change the global Git identity. For a repository not listed, ask the lead for its identity before the first commit.",
@@ -51,6 +76,7 @@ export const footer = (lane: Lane, leadPane: string, identities: DoriConfig["rep
     FOOTER_END,
     "",
   ].join("\n");
+};
 
 export const quoteForPane = (arg: string): string =>
   /^[\w./:@=-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
