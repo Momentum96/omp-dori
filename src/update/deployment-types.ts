@@ -11,8 +11,12 @@ export type DeploymentConfig = {
   readonly bun: string;
   readonly omp: string;
   readonly legacyOmp?: string;
-  readonly herdr: string;
+  /** The Dori's session runtime: a herdr pane (`w1:p2`) or an hc terminal (`t7`); `herdr` or `hc` names its binary. */
+  readonly runtime: "herdr" | "hc";
+  readonly herdr?: string;
   readonly herdrSession?: string;
+  readonly hc?: string;
+  readonly hcSession?: string;
   readonly pane: string;
   readonly sessionId: string;
   readonly model: string;

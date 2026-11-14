@@ -10,6 +10,7 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,7 +21,8 @@ import { processIdentity, sameProcess } from "../src/update/deployment-process.t
 import { terminateBoundProcess } from "../src/update/deployment-signal.ts";
 import { digest } from "../src/update/source.ts";
 
-const linux = test.skipIf(process.platform !== "linux");
+// The kernels whose process identity deployment can bind.
+const posix = test.skipIf(process.platform !== "linux" && process.platform !== "darwin");
 
 const directories: string[] = [];
 afterEach(() => {
@@ -120,12 +122,12 @@ test("a preserved legacy artifact is admitted only for a real source directory a
   expect(() => verifyLegacyArtifact(config, capturedHash)).toThrow();
 });
 
-linux(
+posix(
   "an owned executable rename retains kernel identity and bound termination reaches only its original child",
   async () => {
-    const { root } = fixture();
+    const root = realpathSync(fixture().root);
     const image = join(root, "sleep");
-    copyFileSync("/usr/bin/sleep", image);
+    copyFileSync(Bun.which("sleep")!, image);
     const child = Bun.spawn([image, "60"], { stdout: "ignore", stderr: "ignore" });
     try {
       const identity = processIdentity(child.pid)!;
