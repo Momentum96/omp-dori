@@ -122,3 +122,5 @@ jobs:
         run: |
           test -f test/e2e-hc.test.ts
           bun test test/e2e-hc.test.ts
+          test -f test/e2e-hc-deploy.test.ts
+          bun test test/e2e-hc-deploy.test.ts

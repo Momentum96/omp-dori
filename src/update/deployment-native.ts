@@ -1,8 +1,8 @@
 import { readFileSync, realpathSync } from "node:fs";
+import { type DeploymentCli, hcDeploymentCli, herdrDeploymentCli } from "./deployment-cli.ts";
+import { runtimeBinary } from "./deployment-config.ts";
 import { readPaneState } from "../../skills/dori-mode/scripts/src/lane-state.ts";
 import type { Exec } from "../runtime/exec.ts";
-import { HerdrCli } from "../runtime/herdr/exec.ts";
-import { foreground, probe } from "../runtime/herdr/probe.ts";
 import type { LegacyRollbackForeground } from "./deployment-legacy-monitors.ts";
 import { attestMonitorForeground } from "./deployment-monitor-receipts.ts";
 import {
@@ -24,17 +24,18 @@ import type {
   RuntimeIdentity,
 } from "./deployment-types.ts";
 import { digest, sourceManifest } from "./source.ts";
+import { procExe } from "./proc.ts";
 
 const executableHashes = new Map<string, string>();
 
-export function nativeCli(config: DeploymentConfig, signal?: AbortSignal): HerdrCli {
+export function nativeCli(config: DeploymentConfig, signal?: AbortSignal): DeploymentCli {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const exec: Exec = async (cmd, argv) => {
     if (signal?.aborted) throw new DeploymentHeld("native observation interrupted");
     const environment = actorEnv(config);
     // lstart has no offset; its ps producer and Date.parse observer must use the same zone.
     if (cmd === "ps") environment["TZ"] = timezone;
-    const proc = Bun.spawn([cmd === "herdr" ? config.herdr : cmd, ...argv], {
+    const proc = Bun.spawn([cmd === config.runtime ? runtimeBinary(config) : cmd, ...argv], {
       env: environment,
       stdin: "ignore",
       stdout: "pipe",
@@ -53,18 +54,18 @@ export function nativeCli(config: DeploymentConfig, signal?: AbortSignal): Herdr
       signal?.removeEventListener("abort", stop);
     }
   };
-  return new HerdrCli(exec, config.herdrSession ?? "");
+  return config.runtime === "hc" ? hcDeploymentCli(exec) : herdrDeploymentCli(exec, config.herdrSession ?? "");
 }
 
 export async function captureRuntime(
   config: DeploymentConfig,
-  cli: HerdrCli,
+  cli: DeploymentCli,
   allowWorking = false,
   quiesce?: DeploymentRecord,
   rollback?: LegacyRollbackForeground,
 ): Promise<RuntimeIdentity> {
   const state = readPaneState(config.stateDir, config.pane);
-  const current = await probe(cli, config.pane, false, "deployment held", config.stateDir);
+  const current = await cli.probe(config.pane, "deployment held", config.stateDir);
   if (
     !state ||
     state.role !== "dori" ||
@@ -87,7 +88,7 @@ export async function captureRuntime(
   const key = JSON.stringify(identity);
   let executableHash = executableHashes.get(key);
   if (!executableHash) {
-    executableHash = digest(readFileSync(`/proc/${identity.pid}/exe`));
+    executableHash = digest(readFileSync(procExe(identity.pid)));
     if (!sameProcess(identity)) throw new DeploymentHeld("native executable changed during capture");
     executableHashes.set(key, executableHash);
   }
@@ -152,7 +153,7 @@ export function assertRetryDeadline(record: DeploymentRecord): void {
 /** One identity-bound signal. A reused PID or a different pane/session is never signalled. */
 export async function stopRuntime(
   config: DeploymentConfig,
-  cli: HerdrCli,
+  cli: DeploymentCli,
   record: DeploymentRecord,
   persist: (record: DeploymentRecord) => void,
   allowQuiesce = false,
@@ -210,13 +211,13 @@ export async function stopRecordedMonitors(
 
 export async function requireShell(
   config: DeploymentConfig,
-  cli: HerdrCli,
+  cli: DeploymentCli,
   stopped?: ProcessIdentity,
   until = Date.now() + config.stopTimeoutMs,
 ): Promise<void> {
   for (;;) {
     if (stopped && Date.now() >= until) throw new DeploymentHeld("target pane is not an observed shell");
-    const seen = await foreground(cli, config.pane, "deployment held");
+    const seen = await cli.foreground(config.pane, "deployment held");
     if (stopped) {
       const owner = readPaneState(config.stateDir, config.pane);
       if (
