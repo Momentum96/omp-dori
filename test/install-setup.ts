@@ -83,6 +83,7 @@ export function setup() {
     INSTALL_TEST_OMP_VERSION: "",
     OMP_DORI_HOME: join(home, ".omp-dori"),
     OMP_DORI_HC_SESSION: "",
+    OMP_DORI_HC_SPACE: "",
     OMP_DORI_BIN_DIR: join(home, "global-bin"),
     PATH: `${bin}:${process.env["PATH"]}`,
     ...extra,

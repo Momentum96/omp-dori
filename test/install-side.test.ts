@@ -82,6 +82,22 @@ test("a side install from a linked git worktree installs that checkout instead o
   expect(readFileSync(join(home, ".omp-dori/bin/dori"), "utf8")).toContain(join(worktree, cli));
 });
 
+test("OMP_DORI_HC_SPACE puts DORI_HC_SPACE into the side env; without it the side env names no space", () => {
+  // Given another Dori's ~/.dori.
+  const { home, install } = setup();
+  withOtherDori(home);
+  const env = () => readFileSync(join(home, ".omp-dori/env.sh"), "utf8");
+  // When a side install runs without a space, then again with one.
+  expect(install({ DORI_INSTALL_MODE: "side" }).code).toBe(0);
+  expect(env()).not.toContain("DORI_HC_SPACE");
+  const r = install({ DORI_INSTALL_MODE: "side", OMP_DORI_HC_SPACE: "sp0a1b" });
+  expect(r.code).toBe(0);
+  // Then only the second env exports it, the lead command it prints opens in that space, and the other Dori is unchanged.
+  expect(env()).toContain("export DORI_HC_SPACE=sp0a1b\n");
+  expect(r.out).toContain("--label herdr.space=sp0a1b --");
+  expectOtherDoriUntouched(home);
+});
+
 test("an omp-dori install from before the marker, with its checkout elsewhere, is updated without asking", () => {
   // Given an unmanaged source home whose earlier source installer linked the external checkout's extension.
   const { home, src, install } = setup();

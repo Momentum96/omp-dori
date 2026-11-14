@@ -8,6 +8,7 @@
 # Source omp-ulw follows OMP_ULW_REF (default main; lock uses omp-ulw.lock), or reuses an existing checkout.
 # Primary mode discovers it globally; side mode loads it only through the isolated omp-dori omp wrapper.
 # Optional paths: DORI_SRC, OMP_ULW_SRC, OMP_ULW_REPO, SKILLS_DIR, OMP_EXTENSIONS_DIR, OMP_DORI_HOME, OMP_DORI_BIN_DIR.
+# Side mode also takes OMP_DORI_HC_SESSION (default omp-dori) and OMP_DORI_HC_SPACE (a Herdr app space id).
 set -euo pipefail
 
 fail() { echo "$1" >&2; exit 1; }
@@ -374,6 +375,8 @@ EOF
   printf 'export DORI_STATE_DIR=%q\n' "$base/state"
   printf 'export DORI_AGENT_CMD=%q\n' "$base/bin/omp"
   printf 'export HC_SESSION=%q\n' "$hc_session"
+  # A Herdr app space id shows the side Dori's terminals in that space; without one, hc keeps them hidden.
+  [ -z "${OMP_DORI_HC_SPACE:-}" ] || printf 'export DORI_HC_SPACE=%q\n' "$OMP_DORI_HC_SPACE"
   printf 'case ":$PATH:" in *:%q:*) ;; *) export PATH=%q:"$PATH" ;; esac\n' "$base/bin" "$base/bin"
 } > "$base/env.sh"
 wrapper() {
@@ -398,6 +401,6 @@ Installed next to the Dori in $primary_home, which was not changed.
   Config:     $config
 Next: create a separate messenger bot and channel, set runtime, leadPane, defaultCwd, defaultModel and hooks
 in $config, then start the lead in its own hc session:
-  omp-dori hc run --name omp-dori-lead -- omp-dori omp --dori-role dori
+  omp-dori hc run --name omp-dori-lead${OMP_DORI_HC_SPACE:+ --label herdr.space=$OMP_DORI_HC_SPACE} -- omp-dori omp --dori-role dori
 Installation does not start a messenger, watcher or hc server.
 EOF
