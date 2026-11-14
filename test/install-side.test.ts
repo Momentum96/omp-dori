@@ -68,6 +68,20 @@ test("a side install lives in ~/.omp-dori and leaves ~/.dori, the dori-mode link
   expect(readlinkSync(join(side, "skills/omp-dori-mode/references"))).toBe(join(src, "skills/dori-mode/references"));
 });
 
+test("a side install from a linked git worktree installs that checkout instead of cloning over it", () => {
+  // Given another Dori's ~/.dori and a linked worktree of the omp-dori checkout, whose .git is a file.
+  const { root, home, src, cli, install } = setup();
+  withOtherDori(home);
+  const worktree = join(root, "worktree");
+  git(src, "worktree", "add", "-q", "-b", "wt", worktree);
+  // When scripts/install-source.sh runs in side mode with DORI_SRC naming the worktree.
+  const r = install({ DORI_INSTALL_MODE: "side", DORI_SRC: worktree, DORI_NO_PULL: "1" });
+  // Then it installs the worktree as it is, and the side dori wrapper runs the worktree's CLI.
+  expect(r.code).toBe(0);
+  expectOtherDoriUntouched(home);
+  expect(readFileSync(join(home, ".omp-dori/bin/dori"), "utf8")).toContain(join(worktree, cli));
+});
+
 test("an omp-dori install from before the marker, with its checkout elsewhere, is updated without asking", () => {
   // Given an unmanaged source home whose earlier source installer linked the external checkout's extension.
   const { home, src, install } = setup();

@@ -77,9 +77,9 @@ other_dori() {
   [ -n "$consumer" ] && return 0
   marked "$primary_home" && return 1
   [ -L "$earlier_extension_link" ] && return 1
-  [ -d "$primary_home/src/.git" ] && is_omp_dori "$primary_home/src" && return 1
+  [ -e "$primary_home/src/.git" ] && is_omp_dori "$primary_home/src" && return 1
   [ -f "$primary_home/config.json" ] && return 0
-  [ -d "$primary_home/src/.git" ] && return 0
+  [ -e "$primary_home/src/.git" ] && return 0
   return 1
 }
 other=""
@@ -191,11 +191,12 @@ if [ "$mode" = side ]; then
     "$base/bin/dori" "$base/bin/omp" "$base/bin/omp-dori"
 fi
 
-if [ -z "${DORI_SRC:-}" ] && [ -d "$src/.git" ] && ! is_omp_dori "$src"; then
+# A linked worktree has a .git file rather than a directory.
+if [ -z "${DORI_SRC:-}" ] && [ -e "$src/.git" ] && ! is_omp_dori "$src"; then
   fail "$src is a checkout of $(git -C "$src" remote get-url origin 2>/dev/null || echo 'another repository'), not omp-dori; nothing was changed. Move it aside, set DORI_SRC, or install with DORI_INSTALL_MODE=side."
 fi
 
-if [ ! -d "$src/.git" ]; then
+if [ ! -e "$src/.git" ]; then
   git clone --quiet --depth 1 "$repo" "$src"
 elif [[ "${DORI_NO_PULL:-}" =~ ^(1|true|yes)$ ]]; then
   echo "DORI_NO_PULL=$DORI_NO_PULL: installing $src as it is, without pulling" >&2
@@ -233,7 +234,7 @@ if [ -n "$standalone_ulw" ]; then
     echo "omp-ulw: removed the earlier $extensions/omp-ulw link so omp-ulw loads once." >&2
   fi
 elif [ -z "$ulw_explicit" ]; then
-  [ -d "$ulw/.git" ] || git clone --quiet "$ulw_repo" "$ulw"
+  [ -e "$ulw/.git" ] || git clone --quiet "$ulw_repo" "$ulw"
   if [ -n "${OMP_ULW_REPO:-}" ]; then git -C "$ulw" remote set-url origin "$ulw_repo"; fi
   git -C "$ulw" fetch --quiet origin
   if [ "$ulw_ref" = lock ]; then
