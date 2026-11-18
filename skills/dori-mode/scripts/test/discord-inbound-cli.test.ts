@@ -65,7 +65,7 @@ test("public Discord intake defaults to three seconds and honors --loop in minut
     expect(JSON.parse(receipt?.slice("DISCORD_INBOUND_QA ".length) ?? "null")).toEqual({
       delays: [milliseconds, milliseconds],
       polls: 2,
-      requests: 5,
+      requests: 6,
     });
   }
 });

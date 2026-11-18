@@ -39,6 +39,13 @@ export type Request = <T>(path: string, body?: Record<string, unknown>) => Promi
 
 const REQUEST_FAILED = "Discord inbound request failed; check the connection and Discord API availability";
 
+/** Compares two Discord snowflakes without losing precision above 2^53. */
+export const newer = (a: string, b: string): boolean => BigInt(a) > BigInt(b);
+
+/** A discovered target's lost access, which is skipped rather than fatal. */
+export const unavailable = (error: unknown): boolean =>
+  error instanceof MessengerError && (error.status === 403 || error.status === 404);
+
 /** A locally detected response fault; retrying it must not hold the live queue indefinitely. */
 export const inboundProtocolError = (message: string): MessengerError =>
   new MessengerError(message, 502, "DISCORD_INBOUND_PROTOCOL_ERROR");
@@ -157,6 +164,57 @@ const toAttachments = (message: Message): InboundAttachment[] => {
 };
 
 const TEXT_CHANNELS = new Set([0, 5]); // text and announcement
+
+/** A channel's guild and thread parent; `undefined` only when an optional lookup finds it inaccessible. */
+export type ChannelInfo = { guild?: string; parent?: string };
+
+/** Identifies one channel: its guild, and its thread parent when the channel is itself a thread. */
+export const channelInfo = async (
+  request: Request,
+  channelId: string,
+  optional: boolean,
+): Promise<ChannelInfo | undefined> => {
+  let value: unknown;
+  try {
+    value = await request<unknown>(`/channels/${channelId}`);
+  } catch (error) {
+    if (optional && error instanceof MessengerError && (error.status === 403 || error.status === 404)) return undefined;
+    throw error;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw inboundProtocolError("Discord inbound channel response is invalid");
+  }
+  const { guild_id, parent_id } = value as Record<string, unknown>;
+  return {
+    ...(isDiscordSnowflake(guild_id) ? { guild: guild_id } : {}),
+    ...(isDiscordSnowflake(parent_id) ? { parent: parent_id } : {}),
+  };
+};
+
+/** Every active thread in one guild with its parent channel; `undefined` when that guild is inaccessible. */
+export const activeThreads = async (
+  request: Request,
+  guildId: string,
+): Promise<{ id: string; parent: string }[] | undefined> => {
+  let value: unknown;
+  try {
+    value = await request<unknown>(`/guilds/${guildId}/threads/active`);
+  } catch (error) {
+    if (error instanceof MessengerError && (error.status === 403 || error.status === 404)) return undefined;
+    throw error;
+  }
+  const threads: unknown = (value as { threads?: unknown } | null)?.threads;
+  if (!Array.isArray(threads)) throw inboundProtocolError("Discord inbound thread response is invalid");
+  const found: { id: string; parent: string }[] = [];
+  for (const thread of threads) {
+    if (!thread || typeof thread !== "object" || Array.isArray(thread)) {
+      throw inboundProtocolError("Discord inbound thread response is invalid");
+    }
+    const { id, parent_id } = thread as Record<string, unknown>;
+    if (isDiscordSnowflake(id) && isDiscordSnowflake(parent_id)) found.push({ id, parent: parent_id });
+  }
+  return found;
+};
 
 /** Every text channel and active thread in the bot's guilds, plus the owner's DM with the bot. */
 export const discoverChannels = async (request: Request, ownerId: string): Promise<string[]> => {

@@ -7,7 +7,7 @@ const MESSAGE_CONTENT = 1 << 15; // Privileged: enable it for the bot in the Dev
 
 type Intake = {
   sync(emit: (message: DiscordInbound) => void): Promise<void>;
-  accept(message: Message, emit: (message: DiscordInbound) => void): void;
+  accept(message: Message, emit: (message: DiscordInbound) => void): Promise<void>;
 };
 
 /**
@@ -45,6 +45,19 @@ export const discordInboundLive = (
       }
     }
   };
+  /** A thread's parent lookup can be rate limited; retrying the same dispatch keeps the message in order. */
+  const deliver = async (message: Message) => {
+    for (let delay = 2_000; ; delay = Math.min(delay * 2, 30_000)) {
+      try {
+        return await intake.accept(message, emit);
+      } catch (error) {
+        if (dead || !isTransient(error)) throw error;
+        report(`DISCORD_GATEWAY_ACCEPT_RETRY discord retry_in=${delay / 1000}s`);
+        await pause(delay);
+        if (dead) return;
+      }
+    }
+  };
   const enqueue = (job: () => void | Promise<void>) => {
     queue = queue.then(async () => {
       if (dead) return;
@@ -63,7 +76,7 @@ export const discordInboundLive = (
     online: false,
     onReady: () => enqueue(backfill),
     onDispatch: (type, data) => {
-      if (type === "MESSAGE_CREATE") enqueue(() => intake.accept(data as Message, emit));
+      if (type === "MESSAGE_CREATE") enqueue(() => deliver(data as Message));
     },
   });
   const close = () => {
