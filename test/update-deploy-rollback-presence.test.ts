@@ -110,4 +110,7 @@ posix.each(["suspended", "background"] as const)(
       if (sameProcess(f.runtime)) process.kill(-f.runtime.pid, "SIGCONT");
     }
   },
+  // The background variant waits on real process-group scheduling; bun's 5s default is too
+  // tight for a macOS runner and made this test flake. Behavior is unchanged.
+  30_000,
 );
