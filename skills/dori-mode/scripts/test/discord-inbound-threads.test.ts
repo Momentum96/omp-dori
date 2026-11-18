@@ -194,3 +194,16 @@ test("an explicit thread keeps its strict failure and a real channel lookup erro
   expect(error).toBeInstanceOf(MessengerError);
   expect((error as MessengerError).status).toBe(502);
 });
+
+test("a watched text channel in a Discord category is a parent, not a thread", async () => {
+  // Discord reports `parent_id` on every child channel; only thread channel types make it a thread parent.
+  const world = threadWorld([ownerMessage("100"), ownerMessage("200", { channel_id: "30" })], [["30", "20"]]);
+  world.state.categoryParents.set("20", "60"); // 20 sits in category 60.
+  const cursors = cursorsFor();
+  const intake = await discordInbound(world.discord, cursors.storeFor, { ownerId: "10", channelIds: ["20"] });
+  expect(intake.channels().sort()).toEqual(["20", "30"]);
+  const received: string[] = [];
+  world.state.messages.push(ownerMessage("201", { channel_id: "30" }));
+  await intake.poll((message) => received.push(`${message.channel}:${message.message}`));
+  expect(received).toEqual(["30:201"]);
+});

@@ -58,6 +58,8 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
     threadParents: new Map<string, string>(),
     /** Channel id to guild id, for channel metadata and thread-parent lookups. */
     channelGuilds: new Map<string, string>(),
+    /** Channel id to category id: a text channel's `parent_id` names its category, not a thread parent. */
+    categoryParents: new Map<string, string>(),
     dm: undefined as string | undefined,
     denied: new Set<string>(),
     mixChannels: false,
@@ -104,7 +106,10 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
       const guild = state.channelGuilds.get(channel) ?? state.guilds.find((g) => g.channels.includes(channel))?.id;
       body = {
         ...(guild === undefined ? {} : { guild_id: guild }),
-        ...(state.threadParents.has(channel) ? { parent_id: state.threadParents.get(channel) } : {}),
+        type: state.threadParents.has(channel) ? 11 : 0,
+        ...((state.threadParents.get(channel) ?? state.categoryParents.get(channel)) === undefined
+          ? {}
+          : { parent_id: state.threadParents.get(channel) ?? state.categoryParents.get(channel) }),
       };
     } else if (/^\/channels\/\d+\/messages$/.test(path)) {
       const channel = path.split("/")[2] ?? "";
