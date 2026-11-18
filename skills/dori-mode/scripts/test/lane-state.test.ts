@@ -2,22 +2,23 @@ import { afterEach, expect, test } from "bun:test";
 import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { paneStateDir, writePaneState } from "../src/lane-state.ts";
+import { type PaneState, paneStateDir, writePaneState } from "../src/lane-state.ts";
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-const state = {
+const state: PaneState = {
   paneId: "t9",
-  role: "dori" as const,
+  role: "dori",
   sessionId: "fixture",
   sessionFile: "/tmp/fixture.jsonl",
   cwd: "/tmp",
   pid: process.pid,
   startedAt: new Date(0).toISOString(),
-  agentStatus: "idle" as const,
+  updatedAt: new Date(0).toISOString(),
+  goal: { status: "none" },
   approvalPending: false,
 };
 
