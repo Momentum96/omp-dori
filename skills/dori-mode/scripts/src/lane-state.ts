@@ -38,11 +38,14 @@ export const readPaneState = (stateDir: string, paneId: string): PaneState | nul
   }
 };
 
-// temp file + rename so a concurrent reader never sees a half-written state
+// temp file + rename so a concurrent reader never sees a half-written state.
+// The mode is explicit: session metadata carries the agent's session path and pid, and a
+// group-writable umask (002 on some hosts) would otherwise leave it readable to the group,
+// which every admission check rejects as untrusted metadata.
 export const writePaneState = (stateDir: string, state: PaneState): void => {
-  mkdirSync(paneStateDir(stateDir), { recursive: true });
+  mkdirSync(paneStateDir(stateDir), { recursive: true, mode: 0o700 });
   const path = paneStatePath(stateDir, state.paneId);
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 1));
+  writeFileSync(tmp, JSON.stringify(state, null, 1), { mode: 0o600 });
   renameSync(tmp, path);
 };
