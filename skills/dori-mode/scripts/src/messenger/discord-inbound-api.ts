@@ -165,8 +165,11 @@ const toAttachments = (message: Message): InboundAttachment[] => {
 
 const TEXT_CHANNELS = new Set([0, 5]); // text and announcement
 
-/** A channel's guild and thread parent; `undefined` only when an optional lookup finds it inaccessible. */
-export type ChannelInfo = { guild?: string; parent?: string };
+/** A channel's guild, type and thread parent; `undefined` only when an optional lookup finds it inaccessible. */
+export type ChannelInfo = { guild?: string; type?: number; parent?: string };
+
+/** Discord's thread channel types; a category's `parent_id` names its parent category, not a thread parent. */
+const THREAD_CHANNELS = new Set([10, 11, 12]); // announcement, public and private thread
 
 /** Identifies one channel: its guild, and its thread parent when the channel is itself a thread. */
 export const channelInfo = async (
@@ -184,10 +187,12 @@ export const channelInfo = async (
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw inboundProtocolError("Discord inbound channel response is invalid");
   }
-  const { guild_id, parent_id } = value as Record<string, unknown>;
+  const { guild_id, parent_id, type } = value as Record<string, unknown>;
+  const thread = typeof type === "number" && THREAD_CHANNELS.has(type);
   return {
     ...(isDiscordSnowflake(guild_id) ? { guild: guild_id } : {}),
-    ...(isDiscordSnowflake(parent_id) ? { parent: parent_id } : {}),
+    ...(typeof type === "number" ? { type } : {}),
+    ...(thread && isDiscordSnowflake(parent_id) ? { parent: parent_id } : {}),
   };
 };
 
