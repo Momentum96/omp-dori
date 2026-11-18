@@ -7,9 +7,12 @@ import {
   isOwnerMessage,
   type Message,
   messagePage,
+  newer,
   toInbound,
+  unavailable,
 } from "./discord-inbound-api.ts";
 import { discordInboundEnv, type DiscordInboundStore, isDiscordSnowflake } from "./discord-inbound-state.ts";
+import { discordThreads } from "./discord-inbound-threads.ts";
 import { MessengerError } from "./http.ts";
 
 export type { DiscordInbound } from "./discord-inbound-api.ts";
@@ -19,6 +22,8 @@ export type DiscordInboundOptions = {
   channelIds: readonly string[];
   /** Also watch every text channel, active thread and the owner DM the bot can see; inaccessible ones are skipped. */
   all?: boolean;
+  /** Watch active threads whose parent is a watched channel; set false to watch only the configured ids. */
+  threads?: boolean;
 };
 
 /** Formats one unchanged text line followed by reply and attachment records for the existing single emit. */
@@ -30,10 +35,6 @@ export const formatDiscordInbound = (message: DiscordInbound): string => {
     ...message.attachments.map((attachment) => `INBOUND_ATTACHMENT ${id} ${JSON.stringify(attachment)}`),
   ].join("\n");
 };
-
-const newer = (a: string, b: string): boolean => BigInt(a) > BigInt(b);
-const unavailable = (error: unknown): boolean =>
-  error instanceof MessengerError && (error.status === 403 || error.status === 404);
 
 /**
  * A bot-authenticated Discord intake over any number of channels. Every channel owns a persisted cursor, and a
@@ -64,6 +65,9 @@ export const discordInbound = async (
     );
   }
   const watched = new Map<string, DiscordInboundStore>();
+  /** Watched plain channels with the parent position captured when they were first attached (startup floor). */
+  const parents = new Map<string, string>();
+  const threads = opts.threads !== false && !opts.all; // Scope `all` already lists every active thread.
   /** Only history-read failures can make a discovered channel unavailable, never state or delivery failures. */
   const readPage = async (channelId: string, limit: number, before?: string) => {
     try {
@@ -74,24 +78,30 @@ export const discordInbound = async (
       return undefined;
     }
   };
-  const attach = async (channelId: string): Promise<void> => {
+  /** Watches one channel; `seed` sets a cold-start cursor instead of the channel's latest message. */
+  const attach = async (channelId: string, seed?: string): Promise<string | undefined> => {
     const store = storeFor(channelId);
     const cursor = store.load();
     const latest = await readPage(channelId, 1); // Also verifies channel access before readiness.
-    if (latest === undefined) return;
+    if (latest === undefined) return undefined;
     if (latest.some((message) => message.channel_id !== channelId)) {
       throw inboundProtocolError("Discord inbound channel response does not match the configured channel");
     }
-    if (cursor === undefined) store.save(latest[0]?.id ?? "0"); // Cold start skips existing history.
+    if (cursor === undefined) store.save(seed ?? latest[0]?.id ?? "0"); // Cold start skips existing history.
     watched.set(channelId, store);
+    return latest[0]?.id ?? "0";
   };
-  const refresh = async (): Promise<void> => {
-    for (const id of explicit) if (!watched.has(id)) await attach(id);
-    if (!opts.all) return;
-    for (const id of await discoverChannels(request, ownerId)) {
+  const following = discordThreads({ request, explicit, watched, parents, attach });
+  const refresh = async (initial: boolean): Promise<void> => {
+    for (const id of explicit) {
       if (watched.has(id)) continue;
-      await attach(id);
+      const latest = await attach(id);
+      if (latest !== undefined && threads) await following.register(id, latest);
     }
+    if (opts.all) {
+      for (const id of await discoverChannels(request, ownerId)) if (!watched.has(id)) await attach(id);
+    }
+    if (threads) await following.follow(initial);
   };
   const deliver = (message: Message, store: DiscordInboundStore, emit: (message: DiscordInbound) => void) => {
     if (isOwnerMessage(message, ownerId, botId)) emit(toInbound(message));
@@ -127,29 +137,38 @@ export const discordInbound = async (
     const ordered = [...pending.values()].sort((a, b) => (newer(a.id, b.id) ? 1 : newer(b.id, a.id) ? -1 : 0));
     for (const message of ordered) deliver(message, store, emit);
   };
-  await refresh();
+  await refresh(true);
   let polls = 0;
   return {
     botId,
     channels: (): string[] => [...watched.keys()],
     /** Reads every watched channel from its cursor; the REST path and the Gateway backfill. */
     async poll(emit: (message: DiscordInbound) => void): Promise<void> {
-      if (opts.all && ++polls % 100 === 0) await refresh(); // Pick up channels and threads created since start.
+      // Pick up channels and threads created since start: scope all every 100 polls, followed threads every 10.
+      if (opts.all ? ++polls % 100 === 0 : threads && ++polls % 10 === 0) await refresh(false);
       for (const [channelId, store] of [...watched]) await pollChannel(channelId, store, emit);
     },
     /** Reconciles the watched set, then reads each channel from its cursor; used after a Gateway (re)connect. */
     async sync(emit: (message: DiscordInbound) => void): Promise<void> {
-      await refresh();
+      await refresh(false);
       await this.poll(emit);
     },
     /** A MESSAGE_CREATE dispatch: delivered only when newer than its channel's cursor. */
-    accept(message: Message, emit: (message: DiscordInbound) => void): void {
+    async accept(message: Message, emit: (message: DiscordInbound) => void): Promise<void> {
       if (!message || !isDiscordSnowflake(message.id) || !isDiscordSnowflake(message.channel_id)) return;
       let store = watched.get(message.channel_id);
       if (!store) {
-        if (!opts.all) return;
+        const parent = threads ? await following.parentOf(message.channel_id) : undefined;
+        // Scope `all` takes any readable channel; otherwise only a thread under a watched channel is new to us.
+        if (!opts.all && parent === undefined) return;
         store = storeFor(message.channel_id);
-        if (store.load() === undefined) store.save(String(BigInt(message.id) - 1n)); // First sight: this message is new.
+        const seen = store.load();
+        if (seen === undefined) {
+          // Scope all starts just before this message; a new thread starts at the parent's floor, never earlier.
+          const seed =
+            parent === undefined ? String(BigInt(message.id) - 1n) : following.adopt(message.channel_id, parent);
+          store.save(seed);
+        }
         watched.set(message.channel_id, store);
       }
       const cursor = store.load();

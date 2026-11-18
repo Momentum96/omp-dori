@@ -25,6 +25,8 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   let body: unknown;
   if (url.pathname === "/api/v10/users/@me") body = { id: "99", bot: true };
   else if (url.pathname === "/api/v10/applications/@me") body = { flags: scenario === "intent" ? 0 : 1 << 19 };
+  else if (url.pathname === "/api/v10/channels/20")
+    body = {}; // No guild: this fixture has no threads to follow.
   else if (url.pathname === "/api/v10/channels/20/messages") {
     if (scenario === "permissions") return new Response('{"diagnostic":"private channel body"}', { status: 403 });
     const limit = Number(url.searchParams.get("limit"));

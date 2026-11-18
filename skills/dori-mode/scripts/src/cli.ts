@@ -67,7 +67,8 @@ const USAGE = `dori <command> [options]
                                        print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
                                        Discord requires DORI_DISCORD_TOKEN, DORI_DISCORD_OWNER_ID and configured channel IDs
-                                       (more channels or threads: DORI_DISCORD_CHANNEL_IDS=a,b; every readable one: DORI_DISCORD_SCOPE=all)
+                                       (more channels or threads: DORI_DISCORD_CHANNEL_IDS=a,b; threads of a watched channel are followed unless
+                                       DORI_DISCORD_THREADS=off; every readable one: DORI_DISCORD_SCOPE=all)
                                        Discord polls every 3 seconds by default; --loop MIN overrides the interval;
                                        --gateway delivers owner messages live with REST backfill and ignores --loop, including 0
   inbound-lag [--limit N]              receive-lag percentiles from state/telegram-lag.jsonl (the meter behind the INBOUND lines)`;

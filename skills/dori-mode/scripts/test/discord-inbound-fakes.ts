@@ -54,6 +54,10 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
     unrelated: [] as TestDiscordMessage[],
     /** Guild text channels, active threads and the owner DM, for scope=all discovery. */
     guilds: [] as { id: string; channels: string[]; threads: string[] }[],
+    /** Thread id to parent channel id; a thread listed under a guild without an entry has no known parent. */
+    threadParents: new Map<string, string>(),
+    /** Channel id to guild id, for channel metadata and thread-parent lookups. */
+    channelGuilds: new Map<string, string>(),
     dm: undefined as string | undefined,
     denied: new Set<string>(),
     mixChannels: false,
@@ -87,8 +91,20 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
         type: 0,
       }));
     } else if (/^\/guilds\/\d+\/threads\/active$/.test(path)) {
+      const guild = state.guilds.find((guild) => path.includes(`/${guild.id}/`));
       body = {
-        threads: (state.guilds.find((guild) => path.includes(`/${guild.id}/`))?.threads ?? []).map((id) => ({ id })),
+        threads: (guild?.threads ?? []).map((id) => ({
+          id,
+          parent_id: state.threadParents.get(id) ?? "0",
+        })),
+      };
+    } else if (/^\/channels\/\d+$/.test(path)) {
+      const channel = path.split("/")[2] ?? "";
+      if (state.denied.has(channel)) return { status: 403, headers: {}, body: "{}" };
+      const guild = state.channelGuilds.get(channel) ?? state.guilds.find((g) => g.channels.includes(channel))?.id;
+      body = {
+        ...(guild === undefined ? {} : { guild_id: guild }),
+        ...(state.threadParents.has(channel) ? { parent_id: state.threadParents.get(channel) } : {}),
       };
     } else if (/^\/channels\/\d+\/messages$/.test(path)) {
       const channel = path.split("/")[2] ?? "";

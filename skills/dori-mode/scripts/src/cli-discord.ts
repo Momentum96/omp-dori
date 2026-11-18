@@ -46,13 +46,17 @@ const idList = (value: string | undefined): string[] =>
     .map((id) => id.trim())
     .filter((id) => id !== "");
 
-/** Channels come from DORI_DISCORD_CHANNEL_ID, DORI_DISCORD_CHANNEL_IDS (comma separated) and DORI_DISCORD_SCOPE=all. */
+/** Channels come from DORI_DISCORD_CHANNEL_ID, DORI_DISCORD_CHANNEL_IDS (comma separated), DORI_DISCORD_SCOPE=all and threads under watched channels unless DORI_DISCORD_THREADS=off. */
 export const discordInboundCommand = async (stateDir: string, gateway: boolean, pollMinutes: number) => {
   const env = process.env;
   const ownerId = discordInboundEnv("DORI_DISCORD_OWNER_ID", env["DORI_DISCORD_OWNER_ID"]);
   const scope = env["DORI_DISCORD_SCOPE"]?.trim();
   if (scope !== undefined && scope !== "" && scope !== "all") die("DORI_DISCORD_SCOPE must be all or unset");
   const all = scope === "all";
+  const setting = env["DORI_DISCORD_THREADS"]?.trim().toLowerCase();
+  if (setting !== undefined && setting !== "" && setting !== "off" && setting !== "on")
+    die("DORI_DISCORD_THREADS must be on, off or unset");
+  const threads = setting !== "off";
   const channelIds = ["DORI_DISCORD_CHANNEL_ID", "DORI_DISCORD_CHANNEL_IDS"].flatMap((name) =>
     idList(env[name]).map((id) => discordInboundEnv(name, id)),
   );
@@ -61,7 +65,7 @@ export const discordInboundCommand = async (stateDir: string, gateway: boolean, 
   const intake = await discordInbound(
     new Discord(fetchHttp, realClock, token),
     (channelId) => fileDiscordInboundStore(stateDir, channelId),
-    { ownerId, channelIds: [...new Set(channelIds)], all },
+    { ownerId, channelIds: [...new Set(channelIds)], all, threads },
   );
   const watching = all ? "all" : intake.channels().join(",");
   const emit = (message: Parameters<typeof formatDiscordInbound>[0]) => console.log(formatDiscordInbound(message));
