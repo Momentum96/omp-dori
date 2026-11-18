@@ -10,8 +10,14 @@ afterEach(() => {
 });
 
 const state = {
-  paneId: "t9", role: "dori" as const, sessionId: "fixture", sessionFile: "/tmp/fixture.jsonl",
-  cwd: "/tmp", pid: process.pid, startedAt: new Date(0).toISOString(), agentStatus: "idle" as const,
+  paneId: "t9",
+  role: "dori" as const,
+  sessionId: "fixture",
+  sessionFile: "/tmp/fixture.jsonl",
+  cwd: "/tmp",
+  pid: process.pid,
+  startedAt: new Date(0).toISOString(),
+  agentStatus: "idle" as const,
   approvalPending: false,
 };
 
