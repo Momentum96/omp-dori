@@ -21,12 +21,36 @@ export type DcChannel = {
 /** Forum and media channels contain posts, each represented by a thread. */
 export const isForumType = (type: number): boolean => type === 15 || type === 16;
 
+/**
+ * The only endpoint a bot token may be sent to when a test redirects it: a loopback HTTP origin.
+ * Anything else — another host, a non-http scheme, embedded credentials — is refused outright so a
+ * stray environment value can never exfiltrate the token.
+ */
+export function discordApiBase(value: string | undefined): string {
+  const fallback = "https://discord.com/api/v10";
+  if (value === undefined || value === "") return fallback;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new MessengerError(`DORI_DISCORD_API_BASE is not a URL: ${value}`, 0);
+  }
+  if (
+    url.protocol !== "http:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+  )
+    throw new MessengerError(`DORI_DISCORD_API_BASE must be a loopback http origin: ${value}`, 0);
+  return value;
+}
+
 export class Discord {
   constructor(
     private readonly http: Http,
     private readonly clock: Clock,
     private readonly botToken: string,
-    private readonly base = "https://discord.com/api/v10",
+    private readonly base = discordApiBase(process.env["DORI_DISCORD_API_BASE"]),
   ) {}
 
   async call<T = unknown>(
