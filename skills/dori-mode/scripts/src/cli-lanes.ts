@@ -22,6 +22,9 @@ const launch: Command = async ({ key, opt, need, ceiling, strings, values, deps 
     model = opt("model"),
     cwd = opt("cwd");
   const template = opt("template");
+  const runtime = opt("runtime");
+  if (runtime !== undefined && runtime !== "headless" && runtime !== "hc" && runtime !== "herdr")
+    return die("--runtime must be headless, hc or herdr");
   if (template && opt("brief")) die("choose --brief or --template, not both");
   if (!template && strings("set").length) die("--set requires --template");
   const variables = Object.fromEntries(
@@ -41,6 +44,7 @@ const launch: Command = async ({ key, opt, need, ceiling, strings, values, deps 
     ...(thread !== undefined ? { thread } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(cwd !== undefined ? { cwd } : {}),
+    ...(runtime !== undefined ? { runtime } : {}),
     budget: {
       ...(wallMinutes !== undefined ? { wallMinutes } : {}),
       ...(tokens !== undefined ? { tokens } : {}),

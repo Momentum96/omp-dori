@@ -35,6 +35,7 @@ import { type AskLane, automaticDiscordAskRoute, bindAskLane } from "./discord-a
 import { DiscordLane } from "./discord-lane.ts";
 import { type PromptModel, withLaneBookkeeping } from "./lane-bookkeeping.ts";
 import { MONITOR_DESCRIPTION, Monitors } from "./monitor";
+import { NativeRemote } from "./native-remote.ts";
 import { ROLE_INVARIANTS } from "./role-invariants.ts";
 import { bumpAttempts, MAX_CONTINUATIONS, openOwes, recordOwes, reminder } from "../skills/dori-mode/scripts/src/owes";
 
@@ -49,12 +50,25 @@ interface SessionEntry {
 export interface DoriContext {
   cwd: string;
   mode: string;
-  abort(): void;
+  hasUI?: boolean;
+  abort(): void | Promise<void>;
   isIdle?(): boolean;
   hasPendingMessages?(): boolean;
+  shutdown?(): void;
+  getPendingPlanReview?(): unknown;
+  getAsyncJobSnapshot?(): {
+    running: readonly unknown[];
+    delivery: { queued: number; delivering: boolean };
+  } | null;
   agent: { kind: "main" | "sub"; id: string; parentId?: string };
   model?: PromptModel;
-  sessionManager: { getSessionId(): string; getSessionFile(): string | undefined; getBranch(): SessionEntry[] };
+  models?: { resolve(selector: string): PromptModel | undefined; current(): PromptModel | undefined };
+  sessionManager: {
+    getSessionId(): string;
+    getSessionFile(): string | undefined;
+    getBranch(): SessionEntry[];
+    ensureOnDisk?(): Promise<void>;
+  };
   ui: { notify(message: string, type?: "info" | "warning" | "error"): void };
 }
 interface Goal {
@@ -110,7 +124,7 @@ export interface DoriApi {
   ): void;
   on(
     event: "tool_approval_requested" | "tool_approval_resolved",
-    handler: (event: { toolCallId: string }, ctx: DoriContext) => unknown,
+    handler: (event: { toolCallId: string; sessionId?: string }, ctx: DoriContext) => unknown,
   ): void;
   on(event: string, handler: Handler): void;
   appendEntry(customType: string, data?: unknown): void;
@@ -118,7 +132,8 @@ export interface DoriApi {
     message: { customType: string; content: string; display: boolean; details?: unknown },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
   ): void;
-  sendUserMessage(content: string, options?: { deliverAs?: "aside" }): Promise<void>;
+  sendUserMessage(content: string, options?: { deliverAs?: "aside" | "steer" }): Promise<void>;
+  setModel?(model: PromptModel): Promise<boolean>;
   getActiveTools(): string[];
   setActiveTools(toolNames: string[]): Promise<void>;
 }
@@ -126,6 +141,7 @@ export interface DoriApi {
 const ROLE_FLAG = "dori-role";
 const ROLE_ENTRY = "omp-dori:role";
 const MONITOR_ENTRY = "omp-dori:monitor";
+const REMOTE_OWNER_ENTRY = "omp-dori:native-remote-owner";
 const ONLY_IN_ROLE = "works only in Dori sessions (omp --dori-role dori|lane)";
 // A path the managed overlay owns. A POSIX path is cut at `/` only; a backslash is an ordinary name character there,
 // so only Windows reads it as a separator.
@@ -150,6 +166,18 @@ const GOAL_STATUS: Record<string, GoalStatus> = {
 const agentRoles = new Map<string, DoriRole>();
 
 const parseRole = (value: unknown): DoriRole | undefined => (value === "dori" || value === "lane" ? value : undefined);
+
+const headlessRemoteId = (ctx: DoriContext, role: DoriRole | undefined): string | undefined => {
+  const id = process.env.CATALY_HEADLESS_ID;
+  if (
+    ctx.mode === "rpc" &&
+    ctx.hasUI === true &&
+    role === "lane" &&
+    id &&
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)
+  )
+    return `headless:${id}`;
+};
 
 const recordedRole = (branch: readonly SessionEntry[]): DoriRole | undefined => {
   let role: DoriRole | undefined;
@@ -267,6 +295,8 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   const approvals = new Set<string>();
   const discordAsk = new DiscordAsk();
   const discordLane = new DiscordLane();
+  const nativeRemote = new NativeRemote(pi);
+  let remoteActivation = 0;
   let askLane: AskLane | undefined;
   let ownsDiscordReceiver = false;
   let managedRestorePending = process.env.DORI_MANAGED_STARTUP === "1";
@@ -457,31 +487,117 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   const registerLifecycle = (): void => {
     lifecycleRegistered = true;
     pi.on("tool_approval_requested", (event, ctx) => {
-      if (!role) return;
+      const id = ctx.sessionManager.getSessionId();
+      if (
+        !role ||
+        ctx.agent.kind !== "main" ||
+        id !== session?.id ||
+        (event.sessionId !== undefined && event.sessionId !== id)
+      )
+        return;
       approvals.add(event.toolCallId);
+      nativeRemote.event("tool_approval_requested", event, ctx);
       savePane(ctx);
     });
     pi.on("tool_approval_resolved", (event, ctx) => {
-      if (!approvals.delete(event.toolCallId) || !role) return;
+      const id = ctx.sessionManager.getSessionId();
+      if (
+        !role ||
+        ctx.agent.kind !== "main" ||
+        id !== session?.id ||
+        (event.sessionId !== undefined && event.sessionId !== id) ||
+        !approvals.delete(event.toolCallId)
+      )
+        return;
+      nativeRemote.event("tool_approval_resolved", event, ctx);
       savePane(ctx);
     });
+    for (const event of ["session_before_switch", "session_before_branch", "session_before_tree"] as const)
+      pi.on(event, (_event, ctx) => nativeRemote.beforeTransition(ctx));
+    for (const event of [
+      "message_end",
+      "turn_start",
+      "turn_end",
+      "tool_execution_start",
+      "tool_execution_end",
+      "plan_review_requested",
+      "plan_review_resolved",
+    ] as const)
+      pi.on(event, (payload, ctx) => nativeRemote.event(event, payload, ctx));
     // The awaited preflight runs before the built-in opens its form; execution events can arrive later.
     pi.on("tool_call", (event, ctx) => {
       const id = ctx.sessionManager.getSessionId();
       const root = stateDir;
       const currentRole = role;
-      if (root && currentRole && ctx.agent.kind === "main" && id === session?.id && approvals.size === 0)
+      if (
+        root &&
+        currentRole &&
+        ctx.agent.kind === "main" &&
+        id === session?.id &&
+        approvals.size === 0 &&
+        !headlessRemoteId(ctx, currentRole)
+      )
         return discordAsk.arm(event, ctx.ui, root, id, async () => {
           const route = await automaticDiscordAskRoute(root, currentRole, id, askLane);
           return approvals.size === 0 ? route : undefined;
         });
     });
     pi.on("tool_execution_end", (event) => discordAsk.finish(event));
-    pi.on("session_shutdown", () => {
+    pi.on("session_shutdown", (_event, ctx) => {
+      if (ctx.agent.kind === "main") {
+        remoteActivation++;
+        nativeRemote.stop();
+      }
       discordLane.stop();
       discordAsk.clear();
       monitors.stopAll();
       retirePane();
+    });
+  };
+
+  const syncRemote = async (ctx: DoriContext, activation: number): Promise<void> => {
+    if (activation !== remoteActivation) return;
+    const root = stateDir;
+    const owner = session;
+    const ownerRole = role;
+    const paneId = process.env.HC_TERMINAL_ID || process.env.HERDR_PANE_ID;
+    const headless = headlessRemoteId(ctx, ownerRole);
+    if (
+      !root ||
+      !owner ||
+      !ownerRole ||
+      requiredLoadError ||
+      ctx.sessionManager.getSessionId() !== owner.id ||
+      typeof process.getuid !== "function" ||
+      (ctx.mode !== "tui" && !headless)
+    ) {
+      nativeRemote.stop();
+      return;
+    }
+    const owns = () => {
+      if (remoteActivation !== activation || session !== owner || role !== ownerRole) return false;
+      if (headless || !paneId) return true;
+      const pane = readPaneState(root, paneId);
+      return (
+        pane?.pid === process.pid &&
+        pane.sessionId === owner.id &&
+        pane.role === ownerRole &&
+        pane.startedAt === owner.startedAt
+      );
+    };
+    if (!owns()) {
+      nativeRemote.stop();
+      return;
+    }
+    await nativeRemote.activate({
+      stateDir: root,
+      ctx,
+      role: ownerRole,
+      pane: headless ?? paneId,
+      owns,
+      approvalPending: () => approvals.size > 0,
+      busy: () => agentStatus === "working",
+      goal: () => goal.status,
     });
   };
 
@@ -604,6 +720,9 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   // Registered before omp-ulw so its restore handlers see this event's role.
   for (const eventName of ["session_start", "session_switch", "session_branch", "session_tree"] as const) {
     pi.on(eventName, async (event, ctx) => {
+      const activation = ctx.agent.kind === "main" ? ++remoteActivation : undefined;
+      let remoteJournalReady = true;
+      if (activation !== undefined) nativeRemote.revoke();
       if (eventName !== "session_start" && ctx.agent.kind === "main") discordAsk.clear();
       const branch = ctx.sessionManager.getBranch();
       let flaggedRole = false;
@@ -683,17 +802,43 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
           process.env["DORI_DISCORD_WAKE_SESSION"] === ctx.sessionManager.getSessionId()
         )
           pi.appendEntry(ROLE_ENTRY, role);
-        if (ctx.agent.kind === "main")
+        if (ctx.agent.kind === "main") {
+          const pane = process.env.HC_TERMINAL_ID || process.env.HERDR_PANE_ID;
+          if (
+            (eventName === "session_start" || eventName === "session_switch") &&
+            stateDir &&
+            role &&
+            !requiredLoadError &&
+            (headlessRemoteId(ctx, role) || (ctx.mode === "tui" && (!pane || !paneHeldByAnother(pane)))) &&
+            ctx.sessionManager.ensureOnDisk
+          ) {
+            // Native resume is read-only until an append: take the OMP transcript lease before publishing the
+            // exact session ID. A conflicting native owner causes OMP to use a distinct sibling ID.
+            try {
+              pi.appendEntry(REMOTE_OWNER_ENTRY, { pid: process.pid });
+              await ctx.sessionManager.ensureOnDisk();
+            } catch (error) {
+              remoteJournalReady = false;
+              ctx.ui.notify(`Native remote journal could not be prepared (${errorText(error)}).`, "warning");
+            }
+          }
           await syncMain(ctx, ctx.sessionManager.getBranch(), eventName === "session_start");
-        else {
+        } else {
           // Explicit native tool selection can activate a defaultInactive manager tool.
           const active = pi.getActiveTools();
           if (active.includes("monitor")) await pi.setActiveTools(active.filter((name) => name !== "monitor"));
         }
+      } catch (error) {
+        if (activation !== undefined && remoteActivation === activation) nativeRemote.stop();
+        throw error;
       } finally {
         // A rejected bootstrap has cleared the role, so it is not recorded; any other failure keeps the role this
         // process runs with, and its record, as a later resume without the flag must restore it.
         if (flaggedRole && role) pi.appendEntry(ROLE_ENTRY, role);
+      }
+      if (activation !== undefined && activation === remoteActivation) {
+        if (remoteJournalReady) await syncRemote(ctx, activation);
+        else nativeRemote.stop();
       }
     });
   }
@@ -730,6 +875,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
 
   pi.on("agent_start", (_event, ctx) => {
     if (ctx.agent.kind !== "main" || !role) return;
+    nativeRemote.event("agent_start", _event, ctx);
     if (role === "lane") {
       if (startupPause && !startupPause.used) startupPause = undefined;
       discordLane.agentStart?.(ctx.sessionManager.getSessionId());
@@ -739,6 +885,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
   });
   pi.on("agent_end", (event, ctx) => {
     if (ctx.agent.kind !== "main" || !role) return;
+    nativeRemote.event("agent_end", event, ctx);
     agentStatus = "idle";
     savePane(ctx);
     if (role === "lane") discordLane.agentEnd?.(ctx.sessionManager.getSessionId(), event);
@@ -768,6 +915,7 @@ export default async function ompDori(pi: DoriApi): Promise<void> {
       throw requiredLoadError;
     }
     if (!role || ctx.agent.kind !== "main" || typeof event !== "object" || event === null) return;
+    nativeRemote.event("before_agent_start", event, ctx);
     if (role === "lane") await discordLane.beforeAgentStart?.(event, ctx);
     const original = "systemPrompt" in event ? event.systemPrompt : undefined;
     if (!Array.isArray(original) || !original.every((block) => typeof block === "string")) return;

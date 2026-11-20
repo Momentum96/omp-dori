@@ -47,13 +47,15 @@ export const claimDone = async (
   if (!claimed) return movedOn(deps, lane, "done claim");
   onRecorded?.();
   const ref = sessionOf(lane);
-  if (ref) {
+  if (ref && (ref.runtime !== "headless" || lane.session)) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
     await sendVerified(
       runtimesOf(deps),
       deps.clock,
       ref,
       `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`,
+      undefined,
+      ref.runtime === "headless" ? lane.session : undefined,
     );
   }
   return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}`;
@@ -67,12 +69,14 @@ export const objectDone = async (deps: FlowDeps, lane: Lane, reasons: readonly s
   if (objected === "closing") return `LANE_CHANGED ${lane.key} native close is in progress; objection not recorded`;
   if (!objected) return movedOn(deps, lane, "objection");
   const ref = sessionOf(lane);
-  if (ref)
+  if (ref && (ref.runtime !== "headless" || lane.session))
     await sendVerified(
       runtimesOf(deps),
       deps.clock,
       ref,
       `[LEAD] not done: ${reasons.join("; ")}; keep working, claim again when fixed`,
+      undefined,
+      ref.runtime === "headless" ? lane.session : undefined,
     );
   return `LANE_NOT_DONE ${lane.key} ${reasons.join("; ")}`;
 };

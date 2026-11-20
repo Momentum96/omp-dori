@@ -3,13 +3,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { defaultDeps } from "../src/harness.ts";
 import type { Exec } from "../src/runtime/exec.ts";
-import type { RuntimeKind } from "../src/runtime/types.ts";
+import type { TerminalRuntimeKind } from "../src/runtime/types.ts";
 import { Store } from "../src/store.ts";
 import { World } from "./fake.ts";
 import { environment, managedCommand } from "./managed-command-setup.ts";
 import { type ChildCapture, recorded, recordingOmp, terminalServer } from "./terminal-context-setup.ts";
 
-export function managedTerminal(runtime: RuntimeKind, conflicting = true) {
+export function managedTerminal(runtime: TerminalRuntimeKind, conflicting = true) {
   const f = managedCommand();
   recordingOmp(f.omp);
   const prefix = [...f.argv, "--owner-option", ""];

@@ -1,4 +1,4 @@
-import type { RuntimeKind, SessionRef, SessionRuntime } from "./types.ts";
+import { HEADLESS_ADDRESS, type RuntimeKind, type SessionRef, type SessionRuntime } from "./types.ts";
 
 const nonEmpty = (value: string | undefined): string | undefined =>
   value === undefined || value === "" ? undefined : value;
@@ -30,10 +30,12 @@ export class Runtimes {
   }
 
   /**
-   * The caller's own session from whichever runtime it runs in, whatever kind is selected: `HC_TERMINAL_ID` names an
-   * hc terminal, else `HERDR_PANE_ID` a herdr pane (grouped by `HERDR_WORKSPACE_ID` when set). Builds no runtime.
+   * The caller's own session, independent of the selected terminal runtime. Native lane identity takes precedence
+   * over inherited terminal IDs; otherwise `HC_TERMINAL_ID` then `HERDR_PANE_ID`. Builds no runtime.
    */
   selfAny(env: Readonly<Record<string, string | undefined>>): SessionRef | undefined {
+    const headless = env["CATALY_HEADLESS_ID"];
+    if (headless !== undefined && HEADLESS_ADDRESS.test(headless)) return { runtime: "headless", id: headless };
     const terminal = nonEmpty(env["HC_TERMINAL_ID"]);
     if (terminal !== undefined) return { runtime: "hc", id: terminal };
     const pane = nonEmpty(env["HERDR_PANE_ID"]);

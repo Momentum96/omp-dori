@@ -7,7 +7,7 @@ import {
   resolveProcessOmpUlwPath,
 } from "../../../../src/release/runtime.ts";
 import { freshnessError, type FreshnessPolicy } from "./freshness-policy.ts";
-import type { RuntimeKind } from "../../../../src/runtime/types.ts";
+import type { TerminalRuntimeKind } from "../../../../src/runtime/types.ts";
 import { repoIdentities } from "./config-identities.ts";
 import { type DoctorOptions, validDoctorOptions } from "./doctor-config.ts";
 import { type LaunchConfig, launchConfig } from "./launch-selection.ts";
@@ -33,7 +33,8 @@ export type GuardThresholds = {
 
 export type DoriConfig = LaunchConfig & {
   /** Where new sessions open; absent = detected (see run.ts runtimeChoice). */
-  readonly runtime?: RuntimeKind;
+  readonly runtime?: TerminalRuntimeKind;
+  readonly laneRuntime?: "headless" | "terminal"; // Opt in only for new lanes; lead and duty stay terminal.
   readonly stateDir: string;
   readonly laneWorkspace: string;
   readonly workspaces: readonly string[];
@@ -110,7 +111,7 @@ export const queueDefaultCwd = (config: DoriConfig): string => queueCwds.get(con
 
 export class ConfigError extends Error {}
 
-const RUNTIMES: Readonly<Record<RuntimeKind, true>> = { herdr: true, hc: true };
+const RUNTIMES: Readonly<Record<TerminalRuntimeKind, true>> = { herdr: true, hc: true };
 const checkRuntime = (value: unknown): void => {
   if (value !== undefined && !(typeof value === "string" && Object.hasOwn(RUNTIMES, value)))
     throw new ConfigError(
@@ -177,6 +178,9 @@ export const loadConfig = async (path = configPath(), home = homedir(), env = pr
   const file = Bun.file(path);
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
   checkRuntime(raw.runtime);
+  const laneRuntime = env["DORI_LANE_RUNTIME"] ?? raw.laneRuntime;
+  if (laneRuntime !== undefined && laneRuntime !== "terminal" && laneRuntime !== "headless")
+    throw new ConfigError(`invalid laneRuntime: expected "terminal" or "headless", got ${JSON.stringify(laneRuntime)}`);
   checkSupervision(raw.supervision);
   if (raw.doctor !== undefined && !validDoctorOptions(raw.doctor))
     throw new ConfigError("invalid doctor: expected an object with an optional ignore array of known check IDs");
@@ -189,6 +193,7 @@ export const loadConfig = async (path = configPath(), home = homedir(), env = pr
   const merged: DoriConfig = {
     ...base,
     ...raw,
+    ...(laneRuntime === undefined ? {} : { laneRuntime }),
     ...launchConfig(raw.launchKeywords, raw.launchKeywords === undefined ? undefined : path),
     guard: { ...base.guard, ...raw.guard },
     hooks: { ...base.hooks, ...raw.hooks },

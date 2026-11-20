@@ -3,7 +3,7 @@ import { accessSync, constants, readFileSync, realpathSync, rmSync, writeFileSyn
 
 import { ToolError } from "../../../../src/runtime/exec.ts";
 import { HcError, isReportedKind } from "../../../../src/runtime/hc/exec.ts";
-import { type CreateSpec, formatRef, type SessionRef } from "../../../../src/runtime/types.ts";
+import { type CreateSpec, formatRef, type RuntimeKind, type SessionRef } from "../../../../src/runtime/types.ts";
 import { quoteForPane } from "./launch-footer.ts";
 import {
   discardGeneratedBrief,
@@ -87,7 +87,11 @@ export const openLaneSession = async (
   rts: ChosenRuntimes,
   spec: CreateSpec,
   draft: Lane,
-  { preamble, generated }: { readonly preamble: string; readonly generated: boolean },
+  {
+    preamble,
+    generated,
+    runtime,
+  }: { readonly preamble: string; readonly generated: boolean; readonly runtime?: RuntimeKind },
 ): Promise<OpenedLane> => {
   let generatedAttempt: GeneratedBrief | undefined;
   let staged:
@@ -120,7 +124,7 @@ export const openLaneSession = async (
   }
   let ref: SessionRef;
   try {
-    ref = await rts.default.create(spec);
+    ref = await (runtime === undefined ? rts.default : rts.for({ runtime, id: "" })).create(spec);
   } catch (error) {
     cleanup();
     if (generatedAttempt && creationWasRejected(rts, error)) {
@@ -132,7 +136,11 @@ export const openLaneSession = async (
       : "session create failed";
     return { kind: "failed", what, error };
   }
-  const lane: Lane = { ...draft, ...sessionFields(ref) };
+  const lane: Lane = {
+    ...draft,
+    ...sessionFields(ref),
+    ...(ref.runtime === "headless" ? { lifecycleEpoch: ref.id } : {}),
+  };
   let registered = false;
   let keepBackup = false;
   let failure: OpenedLane = { kind: "taken" };

@@ -184,6 +184,7 @@ export class Reports {
     staleAfterMs: number,
     resumeOnWorking = true,
     scope?: EventScope,
+    nativeStatus?: import("../../../../src/runtime/types.ts").AgentStatus,
   ): Progress | null {
     const progress = this.read(key, scope);
     if (!progress || (progress.state !== "running" && progress.state !== "stalled")) return progress;
@@ -194,13 +195,15 @@ export class Reports {
       return at;
     };
     const workingAt = lastAt(/^\s*[^\w\n]*(?:Working|Running)\b/gim);
-    const working = workingAt >= 0;
+    const working = nativeStatus === undefined ? workingAt >= 0 : nativeStatus === "working";
     // A failure counts only when no Working line follows it: an old error left on screen above a recovered lane is history.
     const failed =
+      nativeStatus === undefined &&
       lastAt(
         /compaction (?:failed|failure|error)|failed to compact|error (?:during|in) compaction|auto-?compaction failed/gi,
       ) > workingAt;
-    const idle = /^\s*[❯>]\s*$/m.test(visible);
+    // A headless idle session is still deliverable; unlike a terminal prompt it does not imply a stalled lane.
+    const idle = nativeStatus === undefined && /^\s*[❯>]\s*$/m.test(visible);
     const stale = now - Date.parse(progress.lastReport?.at ?? progress.lastEvent.at) >= staleAfterMs;
     const state =
       failed || (idle && !working && stale) ? "stalled" : working && resumeOnWorking ? "running" : progress.state;

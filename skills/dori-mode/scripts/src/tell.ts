@@ -35,9 +35,17 @@ const send = async (deps: FlowDeps, lane: Lane, text: string): Promise<TellResul
   if (statusOf(lane) === "paused") return failed(lane, "the lane is paused; resume it first");
   const ref = sessionOf(lane);
   if (!ref) return failed(lane, "the lane has no session");
+  if (ref.runtime === "headless" && !lane.session) return failed(lane, "the lane has no confirmed native session");
   let delivery: Delivery;
   try {
-    delivery = await sendVerified(runtimesOf(deps), deps.clock, ref, text);
+    delivery = await sendVerified(
+      runtimesOf(deps),
+      deps.clock,
+      ref,
+      text,
+      undefined,
+      ref.runtime === "headless" ? lane.session : undefined,
+    );
   } catch (e) {
     if (e instanceof UnsafeTextError) return failed(lane, "the text contains a backtick or $(");
     throw e;

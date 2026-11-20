@@ -52,8 +52,10 @@ export const isBareLaneShell = (probe: Probe): boolean => {
   );
 };
 
+type ResumeIdentity = Pick<Lane, "key" | "session" | "sessionFile" | "cwd">;
+
 /** Resolve an exact saved session, not OMP's interactive/partial-id resume selector. */
-export const resumeFile = async (deps: FlowDeps, lane: Lane): Promise<string> => {
+export const resumeFile = async (deps: FlowDeps, lane: ResumeIdentity): Promise<string> => {
   try {
     return await readResumeFile(deps, lane);
   } catch (error) {
@@ -76,7 +78,7 @@ const isTitleSlot = (entry: Record<string, unknown>): boolean =>
   typeof entry["pad"] === "string" &&
   (entry["source"] === undefined || entry["source"] === "auto" || entry["source"] === "user");
 
-const readResumeFile = async (deps: FlowDeps, lane: Lane): Promise<string> => {
+const readResumeFile = async (deps: FlowDeps, lane: ResumeIdentity): Promise<string> => {
   if (!lane.session) throw new LaunchError(`lane ${lane.key} has no recorded session; sync it before parking`);
   let file = lane.sessionFile;
   if (!file) {

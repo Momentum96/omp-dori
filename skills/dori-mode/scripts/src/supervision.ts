@@ -98,17 +98,17 @@ export class Supervision {
     appendFileSync(path, `${JSON.stringify(snapshot)}\n`, { mode: 0o600 });
   }
 
-  async sweep(lane: SupervisedLane, screen: string): Promise<SupervisionResult> {
+  async sweep(lane: SupervisedLane, screen: string, nativeActiveSince?: number): Promise<SupervisionResult> {
     if (!this.enabled(lane)) return NOT_OBSERVED;
     const now = this.deps.clock.now();
     const signature = await laneActivity(this.deps.run, this.options, this.checkpoints, lane);
     const usage = await this.usage(lane, now);
     const deps = this.deps;
-    if (deps.registry === undefined) return this.applySweep(lane, screen, now, usage, signature);
+    if (deps.registry === undefined) return this.applySweep(lane, screen, now, usage, signature, nativeActiveSince);
     const held = await withDeliveryLock(deps, lane.key, async () => {
       const current = await deps.registry.read(lane.key);
       if (!current || current.nativeCloseIntent || !sameLaneGeneration(lane, current)) return NOT_OBSERVED;
-      return this.applySweep(lane, screen, now, usage, signature);
+      return this.applySweep(lane, screen, now, usage, signature, nativeActiveSince);
     });
     return held.ok ? held.value : NOT_OBSERVED;
   }
@@ -119,6 +119,7 @@ export class Supervision {
     now: number,
     usage: UsageSnapshot,
     signature: (progress: Progress | null) => string,
+    nativeActiveSince: number | undefined,
   ): Promise<SupervisionResult> {
     const scope = { generation: lane.lifecycleEpoch };
     const tag = scope.generation === undefined ? {} : { generation: scope.generation };
@@ -129,7 +130,10 @@ export class Supervision {
     // Without a usage hook each sweep would append the same unknown reading; close still records its final one.
     if (this.options.usageArgv?.length) this.record(usage);
     const activity = signature(progress);
-    const timer = workingTimer(screen);
+    const timer =
+      nativeActiveSince === undefined
+        ? workingTimer(screen)
+        : { kind: "native working", seconds: Math.max(0, Math.floor((now - nativeActiveSince) / 1_000)), step: 1 };
     const activeAt = !previous || activity !== previous.activity ? now : previous.activeAt;
     const { violations, unavailable } = observeBudget(this.options, lane, now, usage);
     const hung =

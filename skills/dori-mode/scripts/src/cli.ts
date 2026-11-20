@@ -50,6 +50,8 @@ if (command === "--version") {
 }
 if (command === "update") process.exit(await (await import("../../../../src/release/cli.ts")).runConsumerUpdate(rest));
 if (command === "upstream") process.exit(await (await import("../../../../src/update/cli.ts")).runUpdate(rest));
+if (command === "remote") process.exit(await (await import("./cli-remote.ts")).runRemote(rest));
+if (command === "headless") process.exit(await (await import("./cli-headless.ts")).runHeadless(rest));
 
 const { die, makeCli } = await import("./cli-context.ts");
 const { ConfigError, loadConfig } = await import("./config.ts");
@@ -74,6 +76,7 @@ const flags = parseArgs({
     done: { type: "string" },
     thread: { type: "string" },
     model: { type: "string" },
+    runtime: { type: "string" },
     cwd: { type: "string" },
     pane: { type: "string" },
     evidence: { type: "string" },
@@ -129,6 +132,7 @@ const flags = parseArgs({
     self: { type: "string" },
   },
 });
+if (flags.values.runtime !== undefined && command !== "launch") die("--runtime is supported only by dori launch");
 if (flags.values["render-tables"] !== undefined && (command !== "send" || flags.positionals[0] !== "discord")) {
   if (command === "send" && ["slack", "telegram"].includes(flags.positionals[0] ?? ""))
     die("--render-tables is supported for discord only");

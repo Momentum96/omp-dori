@@ -60,6 +60,7 @@ export type Lane = {
   readonly lastSeenReport?: string | undefined;
   /** The last held-back freshness outcome, so a quiet lane logs each state change once, not every tick. */
   readonly lastFreshnessNote?: string | undefined;
+  readonly lastNativeHold?: string | undefined;
   /** A paused lane whose pane read working on the previous freshness tick (two in a row is reported, never a resume). */
   readonly pausedSeenWorking?: boolean | undefined;
   /** The status a paused lane had before it was paused; `resume` restores it. */
@@ -80,7 +81,6 @@ export const upgradeLane = (lane: Lane): Lane =>
   lane.sessionRef || !lane.pane
     ? lane
     : { ...lane, sessionRef: { runtime: LEGACY_RUNTIME, id: lane.pane, ...(lane.tab ? { container: lane.tab } : {}) } };
-/** The lane's session, whichever way the record was written (or built in memory). */
 export const sessionOf = (lane: Lane): SessionRef | undefined => upgradeLane(lane).sessionRef;
 
 /** The fields a lane record stores for a session: the ref itself and the `pane`/`tab` mirror. */

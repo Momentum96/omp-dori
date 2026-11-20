@@ -1,4 +1,5 @@
-export type RuntimeKind = "herdr" | "hc";
+export type TerminalRuntimeKind = "herdr" | "hc";
+export type RuntimeKind = TerminalRuntimeKind | "headless";
 /** One session as its runtime addresses it. `group`: the herdr workspace id or the hc dori.group label. `container`: the herdr tab id (absent on hc). */
 export type SessionRef = {
   readonly runtime: RuntimeKind;
@@ -56,7 +57,7 @@ export type CreateSpec = {
 };
 export type DeliverWhen = "idle" | "working" | "any";
 /** `when`: hc uses --if idle / --if working / no gate for "any"; unknown and shell never receive agent delivery.
- * `force`: hc may type into a blocked agent, but an OMP tool approval always holds delivery on either runtime. */
+ * `force`: hc may type into a blocked agent, but OMP tool approvals always hold delivery. */
 export type DeliverOptions = {
   readonly when?: DeliverWhen;
   readonly force?: boolean;
@@ -98,7 +99,7 @@ export interface SessionRuntime {
   typeIntoShell(ref: SessionRef, text: string): Promise<boolean>;
   keys(ref: SessionRef, keys: readonly Key[]): Promise<void>;
   /** herdr: "session" = `pane close <id>`; "container" = `tab close <ref.container>` (pane close when the ref has no container). hc: kill then rm for both. Default "session". */
-  close(ref: SessionRef, scope?: CloseScope): Promise<void>;
+  close(ref: SessionRef, scope?: CloseScope, expectedSessionId?: string): Promise<void>;
 }
 
 /** Id shape of a bare ref: only a herdr pane `w<ws>:p<pane>` may appear without its prefix. */
@@ -108,7 +109,12 @@ const BARE_HERDR = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
  * `t1b`, `t2h`). Another machine's `<machine>/<address>` is not a ref: the id names the session's inbox file.
  */
 const HC_ADDRESS = /^t[0-9a-z]+$/;
-const ID_SHAPES: Readonly<Record<RuntimeKind, RegExp>> = { herdr: BARE_HERDR, hc: HC_ADDRESS };
+export const HEADLESS_ADDRESS = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+const ID_SHAPES: Readonly<Record<RuntimeKind, RegExp>> = {
+  herdr: BARE_HERDR,
+  hc: HC_ADDRESS,
+  headless: HEADLESS_ADDRESS,
+};
 const KINDS = Object.keys(ID_SHAPES) as RuntimeKind[];
 
 /** "herdr:w1:p3", "hc:t7", bare "w1:p3" (herdr). A bare "t7" is NOT a ref (it is a legal lane key); undefined otherwise. */

@@ -1,4 +1,5 @@
 import { type Lane, LANE_KEY, type LaneStatus, type Registry } from "./registry.ts";
+import { HEADLESS_ADDRESS } from "../../../../src/runtime/types.ts";
 
 const STATUSES: Readonly<Record<LaneStatus, true>> = {
   working: true,
@@ -34,9 +35,11 @@ const readable = (lane: Lane): boolean => {
     (typeof ref === "object" &&
       ref !== null &&
       !Array.isArray(ref) &&
-      (ref.runtime === "herdr" || ref.runtime === "hc") &&
       typeof ref.id === "string" &&
       ref.id.length > 0 &&
+      (ref.runtime === "herdr" ||
+        ref.runtime === "hc" ||
+        (ref.runtime === "headless" && HEADLESS_ADDRESS.test(ref.id) && ref.container === undefined)) &&
       (ref.container === undefined || typeof ref.container === "string"))
   );
 };

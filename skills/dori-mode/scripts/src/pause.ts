@@ -1,4 +1,5 @@
 import { mayRunOmpArgv } from "../../../../src/runtime/omp-argv.ts";
+import { HeadlessRuntime } from "../../../../src/runtime/headless.ts";
 import type { SessionRef } from "../../../../src/runtime/types.ts";
 import { withDeliveryLock } from "./delivery-lock.ts";
 import { type FlowDeps, movedOn } from "./done-flow.ts";
@@ -46,6 +47,22 @@ const goalCommand = async (
   | "lane changed before send"
 > => {
   const rts = runtimesOf(deps);
+  if (ref.runtime === "headless") {
+    const runtime = rts.for(ref);
+    if (!(runtime instanceof HeadlessRuntime) || !lane.session) return "identity unverified before send";
+    const current = await deps.registry.read(lane.key);
+    if (!current || !sameLaneGeneration(lane, current)) return "lane changed before send";
+    try {
+      const result = await runtime.setGoal(ref, lane.session, target === "paused" ? "paused" : "active");
+      if (result.sessionId !== lane.session || result.held) return "identity changed during readback";
+      const goal = result.goal?.status;
+      return goal === target || goal === "none" || goal === "complete" || goal === "dropped"
+        ? "confirmed"
+        : "goal unverified during readback";
+    } catch {
+      return "unconfirmed";
+    }
+  }
   const prepared = lane.hold?.outcome !== undefined;
   const requireBinding = lane.session !== undefined || prepared;
   const native = prepared || mayRunOmpArgv(deps.config.agentCommand);
@@ -132,6 +149,8 @@ const pauseHeld = async (deps: FlowDeps, seen: Lane, note: string): Promise<Paus
     }),
   );
   if (!paused) return { lane, lines: [await movedOn(deps, lane, "pause (its goal is paused)")], code: 3 };
+  if (ref.runtime === "headless")
+    return { lane: paused, lines: [`PAUSED ${lane.key} native goal and turn held`], code: 0 };
   const rts = runtimesOf(deps);
   const running = (await statusLookup(rts, ref)).status === "working";
   if (running) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { HeadlessRuntime, headlessArgv } from "../../../../src/runtime/headless.ts";
 import { mayRunOmpArgv } from "../../../../src/runtime/omp-argv.ts";
 import type { SessionRef } from "../../../../src/runtime/types.ts";
 import { configPath, fill } from "./config.ts";
@@ -15,7 +16,7 @@ import { listSessions, sendVerified } from "./sessions.ts";
 import { laneLaunchEnv } from "./slack-token.ts";
 import { withThreadLock } from "./thread-groups.ts";
 
-type ReopenCommit = { ref: SessionRef; opened: Lane | null; at: string; epoch: string };
+type ReopenCommit = { ref: SessionRef; opened: Lane | null; at: string; epoch: string; env: Record<string, string> };
 
 /** Reopen is an explicit operator action; neither a timer nor a ready condition calls it. */
 export const reopenLane = async (deps: FlowDeps, seen: Lane, note?: string): Promise<PauseResult> => {
@@ -30,11 +31,13 @@ export const reopenLane = async (deps: FlowDeps, seen: Lane, note?: string): Pro
     if (status !== "closed" && !preparedPark)
       return fail(`REFUSED ${lane.key}: not closed; use resume for a paused lane`);
     const oldRef = sessionOf(lane);
+    const headless = oldRef?.runtime === "headless";
     if (preparedPark && !oldRef) return fail(`REOPEN_UNVERIFIED ${lane.key}: previous pane identity missing`);
     if (!mayRunOmpArgv(deps.config.agentCommand)) throw new LaunchError("reopen requires an OMP agentCommand");
     if (note && /`|\$\(/.test(note)) throw new LaunchError("reopen note contains unsupported delivery syntax");
     const file = await resumeFile(deps, lane);
     const template = deps.config.agentCommand;
+    const nativeArgv = headless ? headlessArgv(template, lane.model ?? deps.config.defaultModel) : undefined;
     if (
       template.at(-1) !== "{prompt}" ||
       template.slice(0, -1).some((p) => p.includes("{prompt}") || /^--(?:resume|session|continue)(?:=|$)/.test(p))
@@ -66,14 +69,15 @@ export const reopenLane = async (deps: FlowDeps, seen: Lane, note?: string): Pro
       const stillCurrent = await deps.registry.read(lane.key);
       if (!stillCurrent || stillCurrent.thread !== lane.thread || !sameLaneGeneration(lane, stillCurrent))
         return fail(await movedOn(deps, lane, "reopen"));
-      const env = laneLaunchEnv(deps.env ?? process.env, deps.env?.["DORI_CONFIG"] ?? configPath(), deps.config);
-      const ref = await rts.default.create({
+      const callerEnv = headless ? (deps.env ?? process.env) : process.env;
+      const env = laneLaunchEnv(callerEnv, callerEnv["DORI_CONFIG"] ?? configPath(), deps.config);
+      const ref = await (headless ? rts.for(oldRef) : rts.default).create({
         name: lane.key,
         role: "lane",
         container: "tab",
         cwd: lane.cwd ?? deps.config.defaultCwd,
         env,
-        ...(deps.config.laneWorkspace ? { group: deps.config.laneWorkspace } : {}),
+        ...(!headless && deps.config.laneWorkspace ? { group: deps.config.laneWorkspace } : {}),
       });
       const at = iso(deps.clock);
       const epoch = randomUUID();
@@ -102,14 +106,15 @@ export const reopenLane = async (deps: FlowDeps, seen: Lane, note?: string): Pro
           lastPostedReportOwner: undefined,
           lastSeenReport: undefined,
           lastFreshnessNote: undefined,
+          lastNativeHold: undefined,
           pausedSeenWorking: undefined,
         });
       });
-      return { ref, opened, at, epoch };
+      return { ref, opened, at, epoch, env };
     });
     if (!group.ok) return fail(`HELD ${lane.key} thread close in flight (${group.holder})`);
     if ("code" in group.value) return group.value;
-    const { ref, opened, at, epoch } = group.value;
+    const { ref, opened, at, epoch, env } = group.value;
     if (!opened) {
       await rts.for(ref).close(ref, "session");
       return fail(await movedOn(deps, lane, "reopen"));
@@ -122,12 +127,19 @@ export const reopenLane = async (deps: FlowDeps, seen: Lane, note?: string): Pro
       generation: epoch,
       text: `lane reopening in ${ref.id}`,
     });
-    const argv = [
-      ...fill(template.slice(0, -1), { model: lane.model ?? deps.config.defaultModel }),
-      `--resume=${file}`,
-    ];
     try {
-      await rts.for(ref).start(ref, argv.map(quoteForPane).join(" "));
+      const runtime = rts.for(ref);
+      if (nativeArgv) {
+        if (!(runtime instanceof HeadlessRuntime) || !lane.session)
+          throw new Error("headless session identity missing");
+        await runtime.startNative(ref, nativeArgv, env, { file, sessionId: lane.session });
+      } else {
+        const argv = [
+          ...fill(template.slice(0, -1), { model: lane.model ?? deps.config.defaultModel }),
+          `--resume=${file}`,
+        ];
+        await runtime.start(ref, argv.map(quoteForPane).join(" "));
+      }
     } catch (error) {
       return fail(
         `REOPEN_UNVERIFIED ${lane.key}: start failed (${String(error)}); pane=${ref.id}, inspect before resume`,

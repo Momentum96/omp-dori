@@ -6,7 +6,7 @@ import type { Exec } from "../src/runtime/exec.ts";
 import { HcRuntime } from "../src/runtime/hc/index.ts";
 import { HerdrRuntime } from "../src/runtime/herdr/index.ts";
 import { Runtimes } from "../src/runtime/registry.ts";
-import type { AgentStatus, RuntimeKind, SessionRef } from "../src/runtime/types.ts";
+import type { AgentStatus, SessionRef, TerminalRuntimeKind } from "../src/runtime/types.ts";
 import { Store, type HostLoad } from "../src/store.ts";
 import type { DutyCounts, TelemetryEvent, Usage } from "../src/telemetry.ts";
 import { FakeHc } from "./fake-hc.ts";
@@ -166,14 +166,17 @@ export class World {
   };
 
   /** Deps over this world's recorders; `runtime` is the selected one (both are reachable by ref). */
-  deps(opts: { runtime?: RuntimeKind } = {}): Deps {
+  deps(opts: { runtime?: TerminalRuntimeKind } = {}): Deps {
     const kind = opts.runtime ?? "herdr";
     const quiet = { env: {}, sleep: async () => {} };
     return {
       store: new Store(mkdtempSync(join(tmpdir(), "dori-test-"))),
-      runtimes: new Runtimes(kind, (k) =>
-        k === "hc" ? new HcRuntime(this.exec, { ...quiet, log: () => {} }) : new HerdrRuntime(this.exec, "", quiet),
-      ),
+      runtimes: new Runtimes(kind, (k) => {
+        if (k === "headless") throw new Error("Terminal test world does not have a headless runtime");
+        return k === "hc"
+          ? new HcRuntime(this.exec, { ...quiet, log: () => {} })
+          : new HerdrRuntime(this.exec, "", quiet);
+      }),
       choice: () => ({ kind, source: "config" }),
       exec: this.exec,
       now: () => this.clock,

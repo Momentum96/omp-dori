@@ -12,8 +12,10 @@
         "src/update/deployment-launcher.ts",
         "src/release/automatic.ts",
         "src/release/references.ts",
+        "src/runtime/headless-broker.ts",
         "src/update/reviewer-guard.ts",
         "src/update/worker-guard.ts",
+        "test/fixtures/headless-rpc.ts",
         "test/**/*.test.ts"
       ],
       "project": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]

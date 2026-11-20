@@ -1,6 +1,8 @@
 import type { Exec } from "../../../../src/runtime/exec.ts";
 import { HcRuntime } from "../../../../src/runtime/hc/index.ts";
+import { HeadlessRuntime } from "../../../../src/runtime/headless.ts";
 import { HerdrRuntime } from "../../../../src/runtime/herdr/index.ts";
+import { ompStateDir } from "../../../../src/runtime/omp.ts";
 import { Runtimes } from "../../../../src/runtime/registry.ts";
 import { type RuntimeChoice, readRuntimeChoice } from "../../../../src/runtime/select.ts";
 import type { RuntimeKind, SessionRuntime } from "../../../../src/runtime/types.ts";
@@ -130,6 +132,7 @@ const runtimeFactory = (
     // Explicit env owns absence too; undefined would invoke the constructor's process.env default.
     herdr: () => new HerdrRuntime(exec, env["DORI_HERDR_SESSION"] ?? "", options),
     hc: () => new HcRuntime(exec, options),
+    headless: () => new HeadlessRuntime(config.stateDir ?? ompStateDir(env), env),
   };
   return (kind) => make[kind]();
 };

@@ -1,9 +1,9 @@
 import { accessSync, constants, readFileSync, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
-import type { RuntimeKind } from "./types.ts";
+import type { TerminalRuntimeKind } from "./types.ts";
 
 export type RuntimeSource = "env" | "config" | "detect:HC_TERMINAL_ID" | "detect:HERDR_PANE_ID" | "detect:path";
-export type RuntimeChoice = { readonly kind: RuntimeKind; readonly source: RuntimeSource };
+export type RuntimeChoice = { readonly kind: TerminalRuntimeKind; readonly source: RuntimeSource };
 
 /** No runtime could be chosen; the message is the one-line fix. */
 export class RuntimeChoiceError extends Error {}
@@ -12,9 +12,9 @@ export class ConfigError extends Error {}
 
 // A record keyed by kind, so a new RuntimeKind cannot be left out here. Key order is not a preference: PATH detection
 // asks for hc first, then herdr, whatever order the keys or the PATH entries have.
-const KIND_SET: Readonly<Record<RuntimeKind, true>> = { herdr: true, hc: true };
-const KINDS = Object.keys(KIND_SET) as RuntimeKind[];
-const isKind = (value: unknown): value is RuntimeKind => KINDS.some((k) => k === value);
+const KIND_SET: Readonly<Record<TerminalRuntimeKind, true>> = { herdr: true, hc: true };
+const KINDS = Object.keys(KIND_SET) as TerminalRuntimeKind[];
+const isKind = (value: unknown): value is TerminalRuntimeKind => KINDS.some((k) => k === value);
 
 const isExecutableFile = (path: string): boolean => {
   try {
@@ -29,7 +29,7 @@ const isExecutableFile = (path: string): boolean => {
 const nonEmpty = (value: string | undefined): string | undefined =>
   value === undefined || value === "" ? undefined : value;
 
-function configRuntime(configPath: string): RuntimeKind | undefined {
+function configRuntime(configPath: string): TerminalRuntimeKind | undefined {
   let text: string;
   try {
     text = readFileSync(configPath, "utf8");
@@ -52,7 +52,7 @@ function configRuntime(configPath: string): RuntimeKind | undefined {
   return value;
 }
 
-function onPath(pathVar: string | undefined, exists: (path: string) => boolean): RuntimeKind[] {
+function onPath(pathVar: string | undefined, exists: (path: string) => boolean): TerminalRuntimeKind[] {
   const dirs = (pathVar ?? "").split(delimiter).filter((dir) => dir !== "");
   return KINDS.filter((kind) => dirs.some((dir) => exists(join(dir, kind))));
 }

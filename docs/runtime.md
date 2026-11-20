@@ -220,9 +220,38 @@ Configured literal secrets are redacted in full in stdout, stderr and command er
 
 Environment and path isolation is not an OS sandbox. Descendants can survive a direct-child kill or output cancellation; the controller does not terminate process groups. A drain deadline holds the command as interrupted even when the direct child exited zero. A started reporter with incomplete output stays ambiguous and is never resent automatically. Inspect the retained receipt and verify every old child and descendant has stopped before `dori upstream recover --config FILE --ack-stopped JOB_ID`; that maintainer command acknowledges the operator's verification rather than stopping a process tree.
 
+## Remote Cataly sessions
+
+Remote commands are opt-in, target-local operations on native OMP sessions with a Cataly `dori` or `lane` role. They use the operator's existing `hc` machine connection, not an OMP account, a published Collab link, or a new network listener. Commands do not discover ordinary OMP sessions or sessions from another installation. The underlying machine connection still grants the privileges of its configured account; Cataly's switches restrict only the Cataly interface.
+
+On the **target** installation, run `dori remote policy control on`. Run `dori remote policy wake on` separately to allow cold wake. Both default off. The source addresses one configured `hc` machine per command. Use `--via` with the absolute path of the target's `dori` wrapper when the chosen installation is not `dori` on the remote core's PATH.
+
+```sh
+dori remote sessions --on lab --via /home/user/.omp-dori/bin/dori
+dori remote read SESSION --on lab --limit 20
+dori remote send SESSION --on lab --text 'Summarize your status' --id request-01 --no-wait
+dori remote receipt SESSION --on lab --id request-01
+dori remote watch SESSION --on lab --cursor 0 --until-completion
+```
+
+Use the exact session ID or a unique live prefix. `--generation` pins an observed activation; use it with a previously issued request ID or cursor. `send` uses OMP's admission API and preserves the message body. Headless delivery refuses slash-leading text because the pinned RPC mode may interpret it as a prompt template. A receipt confirms admission, not an assistant reply; `read` and `watch` show the session's actual output without guessing which concurrent input caused it. The optional `--steer` is explicit. Lost transport does not imply that a mutation failed. Inspect its receipt instead of resending blindly.
+
+`interrupt` requests OMP turn cancellation and reports detached jobs separately; the pinned extension API cannot cancel independently owned background jobs. `model` changes the session's model and reads it back. `close` verifies disappearance before reporting closure. Terminal sessions require `--force` if active and still hold on pending approvals. Headless sessions must settle even with `--force`: disconnect during work could cancel a native approval before the supervisor sees it. A lost close response holds cold wake until the operator checks the session. `attach` uses a process-checked `hc` terminal when there is one; otherwise it is a read-only transcript and event stream. A separately enabled OMP Collab room can still be joined with `omp join`.
+
+`open` starts a managed OMP session on a target `hc` core with optional `--cwd`, `--name`, `--model`, `--thinking`, `--text` and `--worktree PATH [--branch BRANCH] [--base REF]`. These are OMP and target filesystem values. The command cannot start a caller-supplied executable. It stores a target-local opening receipt and does not duplicate a launch with the same request ID. `wake` accepts an exact stored ID from `open`, verifies it is unowned with OMP's session lease, and does not submit a prompt or resume a paused goal. Explicitly closed sessions and registered held lanes are not woken; use the lane's own `reopen` workflow for registered lanes.
+
+`watch` streams bounded event pages; its cursor belongs to the live activation. A `gap` means old events have fallen out of the buffer. A report observed in a tool result is not a durable journal check, and turn output is not a lane Done assertion.
+
+## Headless OMP lanes
+
+Use `dori launch … --runtime headless` or set `"laneRuntime": "headless"` in the skill config to select the local headless runtime for new lanes. This does not move lead, duty or loop processes or change the default terminal runtime. Each lane runs one native `omp --mode rpc-ui` process, owned by a local supervisor. The supervisor keeps the process alive across CLI exits and reads OMP's session, goal, dialog and settlement state. It does not promise process sharing or a memory saving.
+
+`omp acp` can run multiple sessions but does not expose the pinned OMP goal lifecycle used by Cataly lane pause and resume. `rpc-ui` retains those operations and OMP's approval UI; it is not launched with `--no-ui` or an approval bypass. Use `dori headless observe LANE` to view recent output and pending native dialogs. To answer a particular pending dialog locally, use `dori headless answer LANE REQUEST_ID --answer-file FILE` (`-` reads stdin). The JSON must match the native dialog: `{"confirmed":false}`, `{"value":"Deny"}`, `{"cancelled":true}`, or `{"answers":[{"id":"question-id","selectedOptions":["choice"]}]}`. Submitting an answer does not assert that the native tool executed.
+
 ## Limits
 
-- No remote sessions. hc can run terminals on other machines (`--on`), and Dori does not use it: every session is on the local core, and `dori` ignores terminals mirrored from other machines.
+- The existing local harness, inbox and migration do not act on mirrored remote terminals. Remote commands are a separate operator entrypoint.
+- Native remote and headless sockets require macOS or Linux. Do not enable remote control on an untrusted machine or share a control link as a substitute for granting a specific operation.
 - No window layout on hc. The lead, duty and the loops are separate terminals; open them with `hc attach <t>`.
 - hc on Windows is untested here.
 

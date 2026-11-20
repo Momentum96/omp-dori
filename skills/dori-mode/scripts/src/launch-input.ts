@@ -1,4 +1,5 @@
 import type { FlowDeps } from "./done-flow.ts";
+import type { RuntimeKind } from "../../../../src/runtime/types.ts";
 import { LaunchQueue } from "./launch-queue-store.ts";
 import { LANE_KEY, RESERVED_LANE_KEY } from "./registry.ts";
 import { doneSyntaxErrors } from "./signals.ts";
@@ -18,6 +19,7 @@ export type LaunchInput = {
   readonly cwd?: string;
   readonly budget?: BudgetLimits;
   readonly activityPaths?: readonly string[];
+  readonly runtime?: RuntimeKind;
 };
 
 export const validateLaunch = async (
@@ -28,6 +30,13 @@ export const validateLaunch = async (
   if (!LANE_KEY.test(input.key)) throw new LaunchError(`key must match ${LANE_KEY}`);
   if (input.key === RESERVED_LANE_KEY)
     throw new LaunchError(`lane key "${RESERVED_LANE_KEY}" is reserved for the lead`);
+  if (
+    input.runtime !== undefined &&
+    input.runtime !== "herdr" &&
+    input.runtime !== "hc" &&
+    input.runtime !== "headless"
+  )
+    throw new LaunchError("launch runtime must be headless, hc or herdr");
   if (await deps.registry.read(input.key)) throw new LaunchError(`lane ${input.key} is already registered`);
   const queued = new LaunchQueue(deps.config.stateDir).read(input.key);
   if (queued && queued.status !== "cancelled" && !(queued.status === "starting" && input.queueId === queued.id))

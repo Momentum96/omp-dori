@@ -12,15 +12,17 @@ import type { QueuedMessage } from "./store-types.ts";
 export const INBOX_SUFFIX = ".jsonl";
 export const MOVING = ".moving";
 const HC_PREFIX = "hc--";
+const HEADLESS_PREFIX = "headless--";
 const SPOOL = ".spool";
 
 export function inboxFile(root: string, ref: SessionRef): string {
-  const name = ref.runtime === "herdr" ? ref.id.replaceAll(":", "_") : `${HC_PREFIX}${ref.id}`;
+  const name = ref.runtime === "herdr" ? ref.id.replaceAll(":", "_") : `${ref.runtime}--${ref.id}`;
   return join(root, "inbox", `${name}${INBOX_SUFFIX}`);
 }
 
 export function refOfInbox(name: string): SessionRef {
   const stem = name.slice(0, -INBOX_SUFFIX.length);
+  if (stem.startsWith(HEADLESS_PREFIX)) return { runtime: "headless", id: stem.slice(HEADLESS_PREFIX.length) };
   return stem.startsWith(HC_PREFIX)
     ? { runtime: "hc", id: stem.slice(HC_PREFIX.length) }
     : { runtime: "herdr", id: stem.replaceAll("_", ":") };

@@ -1,4 +1,5 @@
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
+import type { HeadlessObservation } from "../../../../src/runtime/headless.ts";
 import type { SessionRef } from "../../../../src/runtime/types.ts";
 import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -61,6 +62,7 @@ export const notifyFreshness = async (
   now: number,
   home: string,
   acts: SweepAct[],
+  native?: HeadlessObservation,
 ): Promise<void> => {
   // A blocker, question, halted or done lane is not nudged, but its report still reaches the thread.
   const running = !progress || progress.state === "running";
@@ -68,12 +70,18 @@ export const notifyFreshness = async (
   const silentMin = Math.round((now - heard) / 60_000);
   let current = lane;
   const policy = deps.config.freshness;
-  const idleOnly = policy?.nudge === "idle-only";
+  const idleOnly = ref.runtime === "headless" || policy?.nudge === "idle-only";
   const runtimes = runtimesOf(deps);
   if (
     running &&
     silentMin >= deps.config.nudgeAfterMin &&
     (current.lastNudgeAt ?? 0) < heard &&
+    (ref.runtime !== "headless" ||
+      (native?.status === "idle" &&
+        native.sessionId &&
+        native.sessionId === lane.session &&
+        !native.held &&
+        native.goal?.status !== "paused")) &&
     (!idleOnly || (await trustedIdle(runtimes, ref)))
   ) {
     const delivery = await sendVerified(

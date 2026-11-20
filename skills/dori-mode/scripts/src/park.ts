@@ -42,7 +42,13 @@ export const parkLane = async (
         return fail(`HELD ${lane.key}: Discord messages are still pending`);
       const ref = sessionOf(lane);
       const runtime = ref && runtimesOf(deps).for(ref);
-      const live = runtime && ref && (await runtime.list()).some((s) => s.ref.id === ref.id);
+      const isPresent = async () =>
+        runtime &&
+        ref &&
+        (ref.runtime === "headless"
+          ? (await runtime.probe(ref)).status !== "gone"
+          : (await runtime.list()).some((s) => s.ref.id === ref.id));
+      const live = await isPresent();
       const bareShell = async () => !!(runtime && ref && isBareLaneShell(await runtime.probe(ref)));
       let stoppedShell = false;
       if (outcome === "abandoned" && live) {
@@ -96,9 +102,9 @@ export const parkLane = async (
         if (latest.session !== lane.session || !(await quiescent())) return fail(changed);
         try {
           // Close only the recorded pane, never unrelated panes later added to its tab.
-          await runtime.close(ref, "session");
-          if ((await runtime.list()).some((s) => s.ref.id === ref.id))
-            return fail(`PARK_UNVERIFIED ${lane.key}: pane still present; files kept`);
+          if (ref.runtime === "headless") await runtime.close(ref, "session", lane.session);
+          else await runtime.close(ref, "session");
+          if (await isPresent()) return fail(`PARK_UNVERIFIED ${lane.key}: pane still present; files kept`);
         } catch (error) {
           return fail(`PARK_UNVERIFIED ${lane.key}: close failed (${String(error)}); files kept`);
         }

@@ -11,6 +11,7 @@ import {
 } from "./release/runtime.ts";
 import { type Exec, spawnExec } from "./runtime/exec.ts";
 import { HcRuntime } from "./runtime/hc/index.ts";
+import { HeadlessRuntime } from "./runtime/headless.ts";
 import { HerdrRuntime } from "./runtime/herdr/index.ts";
 import { Runtimes } from "./runtime/registry.ts";
 import { ompStateDir } from "./runtime/omp.ts";
@@ -52,10 +53,12 @@ export const defaultDeps = (): Deps => {
       // The choice is made only when a NEW session is opened: a stored session's own runtime needs none.
       runtimes ??= new Runtimes(
         () => choice().kind,
-        (k) =>
-          k === "hc"
-            ? new HcRuntime(spawnExec, { stateDir: ompStateDir(process.env) })
-            : new HerdrRuntime(spawnExec, process.env["DORI_HERDR_SESSION"], { stateDir: ompStateDir(process.env) }),
+        (k) => {
+          const stateDir = ompStateDir(process.env);
+          if (k === "headless") return new HeadlessRuntime(stateDir);
+          if (k === "hc") return new HcRuntime(spawnExec, { stateDir });
+          return new HerdrRuntime(spawnExec, process.env["DORI_HERDR_SESSION"], { stateDir });
+        },
       );
       return runtimes;
     },

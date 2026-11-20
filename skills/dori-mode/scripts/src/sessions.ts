@@ -70,7 +70,11 @@ export const ALIVE_STATUSES: ReadonlySet<string> = new Set(["idle", "working", "
 
 /** The agent's status word as the runtime lists it; undefined when the session runs no agent or is gone. */
 export const agentStatus = async (rts: Runtimes, ref: SessionRef): Promise<string | undefined> => {
-  const status = (await rts.for(ref).list()).find((s) => s.ref.id === ref.id)?.status;
+  const runtime = rts.for(ref);
+  const status =
+    ref.runtime === "headless"
+      ? (await runtime.probe(ref)).status
+      : (await runtime.list()).find((s) => s.ref.id === ref.id)?.status;
   return status === "shell" || status === "gone" ? undefined : status;
 };
 
@@ -121,7 +125,8 @@ export const sendVerified = async (
   expectedSessionId?: string,
   strictIdle?: boolean,
 ): Promise<Delivery> => {
-  if (/`|\$\(/.test(text)) throw new UnsafeTextError("refusing to send text containing a backtick or $(");
+  if (ref.runtime !== "headless" && /`|\$\(/.test(text))
+    throw new UnsafeTextError("refusing to send text containing a backtick or $(");
   const before = await statusLookup(rts, ref);
   if (before.error) console.error(`sendVerified ${ref.id}: status lookup failed before send: ${before.error}`);
   // No running agent means a bare shell, where typed text runs as a command (#66). A failed lookup is doubt: refuse.
@@ -141,6 +146,8 @@ export const sendVerified = async (
     console.error(`sendVerified ${ref.id}: text typed but Enter failed`);
     return "unconfirmed";
   }
+  // Native follow_up ACKs submission directly (including queueing while busy). It never types or answers a dialog.
+  if (ref.runtime === "headless") return "delivered";
   if (before.status === "working") return "unconfirmed";
   for (let attempt = 0; attempt < 6; attempt++) {
     await clock.sleep(700);

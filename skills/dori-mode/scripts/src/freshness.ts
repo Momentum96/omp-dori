@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { HeadlessRuntime, type HeadlessObservation } from "../../../../src/runtime/headless.ts";
 
 import { withDeliveryLock } from "./delivery-lock.ts";
 import type { FlowDeps } from "./done-flow.ts";
@@ -70,6 +71,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     // Only launched lanes report through the journal; an adopted lane keeps the screen path even if a record exists.
     let previous: Progress | null = null;
     let screen: string | null = null;
+    let native: HeadlessObservation | undefined;
     let legacyReport: string | null | undefined;
     let supervised: SupervisionResult | null = null;
     let supervisionError: string | undefined;
@@ -77,14 +79,25 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     if (lane.reportProtocol === "jsonl-v1") {
       try {
         previous = reports.read(lane.key, scope);
-        screen = await readScreen(runtimesOf(deps), ref);
+        const runtime = runtimesOf(deps).for(ref);
+        if (runtime instanceof HeadlessRuntime) {
+          native = await runtime.observe(ref);
+          screen = "";
+        } else {
+          screen = await readScreen(runtimesOf(deps), ref);
+        }
       } catch (error) {
         await journalProblem(deps, lane, acts, error);
         continue;
       }
       try {
         // A launched lane is supervised once its journal exists; without one there is no progress to judge.
-        if (existsSync(reports.path(lane.key))) supervised = await supervision.sweep(lane, screen);
+        if (existsSync(reports.path(lane.key)))
+          supervised = await supervision.sweep(
+            lane,
+            screen,
+            native?.status === "working" ? native.activeSince : undefined,
+          );
       } catch (error) {
         supervisionError = error instanceof Error ? error.message : String(error);
       }
@@ -95,6 +108,12 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
       // The screen and usage hook can outlive park/reopen; never apply them to the replacement lane.
       const current = await deps.registry.read(lane.key);
       if (!current || current.nativeCloseIntent || !sameLaneGeneration(lane, current)) return;
+      const hold = native?.dialogs.map((dialog) => `${dialog.kind} ${dialog.id}`).join(", ");
+      if (current.lastNativeHold !== (hold || undefined)) {
+        if (!(await rememberFreshness(deps, current, { lastNativeHold: hold || undefined }))) return;
+        if (hold)
+          acts.push({ kind: "blocked", lane: lane.key, detail: `native input held (${hold}); inspect the lane` });
+      }
       // Supervision is advisory: its failure is printed once per reason, and the lane's reports still flow.
       if (supervisionError !== undefined && supervisionError !== current.lastSupervisionError) {
         if (!(await rememberFreshness(deps, current, { lastSupervisionError: supervisionError }))) return;
@@ -119,6 +138,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
             deps.config.nudgeAfterMin * 60_000,
             !supervised?.hung,
             scope,
+            native?.sessionId && native.sessionId === current.session ? native.status : undefined,
           );
         } catch (error) {
           await journalProblem(deps, current, acts, error);
@@ -132,7 +152,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
         }
         return;
       }
-      await notifyFreshness(deps, current, ref, progress, legacyReport, now, home, acts);
+      await notifyFreshness(deps, current, ref, progress, legacyReport, now, home, acts, native);
     });
   }
   return acts;

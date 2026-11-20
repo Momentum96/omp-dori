@@ -84,6 +84,8 @@ export const commitClose = async (deps: FlowDeps, seen: Lane, basis: CloseBasis)
     const ref = sessionOf(lane);
     const { lifecycleEpoch: epoch, session } = lane;
     if (!ref || !epoch || !session || !(await confirmedLaneState(deps, lane, ref))) return hold(unconfirmed);
+    if (ref.runtime === "headless" && (await runtimesOf(deps).for(ref).probe(ref)).status !== "idle")
+      return hold("native lane has not settled");
     if (pendingDiscordLane(deps.config.stateDir, lane)) return hold("Discord messages are still pending");
     const prepared = { ...basis, ref, session, epoch };
     const recorded = await deps.registry.transition(lane, (current) =>
@@ -97,12 +99,17 @@ export const commitClose = async (deps: FlowDeps, seen: Lane, basis: CloseBasis)
   const { ref } = intent;
   try {
     const runtime = runtimesOf(deps).for(ref);
+    const isPresent = async () =>
+      ref.runtime === "headless"
+        ? (await runtime.probe(ref)).status !== "gone"
+        : (await runtime.list()).some((s) => s.ref.id === ref.id);
     // An interrupted request may already have removed the target. Only a saved, still-bound intent may use that fact.
-    if (!saved || (await runtime.list()).some((s) => s.ref.id === ref.id)) {
+    if (!saved || (await isPresent())) {
       if (saved && pendingDiscordLane(deps.config.stateDir, lane)) return hold("Discord messages are still pending");
       if (!(await confirmedLaneState(deps, lane, ref))) return hold(unconfirmed);
-      await runtime.close(ref, "session");
-      if ((await runtime.list()).some((s) => s.ref.id === ref.id)) return hold(`pane ${ref.id} is still present`);
+      if (ref.runtime === "headless") await runtime.close(ref, "session", intent.session);
+      else await runtime.close(ref, "session");
+      if (await isPresent()) return hold(`pane ${ref.id} is still present`);
     }
   } catch (error) {
     return hold(`pane ${ref.id} close unconfirmed: ${String(error)}`);

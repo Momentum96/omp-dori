@@ -116,7 +116,12 @@ export const laneStatus = async (deps: FlowDeps, key?: string): Promise<StatusSn
       problems.push("checkpoint journal unreadable");
     }
     const ref = sessionOf(lane);
-    if (ref && !lane.session && statusOf(lane) !== "closed") problems.push("runtime unbound; run dori sync --write");
+    if (ref && !lane.session && statusOf(lane) !== "closed")
+      problems.push(
+        ref.runtime === "headless"
+          ? "native launch unbound; inspect dori headless observe"
+          : "runtime unbound; run dori sync --write",
+      );
     if (ref && lane.session && statusOf(lane) !== "closed") {
       try {
         const state = await trustedPaneState(deps.run, deps.config.stateDir, ref, runtimesOf(deps));
