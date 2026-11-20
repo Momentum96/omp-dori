@@ -30,11 +30,13 @@ test("the dori command vocabulary is every command the CLI dispatches", () => {
     ["cli-status.ts", statusCommands],
     ["cli-voice.ts", { voice: voiceCommand }],
   ] as const;
-  // Every word the CLI dispatches, and the module the command lives in: cli.ts's own three come before its tables.
+  // Every word the CLI dispatches, including the entrypoints that run before the command tables.
   const groupOf = new Map<string, string>([
     ["harness", "cli-harness.ts"],
     ["update", "/src/release/cli.ts"],
     ["upstream", "/src/update/cli.ts"],
+    ["remote", "cli-remote.ts"],
+    ["headless", "cli-headless.ts"],
   ]);
   for (const [module, table] of tables) for (const name of Object.keys(table)) groupOf.set(name, module);
   expect(Object.keys(DORI_COMMANDS).sort()).toEqual([...groupOf.keys()].sort());
