@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { defaultConfig, loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
 import { claimDone, closeLane, type FlowDeps } from "../skills/dori-mode/scripts/src/done-flow.ts";
@@ -22,13 +23,13 @@ const skillCli = resolve(import.meta.dir, "../skills/dori-mode/scripts/src/cli.t
 const noExternal: Runner = async () => ({ code: 1, out: "", err: "" });
 
 function fixture() {
-  const home = realpathSync(mkdtempSync("/tmp/cataly-headless-test-"));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "cataly-headless-test-")));
   const stateDir = join(home, "state");
   const cwd = join(home, "work");
   mkdirSync(cwd);
   const omp = join(home, "omp");
   writeFileSync(omp, `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeHost)} "$@"\n`);
-  chmodSync(omp, 0o700);
+  if (process.platform !== "win32") chmodSync(omp, 0o700);
   const path = join(home, "config.json");
   const trace = join(home, "trace.jsonl");
   const saved = join(home, "saved.jsonl");
