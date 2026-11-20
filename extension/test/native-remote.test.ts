@@ -12,6 +12,7 @@ const roots: string[] = [];
 const active: FakePi[] = [];
 const names = ["HC_TERMINAL_ID", "HERDR_PANE_ID", "CATALY_HEADLESS_ID", "DORI_CONFIG", "DORI_STATE_DIR"] as const;
 const env = new Map<string, string | undefined>();
+const unixSocketTest = test.skipIf(typeof process.getuid !== "function");
 
 beforeEach(() => {
   for (const name of names) {
@@ -23,7 +24,7 @@ beforeEach(() => {
 afterEach(async () => {
   for (const fake of active.splice(0)) await fake.emit("session_shutdown");
   for (const root of roots.splice(0)) {
-    rmSync(remoteSocketDir(root), { recursive: true, force: true });
+    if (typeof process.getuid === "function") rmSync(remoteSocketDir(root), { recursive: true, force: true });
     rmSync(dirname(root), { recursive: true, force: true });
   }
   for (const [name, value] of env) {
@@ -106,7 +107,26 @@ async function fixture(options?: { role?: "dori" | "lane"; mode?: string; sub?: 
   return { fake, root, path, session, info, bound, state };
 }
 
-test("private socket is exact, bounded, and only publishes native Cataly roots", async () => {
+test("native role and monitor work without Unix user ownership", async () => {
+  const root = useConfig("");
+  roots.push(root);
+  const fake = fakePi({ session: { id: randomUUID(), entries: [] }, flags: { "dori-role": "dori" } });
+  active.push(fake);
+  const original = Object.getOwnPropertyDescriptor(process, "getuid");
+  Object.defineProperty(process, "getuid", { value: undefined, configurable: true });
+  try {
+    await ompDori(fake.api);
+    await fake.emit("session_start");
+    expect(fake.session.entries).toContainEqual({ type: "custom", customType: "omp-dori:role", data: "dori" });
+    expect(fake.active).toContain("monitor");
+    expect(fake.notes.join("\n")).not.toContain("Native remote");
+  } finally {
+    if (original) Object.defineProperty(process, "getuid", original);
+    else Reflect.deleteProperty(process, "getuid");
+  }
+});
+
+unixSocketTest("private socket is exact, bounded, and only publishes native Cataly roots", async () => {
   const { fake, root, path, session, info, bound } = await fixture();
   await fake.emit("session_start");
   expect(lstatSync(remoteSocketDir(root)).mode & 0o7777).toBe(0o700);
@@ -132,7 +152,7 @@ test("private socket is exact, bounded, and only publishes native Cataly roots",
   expect(await lane.info()).toMatchObject({ role: "lane", pane: `headless:${headless}` });
 });
 
-test("socket startup never alters an unsafe directory or a symlink", async () => {
+unixSocketTest("socket startup never alters an unsafe directory or a symlink", async () => {
   for (const symlink of [false, true]) {
     const { fake, root, path } = await fixture();
     const dir = remoteSocketDir(root);
@@ -154,7 +174,7 @@ test("socket startup never alters an unsafe directory or a symlink", async () =>
   expect(existsSync(target)).toBe(true);
 });
 
-test("an existing exact socket owner cannot be replaced by another root", async () => {
+unixSocketTest("an existing exact socket owner cannot be replaced by another root", async () => {
   const { fake, session, info } = await fixture();
   await fake.emit("session_start");
   const first = await info();
@@ -174,7 +194,7 @@ test("an existing exact socket owner cannot be replaced by another root", async 
   expect((await info()).generation).not.toBe(first.generation);
 });
 
-test("native send preserves input and exposes idempotent receipts, not a guessed reply", async () => {
+unixSocketTest("native send preserves input and exposes idempotent receipts, not a guessed reply", async () => {
   const { fake, bound, session, state } = await fixture();
   const pending = Promise.withResolvers<void>();
   const calls: { text: string; options: unknown }[] = [];
@@ -223,7 +243,7 @@ test("native send preserves input and exposes idempotent receipts, not a guessed
   expect(state.closes).toBe(0);
 });
 
-test("observes actual native messages, asks, reports and completion with explicit event gaps", async () => {
+unixSocketTest("observes actual native messages, asks, reports and completion with explicit event gaps", async () => {
   const { fake, bound } = await fixture();
   fake.session.entries.push(
     { type: "message", id: "u", message: { role: "user", content: "visible" } },
@@ -277,34 +297,41 @@ test("observes actual native messages, asks, reports and completion with explici
   expect(data(await ask("events", { cursor: 0, limit: 1 }))).toMatchObject({ gap: true, cursor: 24 });
 });
 
-test("interrupt and close do not claim background cancellation; model reads back actual selection", async () => {
-  const { fake, state, bound, info } = await fixture();
-  await fake.emit("session_start");
-  const ask = await bound();
-  expect(data(await ask("model", { model: "fixture/two" }))).toEqual({ model: "fixture/two" });
-  expect((await info()).model).toBe("fixture/two");
-  fake.api.setModel = async () => true;
-  expect(await ask("model", { model: "fixture/one" })).toMatchObject({
-    ok: false,
-    error: expect.stringContaining("readback"),
-  });
-  state.job = true;
-  expect(data(await ask("interrupt"))).toEqual({ status: "idle", background: "not-targeted", backgroundPending: true });
-  expect(await ask("close")).toMatchObject({ ok: false });
-  expect(state.aborts).toBe(0);
-  state.idle = false;
-  expect(data(await ask("interrupt"))).toEqual({
-    status: "requested",
-    background: "not-targeted",
-    backgroundPending: true,
-  });
-  expect(data(await ask("close", { force: true }))).toEqual({ status: "requested", background: "not-targeted" });
-  expect(state.aborts).toBe(2);
-  expect(state.closes).toBe(1);
-  expect(await ask("send", { id: "closed", text: "not possible" })).toMatchObject({ ok: false });
-});
+unixSocketTest(
+  "interrupt and close do not claim background cancellation; model reads back actual selection",
+  async () => {
+    const { fake, state, bound, info } = await fixture();
+    await fake.emit("session_start");
+    const ask = await bound();
+    expect(data(await ask("model", { model: "fixture/two" }))).toEqual({ model: "fixture/two" });
+    expect((await info()).model).toBe("fixture/two");
+    fake.api.setModel = async () => true;
+    expect(await ask("model", { model: "fixture/one" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("readback"),
+    });
+    state.job = true;
+    expect(data(await ask("interrupt"))).toEqual({
+      status: "idle",
+      background: "not-targeted",
+      backgroundPending: true,
+    });
+    expect(await ask("close")).toMatchObject({ ok: false });
+    expect(state.aborts).toBe(0);
+    state.idle = false;
+    expect(data(await ask("interrupt"))).toEqual({
+      status: "requested",
+      background: "not-targeted",
+      backgroundPending: true,
+    });
+    expect(data(await ask("close", { force: true }))).toEqual({ status: "requested", background: "not-targeted" });
+    expect(state.aborts).toBe(2);
+    expect(state.closes).toBe(1);
+    expect(await ask("send", { id: "closed", text: "not possible" })).toMatchObject({ ok: false });
+  },
+);
 
-test("rotation invalidates old generations even on the same native session id", async () => {
+unixSocketTest("rotation invalidates old generations even on the same native session id", async () => {
   const { fake, path, session, info, bound } = await fixture();
   await fake.emit("session_start");
   const initial = await info();
