@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { defaultConfig, loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
@@ -28,8 +28,7 @@ function fixture() {
   const cwd = join(home, "work");
   mkdirSync(cwd);
   const omp = join(home, "omp");
-  writeFileSync(omp, `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeHost)} "$@"\n`);
-  if (process.platform !== "win32") chmodSync(omp, 0o700);
+  writeFileSync(omp, `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeHost)} "$@"\n`, { mode: 0o700 });
   const path = join(home, "config.json");
   const trace = join(home, "trace.jsonl");
   const saved = join(home, "saved.jsonl");
