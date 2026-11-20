@@ -52,6 +52,7 @@ export const liveWorld = async (
     received,
     lines,
     advance: timers.advance,
+    now: timers.clock.now,
     pending: timers.pending,
     cursor: (channel: string) => store(channel).load(),
     /** Completes the Gateway handshake as READY (first connection) or RESUMED (resume). */

@@ -11,7 +11,11 @@ export type Message = {
   content?: string;
   flags?: number;
   attachments?: unknown;
-  message_reference?: { message_id?: string };
+  mentions?: { id: string }[];
+  mention_roles?: string[];
+  edited_timestamp?: string | null;
+  /** `type` 1 is a forward, not a reply. */
+  message_reference?: { type?: number; message_id?: string; channel_id?: string };
   /** Present on replies, or null when Discord could not load the target (for example, after deletion). */
   referenced_message?: { id?: string; author?: { id?: string }; content?: string } | null;
 };
@@ -34,6 +38,8 @@ export type DiscordInbound = {
   text: string;
   replyTo: InboundReply | null;
   attachments: InboundAttachment[];
+  /** Set when an edit newly addressed this bot: `id` is `e:<bot>:<message>:<edited epoch ms>`. */
+  edit?: { id: string; editedAt: string };
 };
 export type Request = <T>(path: string, body?: Record<string, unknown>) => Promise<T>;
 
@@ -165,8 +171,8 @@ const toAttachments = (message: Message): InboundAttachment[] => {
 
 const TEXT_CHANNELS = new Set([0, 5]); // text and announcement
 
-/** A channel's guild, type and thread parent; `undefined` only when an optional lookup finds it inaccessible. */
-export type ChannelInfo = { guild?: string; type?: number; parent?: string };
+/** A channel's guild, type, thread parent and thread creator; `undefined` only when an optional lookup finds it inaccessible. */
+export type ChannelInfo = { guild?: string; type?: number; parent?: string; owner?: string };
 
 /** Discord's thread channel types; a category's `parent_id` names its parent category, not a thread parent. */
 const THREAD_CHANNELS = new Set([10, 11, 12]); // announcement, public and private thread
@@ -187,38 +193,14 @@ export const channelInfo = async (
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw inboundProtocolError("Discord inbound channel response is invalid");
   }
-  const { guild_id, parent_id, type } = value as Record<string, unknown>;
+  const { guild_id, parent_id, type, owner_id } = value as Record<string, unknown>;
   const thread = typeof type === "number" && THREAD_CHANNELS.has(type);
   return {
     ...(isDiscordSnowflake(guild_id) ? { guild: guild_id } : {}),
     ...(typeof type === "number" ? { type } : {}),
     ...(thread && isDiscordSnowflake(parent_id) ? { parent: parent_id } : {}),
+    ...(thread && isDiscordSnowflake(owner_id) ? { owner: owner_id } : {}),
   };
-};
-
-/** Every active thread in one guild with its parent channel; `undefined` when that guild is inaccessible. */
-export const activeThreads = async (
-  request: Request,
-  guildId: string,
-): Promise<{ id: string; parent: string }[] | undefined> => {
-  let value: unknown;
-  try {
-    value = await request<unknown>(`/guilds/${guildId}/threads/active`);
-  } catch (error) {
-    if (error instanceof MessengerError && (error.status === 403 || error.status === 404)) return undefined;
-    throw error;
-  }
-  const threads: unknown = (value as { threads?: unknown } | null)?.threads;
-  if (!Array.isArray(threads)) throw inboundProtocolError("Discord inbound thread response is invalid");
-  const found: { id: string; parent: string }[] = [];
-  for (const thread of threads) {
-    if (!thread || typeof thread !== "object" || Array.isArray(thread)) {
-      throw inboundProtocolError("Discord inbound thread response is invalid");
-    }
-    const { id, parent_id } = thread as Record<string, unknown>;
-    if (isDiscordSnowflake(id) && isDiscordSnowflake(parent_id)) found.push({ id, parent: parent_id });
-  }
-  return found;
 };
 
 /** Every text channel and active thread in the bot's guilds, plus the owner's DM with the bot. */

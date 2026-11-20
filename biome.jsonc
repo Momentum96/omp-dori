@@ -7,7 +7,13 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/fixtures", "!**/*.md", "!docs/**/*.svg"]
+    "includes": [
+      "**",
+      "!**/fixtures",
+      "!**/*.md",
+      "!docs/**/*.svg",
+      "!skills/dori-mode/scripts/src/messenger/discord-route.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

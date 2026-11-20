@@ -85,6 +85,20 @@ test("explicit --loop 0 performs one poll and exits with its cursor persisted", 
   ]);
 });
 
+test("DORI_BOT=omp routes by the topology: unaddressed owner messages are read past without output", async () => {
+  const topology = withState();
+  try {
+    const path = join(topology.dir, "topology.json");
+    const bots = { omo: { userId: "98", roleId: null }, omp: { userId: "99", roleId: null } };
+    writeFileSync(path, JSON.stringify({ ownerId: "10", topicChannels: { work: "20" }, bots }));
+    const { out, err, code, cursor } = await inboundCli(["--loop", "0"], { DORI_BOT: "omp", DORI_TOPOLOGY: path });
+    expect({ code, err, cursor }).toEqual({ code: 0, err: "", cursor: "102" });
+    expect(out.trim().split("\n")).toEqual(["INBOUND_READY discord owner=10 channel=20 bot=99 routing=omp"]);
+  } finally {
+    topology.done();
+  }
+});
+
 test("invalid owner, authentication, permission and content-intent setup never announce readiness", async () => {
   for (const environment of [
     { DORI_DISCORD_OWNER_ID: "1e3" },
@@ -93,6 +107,8 @@ test("invalid owner, authentication, permission and content-intent setup never a
     { DORI_TEST_DISCORD_CASE: "intent" },
     { DORI_DISCORD_SCOPE: "everything" },
     { DORI_DISCORD_CHANNEL_IDS: "20,abc" },
+    { DORI_BOT: "omo" },
+    { DORI_BOT: "omp", DORI_TOPOLOGY: "/nonexistent/topology.json" },
   ] as const) {
     const { out, err, code, cursor } = await inboundCli(["--loop", "0"], environment);
     expect({ code, out, cursor }).toEqual({ code: 1, out: "", cursor: undefined });

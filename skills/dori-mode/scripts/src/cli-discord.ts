@@ -1,10 +1,15 @@
 /** The Discord Gateway plumbing shared by `dori presence discord` and `dori inbound discord --gateway`. */
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { die, every } from "./cli-context.ts";
 import { Discord } from "./messenger/discord.ts";
 import type { GatewayClock, GatewaySocket } from "./messenger/discord-gateway.ts";
 import { discordInbound, formatDiscordInbound } from "./messenger/discord-inbound.ts";
 import { discordInboundLive } from "./messenger/discord-inbound-live.ts";
+import type { DiscordRouting } from "./messenger/discord-inbound-routing.ts";
 import { discordInboundEnv, fileDiscordInboundStore } from "./messenger/discord-inbound-state.ts";
+import { routeConfigFromTopology } from "./messenger/discord-route.ts";
 import { fetchHttp } from "./messenger/http.ts";
 import { realClock } from "./run.ts";
 
@@ -46,6 +51,19 @@ const idList = (value: string | undefined): string[] =>
     .map((id) => id.trim())
     .filter((id) => id !== "");
 
+/** DORI_BOT=omp turns on mention routing under the topology at DORI_TOPOLOGY (default ~/.dori/shared/node/topology.json). */
+const discordRouting = (env: NodeJS.ProcessEnv): DiscordRouting | undefined => {
+  const bot = env["DORI_BOT"]?.trim();
+  if (bot === undefined || bot === "") return undefined;
+  if (bot !== "omp") return die("DORI_BOT must be omp or unset");
+  const path = env["DORI_TOPOLOGY"]?.trim() || join(homedir(), ".dori/shared/node/topology.json");
+  try {
+    return { bot, config: routeConfigFromTopology(JSON.parse(readFileSync(path, "utf8"))), now: realClock.now };
+  } catch (error) {
+    return die(`DORI_TOPOLOGY ${path} is unusable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
 /** Channels come from DORI_DISCORD_CHANNEL_ID, DORI_DISCORD_CHANNEL_IDS (comma separated), DORI_DISCORD_SCOPE=all and threads under watched channels unless DORI_DISCORD_THREADS=off. */
 export const discordInboundCommand = async (stateDir: string, gateway: boolean, pollMinutes: number) => {
   const env = process.env;
@@ -62,15 +80,16 @@ export const discordInboundCommand = async (stateDir: string, gateway: boolean, 
   );
   if (!all && channelIds.length === 0) discordInboundEnv("DORI_DISCORD_CHANNEL_ID", env["DORI_DISCORD_CHANNEL_ID"]);
   const token = env["DORI_DISCORD_TOKEN"] || die("DORI_DISCORD_TOKEN is not set");
+  const routing = discordRouting(env);
   const intake = await discordInbound(
     new Discord(fetchHttp, realClock, token),
     (channelId) => fileDiscordInboundStore(stateDir, channelId),
-    { ownerId, channelIds: [...new Set(channelIds)], all, threads },
+    { ownerId, channelIds: [...new Set(channelIds)], all, threads, ...(routing ? { routing } : {}) },
   );
   const watching = all ? "all" : intake.channels().join(",");
   const emit = (message: Parameters<typeof formatDiscordInbound>[0]) => console.log(formatDiscordInbound(message));
   console.log(
-    `INBOUND_READY discord owner=${ownerId} channel=${watching} bot=${intake.botId}${gateway ? " mode=gateway" : ""}`,
+    `INBOUND_READY discord owner=${ownerId} channel=${watching} bot=${intake.botId}${gateway ? " mode=gateway" : ""}${routing ? ` routing=${routing.bot}` : ""}`,
   );
   if (!gateway) return await every(pollMinutes, () => intake.poll(emit));
   await untilStopped(discordInboundLive(intake, openDiscordSocket, token, discordClock, emit, (l) => console.log(l)));
