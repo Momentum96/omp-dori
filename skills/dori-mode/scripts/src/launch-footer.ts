@@ -6,9 +6,21 @@ import type { Lane } from "./registry.ts";
 // The footer names this CLI by path: a bare `dori` can resolve to the root harness, whose `report` accepts unknown
 // flags and writes no journal, so a jsonl-v1 lane would read NO-REPORT for its whole life.
 export const shellQuote = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, "'\\''")}'`);
-export const cliCommand = (path: string = fileURLToPath(new URL("./cli.ts", import.meta.url))): string =>
-  `bun ${shellQuote(path)}`;
+/** `bun <cli>`, behind `env K=V ...` when the lane's own environment points at another dori home (a node lane). */
+export const cliCommand = (
+  path: string = fileURLToPath(new URL("./cli.ts", import.meta.url)),
+  env: Readonly<Record<string, string>> = {},
+): string => {
+  const assigns = Object.entries(env).map(([k, v]) => shellQuote(`${k}=${v}`));
+  return `${assigns.length ? `env ${assigns.join(" ")} ` : ""}bun ${shellQuote(path)}`;
+};
 const CLI = cliCommand();
+
+/**
+ * Where a lane's report goes: `{ inbox: cli }` when the lead reads a lead inbox (config `leadInbox`), where `report`
+ * through that CLI alone delivers and the lane names no lead pane; else the runtime whose send command forwards it.
+ */
+export type LeadReach = { readonly inbox: string } | DoriConfig["runtime"];
 
 const FOOTER_HEADING = "## Lane footer (written by dori launch)";
 export const BRIEF_START = "<!-- dori launch: the brief starts below -->";
@@ -37,9 +49,11 @@ export const footer = (
   lane: Lane,
   leadPane: string,
   identities: DoriConfig["repoIdentities"] = {},
-  runtime?: DoriConfig["runtime"],
+  reach?: LeadReach,
 ): string => {
-  const forward = sendReport(leadPane, runtime);
+  const inbox = typeof reach === "object" ? reach.inbox : undefined;
+  const cli = inbox ?? CLI;
+  const forward = typeof reach === "object" ? undefined : sendReport(leadPane, reach);
   return [
     "",
     FOOTER_START,
@@ -47,18 +61,27 @@ export const footer = (
     `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
     `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
     "- Persist each milestone, blocker, question, halt and completion with the report command below. It appends reports.jsonl and prints the human [REPORT] line.",
-    "- Before forwarding, verify that the lead pane runs a live agent, its input is empty, and no approval or question prompt is open (references/sessions.md). A shell, unknown status or unconfirmed check holds forwarding.",
-    "- Supply kind (milestone, blocker, question, halted or done) and text (the report with evidence links) as data, such as environment variables. Never interpolate raw report text into shell source or evaluate the printed line. Record with the command below; when it includes forwarding, run that combined call only after the forwarding checks pass:",
-    "```sh",
-    `line=$(${CLI} report ${lane.key} --kind "$kind" --text "$text") && printf '%s\\n' "$line"${forward ? ` && ${forward}` : ""}`,
-    "```",
-    ...(forward
-      ? [
-          "- Confirm forwarding from the agent's status transition or session record; an exit code or echoed input alone is unconfirmed. Never resend just because no reply is visible.",
-        ]
+    ...(inbox
+      ? []
       : [
-          "- The lead pane or runtime is unavailable, so the command above only records and prints the report. Keep that line and resolve the missing destination with the lead before forwarding.",
+          "- Before forwarding, verify that the lead pane runs a live agent, its input is empty, and no approval or question prompt is open (references/sessions.md). A shell, unknown status or unconfirmed check holds forwarding.",
         ]),
+    `- Supply kind (milestone, blocker, question, halted or done) and text (the report with evidence links) as data, such as environment variables. Never interpolate raw report text into shell source or evaluate the printed line. Record with the command below${inbox ? ":" : "; when it includes forwarding, run that combined call only after the forwarding checks pass:"}`,
+    "```sh",
+    `line=$(${cli} report ${lane.key} --kind "$kind" --text "$text") && printf '%s\\n' "$line"${forward ? ` && ${forward}` : ""}`,
+    "```",
+    ...(inbox
+      ? [
+          "- `dori report` 한 번이면 리드에게 전달된다. 출력된 줄을 어디에도 보내지 말 것.",
+          `- 질문 도구(question tool)는 쓰지 말 것: 답을 기다리는 질문은 리드에게 보이지 않는다. 막히거나 소유자의 답이 필요하면 kind 를 question 또는 blocker 로 해서 위 명령으로 남긴다 (${cli} report ${lane.key} --kind question|blocker --text "...").`,
+        ]
+      : forward
+        ? [
+            "- Confirm forwarding from the agent's status transition or session record; an exit code or echoed input alone is unconfirmed. Never resend just because no reply is visible.",
+          ]
+        : [
+            "- The lead pane or runtime is unavailable, so the command above only records and prints the report. Keep that line and resolve the missing destination with the lead before forwarding.",
+          ]),
     ...(Object.keys(identities).length
       ? [
           "- Before committing, set the repository's identity below for that command only; never change the global Git identity. For a repository not listed, ask the lead for its identity before the first commit.",
@@ -68,11 +91,11 @@ export const footer = (
           ),
         ]
       : []),
-    `- Before claiming PR work done, run ${CLI} verify-pr <owner/repo> <number>. A PR with source fix commits must change a test or carry a "No test: <reason>" line in its body; a fix commit without its own test is a warning. Run the printed UI test loop at the reported head before calling those tests stable.`,
-    `- After each completed step: ${CLI} checkpoint ${lane.key} --step <unique-step> --result <result> --evidence <path-or-URL> [--remote-effect <completed-push/merge/deploy-receipt>] (one flag per receipt).`,
-    `- On resume, run ${CLI} checkpoints ${lane.key} before doing work. Never repeat a recorded remote side effect. If a crash may have happened between the remote action and checkpoint, read the live remote receipt first and use the service's idempotency key; a local journal cannot make that remote action atomic.`,
+    `- Before claiming PR work done, run ${cli} verify-pr <owner/repo> <number>. A PR with source fix commits must change a test or carry a "No test: <reason>" line in its body; a fix commit without its own test is a warning. Run the printed UI test loop at the reported head before calling those tests stable.`,
+    `- After each completed step: ${cli} checkpoint ${lane.key} --step <unique-step> --result <result> --evidence <path-or-URL> [--remote-effect <completed-push/merge/deploy-receipt>] (one flag per receipt).`,
+    `- On resume, run ${cli} checkpoints ${lane.key} before doing work. Never repeat a recorded remote side effect. If a crash may have happened between the remote action and checkpoint, read the live remote receipt first and use the service's idempotency key; a local journal cannot make that remote action atomic.`,
     `- Supervision ceilings: ${JSON.stringify(lane.budget ?? {})}. A breach marks blocked and alerts; it never kills the agent. Report a blocker and wait for the lead's decision rather than overriding the ceiling.`,
-    `- When done: ${CLI} claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>". See references/done-protocol.md.`,
+    `- When done: ${cli} claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>". See references/done-protocol.md.`,
     FOOTER_END,
     "",
   ].join("\n");
