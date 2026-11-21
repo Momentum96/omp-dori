@@ -1,7 +1,9 @@
+import { resolve } from "node:path";
+
 import { configPath, fill, isOmpCommand } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
-import { BRIEF_START, footer, originalBrief, quoteForPane } from "./launch-footer.ts";
+import { BRIEF_START, cliCommand, footer, type LeadReach, originalBrief, quoteForPane } from "./launch-footer.ts";
 import { parseRef, type SessionRef } from "../../../../src/runtime/types.ts";
 import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields, upgradeLane } from "./registry.ts";
 import { iso, runtimesOf } from "./run.ts";
@@ -26,6 +28,13 @@ export type LaunchInput = {
 };
 
 export class LaunchError extends Error {}
+
+// A lane's omp wrapper re-sources its install's env.sh, so a node home's lane would report into the install's state:
+// with a lead inbox, the footer's commands carry this config and state dir instead.
+const leadReach = (deps: FlowDeps): LeadReach =>
+  deps.config.leadInbox
+    ? { inbox: cliCommand(undefined, { DORI_CONFIG: resolve(configPath()), DORI_STATE_DIR: deps.config.stateDir }) }
+    : runtimesOf(deps).choice?.kind;
 
 // The first check is 20 s after start, then the screen and status are re-read every 10 s until `startupWaitSeconds`.
 const FIRST_CHECK_MS = 20_000;
@@ -110,7 +119,7 @@ export const prepareLaunch = async (
         (lesson) => `LESSON_OMITTED ${lesson.id} (${lesson.scope === "global" ? "global" : lesson.cwd}) ${lesson.rule}`,
       ),
     ],
-    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, runtimesOf(deps).choice?.kind)}`,
+    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, leadReach(deps))}`,
   };
 };
 

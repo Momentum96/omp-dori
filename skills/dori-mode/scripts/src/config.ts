@@ -30,6 +30,8 @@ export type DoriConfig = {
   readonly workspaces: readonly string[];
   readonly ignorePanes: readonly string[];
   readonly leadPane: string;
+  /** The lead reads a lead inbox fed by a report forwarder: a lane's `report` alone reaches it, no pane is named. */
+  readonly leadInbox?: boolean;
   readonly defaultCwd: string;
   readonly agentCommand: ArgvTemplate;
   readonly defaultModel: string;
@@ -178,6 +180,8 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
   checkRuntime(raw.runtime);
   checkSupervision(raw.supervision);
+  if (raw.leadInbox !== undefined && typeof raw.leadInbox !== "boolean")
+    throw new ConfigError("invalid leadInbox: expected true or false");
   const merged: DoriConfig = {
     ...base,
     ...raw,

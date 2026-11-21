@@ -68,6 +68,57 @@ test("the footer CLI command survives a skill path with a space or a quote", asy
   }
 });
 
+test("with leadInbox the footer names no lead pane, and its report reaches the node's journal over an env.sh environment", async () => {
+  // Given a node home whose config sets leadInbox, and a lane shell whose env.sh points at the install's own home
+  const dir = mkdtempSync(join(tmpdir(), "dori inbox footer "));
+  const priorConfig = process.env["DORI_CONFIG"];
+  try {
+    const configFile = join(dir, "config.json");
+    process.env["DORI_CONFIG"] = configFile;
+    const brief = join(dir, "brief.md");
+    writeFileSync(brief, "Perform the fixture work.");
+    const deps = depsFor(world, fakeClock(T0), state.dir);
+    const config = { ...deps.config, runtime: "hc" as const, leadPane: "t2rg", leadInbox: true };
+    writeFileSync(configFile, JSON.stringify(config));
+    const prepared = await prepareLaunch(
+      { ...deps, config },
+      { key: "inbox-lane", title: "inbox", brief, done: working.done },
+    );
+    // Then the footer never names the lead pane or a send command and says the report alone delivers
+    expect(prepared.preamble).not.toContain("t2rg");
+    expect(prepared.preamble).not.toContain("hc send");
+    expect(prepared.preamble).toContain("출력된 줄을 어디에도 보내지 말 것");
+    expect(prepared.preamble).toContain("질문 도구(question tool)는 쓰지 말 것");
+    await deps.registry.write(prepared.lane);
+    const command = prepared.preamble.split("\n").find((line) => line.startsWith("line=$("));
+    if (!command) throw new Error("launch footer has no report command");
+    // When the lane runs it with the install's DORI_CONFIG and DORI_STATE_DIR exported
+    const other = join(dir, "install-state");
+    const proc = Bun.spawn(["bash", "-c", command], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        DORI_CONFIG: join(dir, "install-config.json"),
+        DORI_STATE_DIR: other,
+        kind: "blocker",
+        text: "waiting on the owner",
+      },
+    });
+    expect((await new Response(proc.stdout).text()).trimEnd()).toBe(
+      "[REPORT] inbox-lane | blocker | waiting on the owner",
+    );
+    expect(await proc.exited).toBe(0);
+    // Then the report lands in the node's journal, not the install's
+    expect(new Reports(state.dir).read("inbox-lane")?.lastReport?.kind).toBe("blocker");
+    expect(existsSync(join(other, "lanes"))).toBe(false);
+  } finally {
+    if (priorConfig === undefined) delete process.env["DORI_CONFIG"];
+    else process.env["DORI_CONFIG"] = priorConfig;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the selected footer runtime receives one data argument and missing destinations still journal reports", async () => {
   const dir = mkdtempSync(join(tmpdir(), "dori footer send "));
   const priorConfig = process.env["DORI_CONFIG"];
