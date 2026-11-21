@@ -14,9 +14,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { RouteState } from "./discord-inbound-routing.ts";
 import { MessengerError } from "./http.ts";
 
-export type DiscordInboundStore = { load(): string | undefined; save(cursor: string): void };
+/**
+ * One channel's committed cursor, plus the mention-routing state that advances with it. `loadRoute` returns the stored
+ * routing state unparsed (the routing gate parses it); `save` without a routing state stores none.
+ */
+export type DiscordInboundStore = {
+  load(): string | undefined;
+  loadRoute(): unknown;
+  save(cursor: string, route?: RouteState): void;
+};
 
 export const isDiscordSnowflake = (value: unknown): value is string =>
   typeof value === "string" && /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n;
@@ -47,39 +56,46 @@ export const fileDiscordInboundStore = (stateDir: string, channelId: string): Di
     }
   };
   directory();
-  return {
-    load() {
-      directory();
-      let fd: number;
-      try {
-        fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-        throw new MessengerError(
-          "Discord inbound cursor is unreadable; use a private regular file owned by this user",
-          0,
-        );
-      }
-      try {
-        privateFile(fstatSync(fd));
-        const state = JSON.parse(readFileSync(fd, "utf8")) as { version?: number; channelId?: string; cursor?: string };
-        if (
-          !state ||
-          state.version !== 1 ||
-          state.channelId !== channelId ||
-          (state.cursor !== "0" && !isDiscordSnowflake(state.cursor))
-        ) {
-          throw new MessengerError("Discord inbound cursor state is invalid; repair it before restarting intake", 0);
-        }
-        return state.cursor;
-      } catch (error) {
-        if (error instanceof MessengerError) throw error;
+  const read = (): { cursor: string; route?: unknown } | undefined => {
+    directory();
+    let fd: number;
+    try {
+      fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      throw new MessengerError(
+        "Discord inbound cursor is unreadable; use a private regular file owned by this user",
+        0,
+      );
+    }
+    try {
+      privateFile(fstatSync(fd));
+      const state = JSON.parse(readFileSync(fd, "utf8")) as {
+        version?: number;
+        channelId?: string;
+        cursor?: string;
+        route?: unknown;
+      };
+      if (
+        !state ||
+        state.version !== 1 ||
+        state.channelId !== channelId ||
+        (state.cursor !== "0" && !isDiscordSnowflake(state.cursor))
+      ) {
         throw new MessengerError("Discord inbound cursor state is invalid; repair it before restarting intake", 0);
-      } finally {
-        closeSync(fd);
       }
-    },
-    save(cursor) {
+      return { cursor: state.cursor, route: state.route };
+    } catch (error) {
+      if (error instanceof MessengerError) throw error;
+      throw new MessengerError("Discord inbound cursor state is invalid; repair it before restarting intake", 0);
+    } finally {
+      closeSync(fd);
+    }
+  };
+  return {
+    load: () => read()?.cursor,
+    loadRoute: () => read()?.route,
+    save(cursor, route) {
       if (cursor !== "0" && !isDiscordSnowflake(cursor))
         throw new MessengerError("Discord inbound cursor is invalid", 0);
       directory();
@@ -95,7 +111,7 @@ export const fileDiscordInboundStore = (stateDir: string, channelId: string): Di
           0o600,
         );
         created = true;
-        writeFileSync(fd, `${JSON.stringify({ version: 1, channelId, cursor })}\n`);
+        writeFileSync(fd, `${JSON.stringify({ version: 1, channelId, cursor, ...(route ? { route } : {}) })}\n`);
         fsyncSync(fd);
         closeSync(fd);
         fd = undefined;

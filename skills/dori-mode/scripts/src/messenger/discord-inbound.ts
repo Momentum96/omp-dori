@@ -11,6 +11,7 @@ import {
   toInbound,
   unavailable,
 } from "./discord-inbound-api.ts";
+import { type DiscordRouting, discordRouting } from "./discord-inbound-routing.ts";
 import { discordInboundEnv, type DiscordInboundStore, isDiscordSnowflake } from "./discord-inbound-state.ts";
 import { discordThreads } from "./discord-inbound-threads.ts";
 import { MessengerError } from "./http.ts";
@@ -24,6 +25,8 @@ export type DiscordInboundOptions = {
   all?: boolean;
   /** Watch active threads whose parent is a watched channel; set false to watch only the configured ids. */
   threads?: boolean;
+  /** Mention routing: emit only messages that address this bot under the shared topology. Unset keeps owner-only intake. */
+  routing?: DiscordRouting;
 };
 
 /** Formats one unchanged text line followed by reply and attachment records for the existing single emit. */
@@ -31,6 +34,7 @@ export const formatDiscordInbound = (message: DiscordInbound): string => {
   const id = `discord ${message.channel} ${message.message}`;
   return [
     `INBOUND ${id} from=owner ref=${message.reference ?? "-"} ${JSON.stringify(message.text)}`,
+    ...(message.edit ? [`INBOUND_EDIT ${id} ${JSON.stringify(message.edit)}`] : []),
     ...(message.replyTo ? [`INBOUND_REPLY ${id} ${JSON.stringify(message.replyTo)}`] : []),
     ...message.attachments.map((attachment) => `INBOUND_ATTACHMENT ${id} ${JSON.stringify(attachment)}`),
   ].join("\n");
@@ -56,6 +60,13 @@ export const discordInbound = async (
   const botId = me.id;
   if (botId === ownerId)
     throw new MessengerError("DORI_DISCORD_OWNER_ID must identify the human owner, not the bot", 0);
+  const routing = opts.routing;
+  if (routing && (routing.config.bots[routing.bot].userId !== botId || routing.config.ownerId !== ownerId)) {
+    throw new MessengerError(
+      `Discord topology names another ${routing.bot} bot or owner than DORI_DISCORD_TOKEN and DORI_DISCORD_OWNER_ID`,
+      0,
+    );
+  }
   const application = await request<{ flags?: number }>("/applications/@me");
   const flags = application?.flags;
   if (typeof flags !== "number" || !Number.isSafeInteger(flags) || (flags & ((1 << 18) | (1 << 19))) === 0) {
@@ -92,6 +103,7 @@ export const discordInbound = async (
     return latest[0]?.id ?? "0";
   };
   const following = discordThreads({ request, explicit, watched, parents, attach });
+  const gate = routing ? discordRouting(routing, request) : undefined;
   const refresh = async (initial: boolean): Promise<void> => {
     for (const id of explicit) {
       if (watched.has(id)) continue;
@@ -135,7 +147,8 @@ export const discordInbound = async (
       before = oldest;
     }
     const ordered = [...pending.values()].sort((a, b) => (newer(a.id, b.id) ? 1 : newer(b.id, a.id) ? -1 : 0));
-    for (const message of ordered) deliver(message, store, emit);
+    if (gate) await gate.admit(channelId, store, ordered, emit);
+    else for (const message of ordered) deliver(message, store, emit);
   };
   await refresh(true);
   let polls = 0;
@@ -176,7 +189,23 @@ export const discordInbound = async (
         throw new MessengerError("Discord inbound cursor disappeared; restore its state before retrying", 0);
       }
       if (!newer(message.id, cursor)) return;
-      deliver(message, store, emit);
+      if (gate) await gate.admit(message.channel_id, store, [message], emit);
+      else deliver(message, store, emit);
+    },
+    /** A MESSAGE_UPDATE dispatch; only mention routing reads edits. */
+    async update(message: Message, emit: (message: DiscordInbound) => void): Promise<void> {
+      if (!gate || !message || !isDiscordSnowflake(message.id) || !isDiscordSnowflake(message.channel_id)) return;
+      const store = watched.get(message.channel_id);
+      if (store) await gate.update(message, store, emit);
+    },
+    /** Routes messages held for a burst decision once it may be final; see `wakeIn`. */
+    async settle(emit: (message: DiscordInbound) => void): Promise<void> {
+      for (const id of gate?.held() ?? []) await gate?.admit(id, watched.get(id) ?? storeFor(id), [], emit);
+    },
+    /** Milliseconds until the earliest held burst decision is final, on the routing clock; undefined when none is held. */
+    wakeIn(): number | undefined {
+      const at = gate?.wakeAt();
+      return at === undefined || !routing ? undefined : Math.max(0, at - routing.now());
     },
   };
 };

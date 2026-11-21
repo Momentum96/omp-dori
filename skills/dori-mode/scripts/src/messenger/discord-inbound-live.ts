@@ -8,6 +8,9 @@ const MESSAGE_CONTENT = 1 << 15; // Privileged: enable it for the bot in the Dev
 type Intake = {
   sync(emit: (message: DiscordInbound) => void): Promise<void>;
   accept(message: Message, emit: (message: DiscordInbound) => void): Promise<void>;
+  update(message: Message, emit: (message: DiscordInbound) => void): Promise<void>;
+  settle(emit: (message: DiscordInbound) => void): Promise<void>;
+  wakeIn(): number | undefined;
 };
 
 /**
@@ -26,6 +29,7 @@ export const discordInboundLive = (
   let queue = Promise.resolve();
   let dead = false;
   let timer: unknown;
+  let alarm: unknown;
   let wake: (() => void) | undefined;
   const pause = (ms: number) =>
     new Promise<void>((resolve) => {
@@ -46,10 +50,10 @@ export const discordInboundLive = (
     }
   };
   /** A thread's parent lookup can be rate limited; retrying the same dispatch keeps the message in order. */
-  const deliver = async (message: Message) => {
+  const retrying = async (job: () => Promise<void>) => {
     for (let delay = 2_000; ; delay = Math.min(delay * 2, 30_000)) {
       try {
-        return await intake.accept(message, emit);
+        return await job();
       } catch (error) {
         if (dead || !isTransient(error)) throw error;
         report(`DISCORD_GATEWAY_ACCEPT_RETRY discord retry_in=${delay / 1000}s`);
@@ -58,11 +62,23 @@ export const discordInboundLive = (
       }
     }
   };
+  /** Re-arms one timer for the earliest held burst decision; settling runs on the queue like any dispatch. */
+  const arm = () => {
+    if (alarm !== undefined) clock.clearTimeout(alarm);
+    alarm = undefined;
+    const wait = intake.wakeIn();
+    if (wait === undefined || dead) return;
+    alarm = clock.setTimeout(() => {
+      alarm = undefined;
+      enqueue(() => retrying(() => intake.settle(emit)));
+    }, wait);
+  };
   const enqueue = (job: () => void | Promise<void>) => {
     queue = queue.then(async () => {
       if (dead) return;
       try {
         await job();
+        arm();
       } catch (error) {
         dead = true; // An undelivered message must not be skipped past, so stop instead of continuing.
         gateway.close();
@@ -76,12 +92,14 @@ export const discordInboundLive = (
     online: false,
     onReady: () => enqueue(backfill),
     onDispatch: (type, data) => {
-      if (type === "MESSAGE_CREATE") enqueue(() => deliver(data as Message));
+      if (type === "MESSAGE_CREATE") enqueue(() => retrying(() => intake.accept(data as Message, emit)));
+      else if (type === "MESSAGE_UPDATE") enqueue(() => retrying(() => intake.update(data as Message, emit)));
     },
   });
   const close = () => {
     dead = true;
     if (timer !== undefined) clock.clearTimeout(timer);
+    if (alarm !== undefined) clock.clearTimeout(alarm);
     wake?.();
     gateway.close();
   };

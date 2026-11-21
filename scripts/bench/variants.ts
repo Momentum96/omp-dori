@@ -21,7 +21,7 @@ export type Variant = {
 
 const memoryStore = (): DiscordInboundStore => {
   let cursor: string | undefined;
-  return { load: () => cursor, save: (value) => (cursor = value) };
+  return { load: () => cursor, loadRoute: () => undefined, save: (value) => (cursor = value) };
 };
 const discordFor = (fake: Fake) => new Discord(fetchHttp, realClock, "bench-token", fake.restBase);
 const record = (emit: (e: Emit) => void) => (message: { channel: string; message: string }) =>

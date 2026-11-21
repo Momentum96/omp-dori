@@ -1,5 +1,6 @@
-import { activeThreads, channelInfo, newer, type Request, unavailable } from "./discord-inbound-api.ts";
-import type { DiscordInboundStore } from "./discord-inbound-state.ts";
+import { channelInfo, inboundProtocolError, newer, type Request, unavailable } from "./discord-inbound-api.ts";
+import { type DiscordInboundStore, isDiscordSnowflake } from "./discord-inbound-state.ts";
+import { MessengerError } from "./http.ts";
 
 /** Everything thread following shares with the channel intake that owns it. */
 export type ThreadWatch = {
@@ -11,6 +12,31 @@ export type ThreadWatch = {
   parents: Map<string, string>;
   /** Watches one channel; `seed` sets a cold-start cursor instead of the channel's latest message. */
   attach: (channelId: string, seed?: string) => Promise<string | undefined>;
+};
+
+/** Every active thread in one guild with its parent channel; `undefined` when that guild is inaccessible. */
+const activeThreads = async (
+  request: Request,
+  guildId: string,
+): Promise<{ id: string; parent: string }[] | undefined> => {
+  let value: unknown;
+  try {
+    value = await request<unknown>(`/guilds/${guildId}/threads/active`);
+  } catch (error) {
+    if (error instanceof MessengerError && (error.status === 403 || error.status === 404)) return undefined;
+    throw error;
+  }
+  const threads: unknown = (value as { threads?: unknown } | null)?.threads;
+  if (!Array.isArray(threads)) throw inboundProtocolError("Discord inbound thread response is invalid");
+  const found: { id: string; parent: string }[] = [];
+  for (const thread of threads) {
+    if (!thread || typeof thread !== "object" || Array.isArray(thread)) {
+      throw inboundProtocolError("Discord inbound thread response is invalid");
+    }
+    const { id, parent_id } = thread as Record<string, unknown>;
+    if (isDiscordSnowflake(id) && isDiscordSnowflake(parent_id)) found.push({ id, parent: parent_id });
+  }
+  return found;
 };
 
 /**

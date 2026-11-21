@@ -14,6 +14,8 @@ export type TestDiscordMessage = {
   referenced_message?: { id: string; author: { id: string }; content: string } | null;
   flags?: number;
   attachments?: unknown;
+  mentions?: { id: string }[];
+  edited_timestamp?: string;
 };
 export const ownerMessage = (id: string, patch: Partial<TestDiscordMessage> = {}): TestDiscordMessage => ({
   id,
@@ -26,11 +28,14 @@ export const ownerMessage = (id: string, patch: Partial<TestDiscordMessage> = {}
 
 export const memoryDiscordCursor = (initial?: string) => {
   let cursor = initial;
+  let route: unknown;
   const saved: string[] = [];
   const store: DiscordInboundStore = {
     load: () => cursor,
-    save: (value) => {
+    loadRoute: () => route,
+    save: (value, state) => {
       cursor = value;
+      route = state;
       saved.push(value);
     },
   };
@@ -56,6 +61,10 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
     guilds: [] as { id: string; channels: string[]; threads: string[] }[],
     /** Thread id to parent channel id; a thread listed under a guild without an entry has no known parent. */
     threadParents: new Map<string, string>(),
+    /** Thread id to the user who created it (`owner_id`). */
+    threadOwners: new Map<string, string>(),
+    /** Thread id to the author of its starter message in the parent; `null` means the starter is gone (404). */
+    starters: new Map<string, string | null>(),
     /** Channel id to guild id, for channel metadata and thread-parent lookups. */
     channelGuilds: new Map<string, string>(),
     /** Channel id to category id: a text channel's `parent_id` names its category, not a thread parent. */
@@ -110,7 +119,18 @@ export const discordRestWorld = (messages: TestDiscordMessage[] = []) => {
         ...((state.threadParents.get(channel) ?? state.categoryParents.get(channel)) === undefined
           ? {}
           : { parent_id: state.threadParents.get(channel) ?? state.categoryParents.get(channel) }),
+        ...(state.threadOwners.has(channel) ? { owner_id: state.threadOwners.get(channel) } : {}),
       };
+    } else if (/^\/channels\/\d+\/messages\/\d+$/.test(path)) {
+      const [, , channel, , id] = path.split("/");
+      const starter = state.starters.get(id ?? "");
+      if (starter !== undefined && state.threadParents.get(id ?? "") === channel) {
+        if (starter === null) return { status: 404, headers: {}, body: "{}" };
+        body = { id, channel_id: channel, type: 0, author: { id: starter }, content: "" };
+      } else {
+        body = state.messages.find((message) => message.id === id && message.channel_id === channel);
+        if (body === undefined) return { status: 404, headers: {}, body: "{}" };
+      }
     } else if (/^\/channels\/\d+\/messages$/.test(path)) {
       const channel = path.split("/")[2] ?? "";
       if (state.denied.has(channel)) return { status: 403, headers: {}, body: "{}" };
