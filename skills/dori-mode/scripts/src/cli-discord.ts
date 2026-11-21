@@ -81,13 +81,28 @@ export const discordInboundCommand = async (stateDir: string, gateway: boolean, 
   if (!all && channelIds.length === 0) discordInboundEnv("DORI_DISCORD_CHANNEL_ID", env["DORI_DISCORD_CHANNEL_ID"]);
   const token = env["DORI_DISCORD_TOKEN"] || die("DORI_DISCORD_TOKEN is not set");
   const routing = discordRouting(env);
-  const intake = await discordInbound(
-    new Discord(fetchHttp, realClock, token),
-    (channelId) => fileDiscordInboundStore(stateDir, channelId),
-    { ownerId, channelIds: [...new Set(channelIds)], all, threads, ...(routing ? { routing } : {}) },
-  );
+  const discord = new Discord(fetchHttp, realClock, token);
+  const intake = await discordInbound(discord, (channelId) => fileDiscordInboundStore(stateDir, channelId), {
+    ownerId,
+    channelIds: [...new Set(channelIds)],
+    all,
+    threads,
+    ...(routing ? { routing } : {}),
+  });
   const watching = all ? "all" : intake.channels().join(",");
-  const emit = (message: Parameters<typeof formatDiscordInbound>[0]) => console.log(formatDiscordInbound(message));
+  let reactWarned = false;
+  const emit = (message: Parameters<typeof formatDiscordInbound>[0]) => {
+    console.log(formatDiscordInbound(message));
+    // Read receipt, as on Telegram: every emitted message is addressed to this bot, so it gets the eyes on intake and
+    // keeps them after the reply. A failed reaction never costs the message; it is warned once and dropped.
+    void discord.react(message.channel, message.message, "\u{1f440}").catch((e: unknown) => {
+      if (reactWarned) return;
+      reactWarned = true;
+      console.log(
+        `WARN reaction failed (${e instanceof Error ? e.message : String(e)}); still answering`.slice(0, 300),
+      );
+    });
+  };
   console.log(
     `INBOUND_READY discord owner=${ownerId} channel=${watching} bot=${intake.botId}${gateway ? " mode=gateway" : ""}${routing ? ` routing=${routing.bot}` : ""}`,
   );

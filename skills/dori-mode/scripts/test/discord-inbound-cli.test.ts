@@ -49,7 +49,7 @@ const inboundCli = async (args: string[], environment: Record<string, string> = 
   }
 };
 
-test("public Discord intake defaults to three seconds and honors --loop in minutes", async () => {
+test("public Discord intake defaults to three seconds, honors --loop in minutes and puts eyes on each emitted message", async () => {
   for (const [args, milliseconds] of [
     [[], 3_000],
     [["--loop", "0.1"], 6_000],
@@ -65,7 +65,11 @@ test("public Discord intake defaults to three seconds and honors --loop in minut
     expect(JSON.parse(receipt?.slice("DISCORD_INBOUND_QA ".length) ?? "null")).toEqual({
       delays: [milliseconds, milliseconds],
       polls: 2,
-      requests: 6,
+      requests: 8,
+      reactions: [
+        "/channels/20/messages/101/reactions/%F0%9F%91%80/@me",
+        "/channels/20/messages/103/reactions/%F0%9F%91%80/@me",
+      ],
     });
   }
 });
