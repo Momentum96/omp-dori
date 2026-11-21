@@ -4,6 +4,12 @@ import type { TestDiscordMessage } from "./discord-inbound-fakes.ts";
 let polls = 0;
 let requests = 0;
 const delays: number[] = [];
+/** Reaction routes the receiver PUT, and the waiter the QA receipt holds for until both owner messages have one. */
+const reactions: string[] = [];
+let reacted: () => void = () => {};
+const bothReacted = new Promise<void>((resolve) => {
+  reacted = () => reactions.length === 2 && resolve();
+});
 const scenario = process.env["DORI_TEST_DISCORD_CASE"];
 const message = (id: string, author: string, content: string, bot = false) => ({
   id,
@@ -23,6 +29,11 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     return new Response('{"diagnostic":"private authentication payload"}', { status: 401 });
   }
   let body: unknown;
+  if (init?.method === "PUT" && url.pathname.startsWith("/api/v10/channels/20/messages/")) {
+    reactions.push(url.pathname.slice("/api/v10".length));
+    reacted();
+    return new Response(null, { status: 204 });
+  }
   if (url.pathname === "/api/v10/users/@me") body = { id: "99", bot: true };
   else if (url.pathname === "/api/v10/applications/@me") body = { flags: scenario === "intent" ? 0 : 1 << 19 };
   else if (url.pathname === "/api/v10/channels/20")
@@ -54,7 +65,8 @@ Object.defineProperty(Bun, "sleep", {
   value: async (ms: number) => {
     delays.push(ms);
     if (delays.length === 2) {
-      console.log(`DISCORD_INBOUND_QA ${JSON.stringify({ delays, polls, requests })}`);
+      await bothReacted;
+      console.log(`DISCORD_INBOUND_QA ${JSON.stringify({ delays, polls, requests, reactions })}`);
       process.exit(0);
     }
   },
