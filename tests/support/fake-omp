@@ -1,0 +1,36 @@
+#!/bin/sh
+# A fake `omp` for tests. It answers from files in the `omp-data` directory next to it and never
+# starts a model session.
+#   omp --version            -> "omp/<omp-data/version>" (19.1.1 when the file is absent)
+#   omp usage --json         -> omp-data/usage.json; exit 1 when absent (usage unavailable)
+#   omp session lease --json -> omp-data/lease.json, else {"held":[],"unknown":[]}
+#   anything else (rpc mode) -> exit 3: this fake speaks no rpc-ui
+dir=$(cd "$(dirname "$0")" && pwd)/omp-data
+case "$1" in
+--version)
+    if [ -f "$dir/version" ]; then
+        printf 'omp/%s\n' "$(cat "$dir/version")"
+    else
+        echo 'omp/19.1.1'
+    fi
+    ;;
+usage)
+    if [ -f "$dir/usage.json" ]; then
+        cat "$dir/usage.json"
+    else
+        echo 'fake omp: usage unavailable' >&2
+        exit 1
+    fi
+    ;;
+session)
+    if [ -f "$dir/lease.json" ]; then
+        cat "$dir/lease.json"
+    else
+        echo '{"held":[],"unknown":[]}'
+    fi
+    ;;
+*)
+    echo 'fake omp: no rpc-ui in this fake' >&2
+    exit 3
+    ;;
+esac

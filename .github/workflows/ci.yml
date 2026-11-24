@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Nightly: the contract test against the latest stock OMP release (IR-38).
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: darwin-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Release build
+        run: cargo build --locked --release
+      - name: Binary size and idle memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          B="$PWD/target/release/cataly"
+          echo "release binary bytes: $(wc -c < "$B" | tr -d ' ')"
+          R=$(mktemp -d /tmp/cy.XXXXXX)
+          mkdir -p "$R/home" "$R/config/cataly" "$R/state" "$R/run"
+          : > "$R/config/cataly/config.toml"
+          chmod 600 "$R/config/cataly/config.toml"
+          export HOME="$R/home" XDG_CONFIG_HOME="$R/config" XDG_STATE_HOME="$R/state" XDG_RUNTIME_DIR="$R/run"
+          "$B" hub 2> "$R/hub.err" &
+          P=$!
+          for _ in $(seq 500); do "$B" status > /dev/null 2>&1 && break; sleep 0.02; done
+          sleep 10
+          echo "hub idle resident memory kB: $(ps -o rss= -p "$P" | tr -d ' ')"
+          kill -TERM "$P"
+          wait "$P"
+
+  nightly-omp:
+    name: contract against latest OMP (${{ matrix.target }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+          - target: darwin-arm64
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install the latest stock OMP release, checked against SHA256SUMS.txt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          asset="omp-${{ matrix.target }}"
+          dir="$RUNNER_TEMP/omp"
+          mkdir -p "$dir"
+          tag=$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)
+          echo "latest OMP release: $tag"
+          gh release download "$tag" --repo can1357/oh-my-pi --dir "$dir" \
+            --pattern "$asset" --pattern SHA256SUMS.txt
+          cd "$dir"
+          grep -E " \*?$asset\$" SHA256SUMS.txt > expected.txt
+          test -s expected.txt
+          if command -v sha256sum > /dev/null; then sha256sum -c expected.txt; else shasum -a 256 -c expected.txt; fi
+          chmod 755 "$asset"
+          "./$asset" --version
+          echo "CATALY_CONTRACT_OMP_PATH=$dir/$asset" >> "$GITHUB_ENV"
+      - name: Contract test
+        env:
+          CATALY_CONTRACT_OMP: "1"
+        run: cargo test --locked --test contract -- --nocapture

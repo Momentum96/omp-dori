@@ -13,14 +13,15 @@ When adapting:
 - If a file needs a helper that is not here, write it from the spec, or use the existing module
   that already does the job. Do not add a second implementation of anything.
 
+Adapted and deleted in milestone 1: `m1/rpc_frames.rs` and `m1/rpc_client.rs` (now `omp::rpc`, with
+one reader task and a map of pending requests), `m1/fs_helpers.rs` (`sys::fs` already covered it;
+its remove-anything helper was not taken because nothing needs it).
+
 | File | Target module | Known gaps |
 | --- | --- | --- |
-| `m1/rpc_frames.rs` | `omp::rpc` framing and v2 chunks | none |
-| `m1/rpc_client.rs` | `omp::rpc` client, negotiation | `call` reads frames in order and drops events; rebuild as one reader task with a map of pending request IDs. OMP stderr goes to a bounded log file. Exit: 15 s, then TERM, then KILL (`sys::command` rules). |
-| `m1/omp_probe.rs` | `omp` probe and launch | Clear the child environment except an allow-list; 5 s probe deadline; settings overlay; per-session directory. |
-| `m1/fs_helpers.rs` | merge into `sys::fs` | `sys::fs` already exists; take only what it lacks. The replace helper must fsync file and directory. |
-| `m1/discord_rest.rs` | `relay::discord` REST and `relay::http` policy | Needs the types in `m1/discord_types.rs`. Total deadline 10 s. TLS through rustls with the ring provider (`DESIGN.md` 10.2). |
-| `m1/discord_types.rs` | `relay::discord` types, owner-only button check | `ApprovalCard`, `Decision` and `CUSTOM_ID_PREFIX` are undefined: define them from DISC-OUT and the design's form and approval rules. |
+| `m1/omp_probe.rs` | `omp` launch and session identity (milestone 2) | Absorbed in milestone 1: the version read (now `omp::probe::version`). Left: session launch (`Executable`, model choice, working directory), `get_state` identity read and resume verification. Clear the child environment except an allow-list (`omp::child_env`); settings overlay; per-session directory. |
+| `m1/discord_rest.rs` | `relay::discord` REST (milestone 2) | Absorbed in milestone 1: the request policy (now `relay::http` on hyper), message create with parts, enforced nonce and no mentions, channel read, Discord error codes (now `relay::discord`). Left: bot identity and the message-content intent check, history read, replies and their receipts, edit, clear, interaction callbacks, the seen reaction, DM channels, the unknown-message (10008) rule. Use `relay::http` and `relay::discord::Snowflake`; do not bring back a second client. |
+| `m1/discord_types.rs` | `relay::discord` types, owner-only button check (milestone 2) | Absorbed in milestone 1: `Snowflake` (now `relay::discord::Snowflake`). Left: message origin, interactions and the owner-only decision check. `ApprovalCard`, `Decision` and `CUSTOM_ID_PREFIX` are undefined: define them from DISC-OUT and the design's form and approval rules. |
 | `m2/dialogs.rs` | `host` dialogs, answers, goal and model readback, status order | Needs a per-session store of recent output and open dialogs (ring of recent entries, map of dialogs): write it from HOST-13 in the session actor. Timestamps through jiff. Control-socket requests belong to `proto`. |
 | `m2/session_control.rs` | `host` session actor: deliver, interrupt, set model, close, receipts | Uses a request gate and a second rpc client that are not imported: use the actor's own state and `omp::rpc`. Hashes through ring. The mutex-guarded receipt list becomes actor state. |
 | `m2/turn_events.rs` | `host` delivery and answer capture | Calls private parts of the rpc client; event handling moves into the session actor instead of a blocking loop. |

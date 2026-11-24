@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 10] = [
+pub(crate) const COMMANDS: [Spec; 18] = [
     Spec {
         path: &["hub"],
         args: &[],
@@ -85,6 +85,62 @@ pub(crate) const COMMANDS: [Spec; 10] = [
         flags: &["--json"],
         values: &[],
         summary: "apply the config file; an invalid file is refused and the running config kept",
+    },
+    Spec {
+        path: &["setup"],
+        args: &[],
+        flags: &["--json", "--apply"],
+        values: &["--expect", "--omp", "--discord-token-file", "--log-level"],
+        summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview)",
+    },
+    Spec {
+        path: &["health"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "check the hub, OMP, jobs and files; exit 1 while a warning is not ignored",
+    },
+    Spec {
+        path: &["limits"],
+        args: &[],
+        flags: &["--json", "--refresh"],
+        values: &[],
+        summary: "show account usage limits from OMP (cached; --refresh reads now)",
+    },
+    Spec {
+        path: &["quota"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show the quota gate",
+    },
+    Spec {
+        path: &["quota", "lift"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "lift the quota gate until the windows that closed it reset",
+    },
+    Spec {
+        path: &["pr", "follow"],
+        args: &["pr"],
+        flags: &["--json"],
+        values: &["--job"],
+        summary: "follow a pull request (owner/repo#N or its URL)",
+    },
+    Spec {
+        path: &["pr", "unfollow"],
+        args: &["pr"],
+        flags: &["--json"],
+        values: &["--job"],
+        summary: "stop following a pull request",
+    },
+    Spec {
+        path: &["pr", "list"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "list the pull requests followed",
     },
 ];
 

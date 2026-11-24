@@ -116,6 +116,120 @@ pub(crate) fn parse_cgroup_limit(text: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
+/// v1 limits at or above this mean "no limit".
+const V1_UNLIMITED: u64 = 1 << 60;
+
+/// Headroom in per cent of `limit` (LANE req. 19): limit minus usage plus clean reclaimable page
+/// cache. Reclaimable is file cache minus shared, mapped, dirty and writeback pages, never below zero
+/// or above usage. `v2` selects the `memory.stat` field names.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn headroom_percent(limit: u64, usage: u64, stat: &str, v2: bool) -> f64 {
+    let field = |name: &str| {
+        stat.lines()
+            .find_map(|l| {
+                l.strip_prefix(name)?
+                    .strip_prefix(' ')?
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .unwrap_or(0)
+    };
+    let (file, shared, mapped) = if v2 {
+        (field("file"), field("shmem"), field("file_mapped"))
+    } else {
+        (field("cache"), field("shmem"), field("mapped_file"))
+    };
+    let (dirty, writeback) = if v2 {
+        (field("file_dirty"), field("file_writeback"))
+    } else {
+        (field("dirty"), field("writeback"))
+    };
+    let reclaimable = file
+        .saturating_sub(shared)
+        .saturating_sub(mapped)
+        .saturating_sub(dirty)
+        .saturating_sub(writeback)
+        .min(usage);
+    let free = limit
+        .saturating_sub(usage)
+        .saturating_add(reclaimable)
+        .min(limit);
+    if limit == 0 {
+        return 0.0;
+    }
+    free as f64 / limit as f64 * 100.0
+}
+
+/// A cgroup limit value; `max` and v1's huge sentinel mean no limit.
+fn limit_value(text: &str) -> Option<u64> {
+    parse_cgroup_limit(text).filter(|n| *n < V1_UNLIMITED)
+}
+
+/// Container memory headroom in per cent: the smallest over every visible cgroup level, hard and
+/// soft (high) limits alike. `Ok(None)` when no limit applies (and on macOS); an error when a path
+/// contains `..` or a control file cannot be read.
+pub(crate) fn headroom() -> Result<Option<f64>, HostError> {
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/self/cgroup")
+            .map_err(|e| HostError::Read(format!("/proc/self/cgroup: {e}")))?;
+        let (root, rel, v2) = match parse_cgroup_path(&text) {
+            Some(rel) => ("/sys/fs/cgroup".to_string(), rel.to_string(), true),
+            None => match text.lines().find_map(|l| {
+                let mut parts = l.splitn(3, ':');
+                let (_, controllers, path) = (parts.next()?, parts.next()?, parts.next()?);
+                controllers
+                    .split(',')
+                    .any(|c| c == "memory")
+                    .then(|| path.to_string())
+            }) {
+                Some(rel) => ("/sys/fs/cgroup/memory".to_string(), rel, false),
+                None => return Ok(None),
+            },
+        };
+        if rel.split('/').any(|p| p == "..") {
+            return Err(HostError::Parse("cgroup path"));
+        }
+        let root = std::path::PathBuf::from(root);
+        let (limits, usage_file): (&[&str], &str) = if v2 {
+            (&["memory.max", "memory.high"], "memory.current")
+        } else {
+            (
+                &["memory.limit_in_bytes", "memory.soft_limit_in_bytes"],
+                "memory.usage_in_bytes",
+            )
+        };
+        let read = |p: &std::path::Path| match std::fs::read_to_string(p) {
+            Ok(t) => Ok(Some(t)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(HostError::Read(format!("{}: {e}", p.display()))),
+        };
+        let mut dir = Some(root.join(rel.trim_start_matches('/')));
+        let mut lowest: Option<f64> = None;
+        while let Some(d) = dir.filter(|d| d.starts_with(&root)) {
+            for name in limits {
+                let Some(limit) = read(&d.join(name))?.as_deref().and_then(limit_value) else {
+                    continue;
+                };
+                let usage = read(&d.join(usage_file))?
+                    .and_then(|t| t.trim().parse::<u64>().ok())
+                    .ok_or(HostError::Parse("cgroup usage"))?;
+                let stat =
+                    read(&d.join("memory.stat"))?.ok_or(HostError::Parse("cgroup memory.stat"))?;
+                let share = headroom_percent(limit, usage, &stat, v2);
+                lowest = Some(lowest.map_or(share, |l: f64| l.min(share)));
+            }
+            dir = d.parent().map(std::path::Path::to_path_buf);
+        }
+        Ok(lowest)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(None)
+    }
+}
+
 /// Parses `ps -o rss=` output in KiB.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn parse_ps_rss(text: &str) -> Result<u64, HostError> {

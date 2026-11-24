@@ -137,4 +137,45 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5)).unwrap();
         handle.join().unwrap();
     }
+
+    /// Under systemd (watchdog armed) a stall only stops the pings, so systemd restarts the hub;
+    /// the detector never ends the process itself. Without a watchdog (launchd) it does, above.
+    #[test]
+    fn under_a_watchdog_a_stall_stops_the_pings_and_leaves_the_restart_to_systemd() {
+        use std::os::unix::net::UnixDatagram;
+        let dir = crate::sys::fs::tests::scratch("stall-systemd");
+        let path = dir.join("n.sock");
+        let server = UnixDatagram::bind(&path).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        let beat = Heartbeat::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // WATCHDOG_USEC 100 ms: a ping every 50 ms while the counter moves.
+        spawn_detector(
+            beat.clone(),
+            Arc::new(Notifier::new(path.to_str(), Some(100_000))),
+            Duration::from_millis(150),
+            Duration::from_millis(10),
+            move || tx.send(()).unwrap(),
+        )
+        .unwrap();
+        // Let the detector read the starting value first.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut buf = [0u8; 32];
+        for _ in 0..5 {
+            beat.beat();
+            let len = server.recv(&mut buf).unwrap();
+            assert_eq!(&buf[..len], b"WATCHDOG=1");
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        // The counter stops: once the stall limit passes, no ping arrives any more.
+        std::thread::sleep(Duration::from_millis(300));
+        while server.recv(&mut buf).is_ok() {}
+        assert!(server.recv(&mut buf).is_err(), "pings stopped");
+        assert!(
+            rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the detector leaves the restart to systemd"
+        );
+    }
 }

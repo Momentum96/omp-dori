@@ -19,8 +19,9 @@ use tokio::sync::watch;
 use crate::cli::exit;
 use crate::config::{self, Config};
 use crate::jobs::event::{Emit, EventKind, Severity};
-use crate::jobs::{Ctx, Jobs};
+use crate::jobs::{Ctx, Files, Jobs};
 use crate::log;
+use crate::omp::Omp;
 use crate::proto::{Stats, Status};
 use crate::store::Store;
 use crate::sys::command::KILL_GRACE;
@@ -47,7 +48,8 @@ pub(crate) struct Hub {
     store: Store,
     jobs: Jobs,
     config_tx: watch::Sender<Arc<Config>>,
-    config_error: Mutex<Option<String>>,
+    /// SHA-256 of the config file as last applied, so `setup` can tell whether a saved file is live.
+    config_digest: Mutex<Option<String>>,
     control_latency: Latency,
     dedupe: Dedupe,
     shutdown: watch::Receiver<bool>,
@@ -58,6 +60,11 @@ impl Hub {
     async fn status(&self) -> Result<Status, crate::store::StoreError> {
         let last_event_id = self.store.read(crate::store::Reads::last_event_id).await?;
         let now = now_ms();
+        let omp = self.jobs.ctx().omp.report().map(|r| (*r).clone());
+        let sessions = match &omp {
+            Some(r) => r.sessions().err(),
+            None => Some("OMP has not been probed yet".into()),
+        };
         Ok(Status {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol: crate::proto::VERSION,
@@ -67,8 +74,9 @@ impl Hub {
             socket: self.paths.socket.display().to_string(),
             state_dir: self.paths.state_dir.display().to_string(),
             config_file: self.paths.config_file.display().to_string(),
-            config_error: self
-                .config_error
+            config_error: self.jobs.ctx().config_error(),
+            config_digest: self
+                .config_digest
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone(),
@@ -77,6 +85,9 @@ impl Hub {
             last_event_id,
             task_restarts: self.supervisor.restarts(),
             panics: self.supervisor.panics(),
+            omp,
+            sessions_refused: sessions,
+            quota_gate: self.jobs.gate(),
         })
     }
 
@@ -93,15 +104,17 @@ impl Hub {
 
     /// Reloads the config file. An invalid file is refused and the running config stays in force.
     async fn reload(&self) -> Result<usize, String> {
+        let digest = config::file_digest(&self.paths.config_file);
         match config::load(&self.paths.config_file) {
             Ok(config) => {
                 let jobs = config.jobs.len();
                 log::set_level(config.hub.log_level);
                 self.config_tx.send_replace(Arc::new(config));
+                self.jobs.ctx().set_config_error(None);
                 *self
-                    .config_error
+                    .config_digest
                     .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = None;
+                    .unwrap_or_else(PoisonError::into_inner) = digest;
                 if let Err(e) = self.jobs.config_outcome(None).await {
                     log::warn("config event not recorded", &[("error", &e)]);
                 }
@@ -110,10 +123,7 @@ impl Hub {
             }
             Err(errors) => {
                 let text = config::describe(&errors);
-                *self
-                    .config_error
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some(text.clone());
+                self.jobs.ctx().set_config_error(Some(text.clone()));
                 if let Err(e) = self.jobs.config_outcome(Some(&text)).await {
                     log::warn("config event not recorded", &[("error", &e)]);
                 }
@@ -247,12 +257,19 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (supervisor, mut exit_rx) = Supervisor::new(Policy::HUB, shutdown_rx.clone());
     let job_count = config.jobs.len();
+    let config_digest = config::file_digest(&paths.config_file);
     let (config_tx, config_rx) = watch::channel(Arc::new(config));
+    let omp = Omp::new();
+    let files = Files {
+        dir: paths.files_dir.clone(),
+        event_log: paths.event_log(),
+        config_file: paths.config_file.clone(),
+    };
     let ctx = Ctx::new(
         store.clone(),
-        config_rx,
-        paths.files_dir.clone(),
-        paths.event_log(),
+        config_rx.clone(),
+        files,
+        Arc::clone(&omp),
         shutdown_rx.clone(),
     );
     let jobs = match Jobs::start(ctx, &supervisor).await {
@@ -269,7 +286,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         store: store.clone(),
         jobs: jobs.clone(),
         config_tx,
-        config_error: Mutex::new(None),
+        config_digest: Mutex::new(config_digest),
         control_latency: Latency::default(),
         dedupe: Dedupe::new(),
         shutdown: shutdown_rx.clone(),
@@ -281,17 +298,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             socket::serve(Arc::clone(&hub), Arc::clone(&listener))
         });
     }
-    let heartbeat = Heartbeat::default();
-    {
-        let (beat, stop) = (heartbeat.clone(), shutdown_rx.clone());
-        supervisor.spawn("heartbeat", move || beat_loop(beat.clone(), stop.clone()));
-    }
-    {
-        let (store, stop) = (store.clone(), shutdown_rx.clone());
-        supervisor.spawn("maintenance", move || {
-            maintenance(store.clone(), stop.clone())
-        });
-    }
+    let heartbeat = spawn_background(&supervisor, paths, omp, config_rx, &store, &shutdown_rx);
     let notifier = Arc::new(Notifier::from_env());
     let marker = paths.stall_marker();
     if let Err(e) = start_detector(heartbeat, Arc::clone(&notifier), marker.clone()) {
@@ -312,6 +319,37 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     jobs.drain(KILL_GRACE * 2 + Duration::from_secs(2)).await;
     let _ = std::fs::remove_file(&paths.socket);
     code
+}
+
+/// The OMP probe, the heartbeat and store maintenance; returns the heartbeat the stall detector reads.
+fn spawn_background(
+    supervisor: &Supervisor,
+    paths: &Paths,
+    omp: Arc<Omp>,
+    config: watch::Receiver<Arc<Config>>,
+    store: &Store,
+    shutdown: &watch::Receiver<bool>,
+) -> Heartbeat {
+    {
+        // The probe runs after the socket answers, off the start-up path (DESIGN 2.3).
+        let stop = shutdown.clone();
+        let stderr_log = paths.logs_dir.join("omp-probe.err");
+        supervisor.spawn("omp", move || {
+            Arc::clone(&omp).watch(config.clone(), stderr_log.clone(), stop.clone())
+        });
+    }
+    let heartbeat = Heartbeat::default();
+    {
+        let (beat, stop) = (heartbeat.clone(), shutdown.clone());
+        supervisor.spawn("heartbeat", move || beat_loop(beat.clone(), stop.clone()));
+    }
+    {
+        let (store, stop) = (store.clone(), shutdown.clone());
+        supervisor.spawn("maintenance", move || {
+            maintenance(store.clone(), stop.clone())
+        });
+    }
+    heartbeat
 }
 
 async fn announce(jobs: &Jobs, marker: &Path, job_count: usize) {

@@ -16,7 +16,7 @@ use crate::sys::now_ms;
 
 use super::cron::Cron;
 use super::event::{Emit, EventKind, Severity, build};
-use super::{Command, Ctx, JobsError, duration_ms, log_failure, run};
+use super::{Command, Ctx, JobsError, duration_ms, log_failure};
 
 /// An occurrence this late or later is skipped, never replayed.
 const LATE_MS: i64 = 60_000;
@@ -83,8 +83,8 @@ fn fresh_due(job: &Job, now: i64) -> Option<i64> {
             .and_then(|t| cron.next_after(zone, t))
             .map(Timestamp::as_millisecond),
         Trigger::Once { at } => Some(at.as_millisecond()),
-        // The first probe runs at creation.
-        Trigger::Probe { .. } => Some(now),
+        // The first probe or owner tick runs at creation.
+        Trigger::Probe { .. } | Trigger::Every { .. } => Some(now),
     }
 }
 
@@ -183,7 +183,7 @@ impl Sched {
                 .store
                 .register_job(JobRegistration {
                     name: name.clone(),
-                    kind: job.trigger.kind(),
+                    kind: job.kind(),
                     trigger: job.trigger.canonical(),
                     next_due_ms: fresh,
                     now_ms: now,
@@ -221,10 +221,10 @@ impl Sched {
                 let Some(slot) = self.slots.get(&name) else {
                     return Ok(());
                 };
-                let Trigger::Probe { every, .. } = &slot.job.trigger else {
+                let Some(every) = slot.job.trigger.every() else {
                     return Ok(());
                 };
-                let next = probe_next(scheduled_ms, finished_ms, *every);
+                let next = probe_next(scheduled_ms, finished_ms, every);
                 let patch = JobPatch {
                     next_due_ms: Some(Some(next)),
                     ..JobPatch::default()
@@ -289,14 +289,14 @@ impl Sched {
                 (None, None, vec![(1, "60 s or more late")], true)
             }
             Trigger::Once { .. } => (Some(due), None, Vec::new(), true),
-            Trigger::Probe { every, .. } if busy => (
+            Trigger::Probe { every, .. } | Trigger::Every { every } if busy => (
                 None,
                 Some(now.saturating_add(duration_ms(*every))),
                 vec![(1, "previous run unfinished")],
                 false,
             ),
-            // The next probe is scheduled when this one finishes.
-            Trigger::Probe { .. } => (Some(due), None, Vec::new(), false),
+            // The next probe or tick is scheduled when this one finishes.
+            Trigger::Probe { .. } | Trigger::Every { .. } => (Some(due), None, Vec::new(), false),
         };
         let skipped: u64 = skips.iter().map(|(n, _)| n).sum();
         if !skips.is_empty() {
@@ -319,7 +319,7 @@ impl Sched {
                 .collect();
             ctx.stream.append(events).await?;
         }
-        let probe = matches!(job.trigger, Trigger::Probe { .. });
+        let probe = job.trigger.every().is_some();
         if run_at.is_some() && (consume || probe) {
             // Nothing is written here. A one-shot is consumed in the same transaction that records its
             // run, before the child starts; a probe keeps its stored due time until it finishes, so a
@@ -357,14 +357,8 @@ fn start_run(ctx: &Arc<Ctx>, job: &Arc<Job>, scheduled_ms: i64, consume: bool) {
     let job = Arc::clone(job);
     tokio::spawn(async move {
         let dry = job.dry_run;
-        let probe = matches!(job.trigger, Trigger::Probe { .. });
-        let request = run::Request {
-            job: Arc::clone(&job),
-            scheduled_ms,
-            dry,
-            consume,
-        };
-        if let Err(e) = run::execute(&ctx, request).await {
+        let probe = job.trigger.every().is_some();
+        if let Err(e) = super::perform(&ctx, &job, scheduled_ms, dry, consume).await {
             log_failure("job run failed", &job.name, &e);
         }
         ctx.release(&job.name);

@@ -54,3 +54,14 @@ pub(crate) fn own_uid() -> u32 {
 pub(crate) fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
 }
+
+/// Lower-case hexadecimal of `bytes`.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}

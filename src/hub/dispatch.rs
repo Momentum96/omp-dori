@@ -11,7 +11,8 @@ use serde_json::Value;
 use super::Hub;
 use crate::jobs::JobsError;
 use crate::proto::{
-    self, Events, EventsParams, Incoming, JobList, JobParams, Mutation, Response, code, method,
+    self, Events, EventsParams, Incoming, JobList, JobParams, LimitAccount, LimitWindow, Limits,
+    LimitsParams, Mutation, PrList, Response, TargetParams, code, method,
 };
 use crate::sys::ErrorClass;
 
@@ -28,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 8] = [
+const METHODS: [Method; 15] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -68,6 +69,42 @@ const METHODS: [Method; 8] = [
         name: method::CONFIG_RELOAD,
         needs: Authority::Owner,
         mutating: true,
+    },
+    Method {
+        name: method::HEALTH,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::LIMITS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::QUOTA,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    // Only the owner lifts the quota gate (OJ req. 25).
+    Method {
+        name: method::QUOTA_LIFT,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::PR_FOLLOW,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::PR_UNFOLLOW,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::PR_LIST,
+        needs: Authority::Owner,
+        mutating: false,
     },
 ];
 
@@ -232,9 +269,125 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
             })?;
             ok(&proto::Reloaded { jobs })
         }
+        method::HEALTH => {
+            let checks = hub.jobs.health().await?;
+            let ignored = hub.config_tx.borrow().health.ignore.clone();
+            let warn = checks
+                .iter()
+                .any(|c| c.level == "warn" && !ignored.contains(&c.name));
+            ok(&proto::Health {
+                checks,
+                ignored,
+                warn,
+            })
+        }
+        method::LIMITS => {
+            let p: LimitsParams = params(raw)?;
+            ok(&limits(hub, p.refresh).await?)
+        }
+        method::QUOTA => ok(&hub.jobs.gate()),
+        method::QUOTA_LIFT => {
+            let _: Mutation = params(raw)?;
+            ok(&hub.jobs.lift().await?)
+        }
+        method::PR_FOLLOW | method::PR_UNFOLLOW => {
+            let p: TargetParams = params(raw)?;
+            let target = p.target.unwrap_or_default();
+            let pr = if name == method::PR_FOLLOW {
+                hub.jobs.pr_follow(&target, p.job.as_deref()).await?
+            } else {
+                hub.jobs.pr_unfollow(&target, p.job.as_deref()).await?
+            };
+            ok(&serde_json::json!({ "pr": pr }))
+        }
+        method::PR_LIST => ok(&PrList {
+            prs: hub.jobs.pr_list().await?,
+        }),
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),
         }),
     }
+}
+
+/// The account-limits view (WS req. 37-39): off unless enabled; never retries or changes anything.
+async fn limits(hub: &Hub, refresh: bool) -> Result<Limits, Failure> {
+    let settings = hub.config_tx.borrow().limits.clone();
+    if !settings.enabled {
+        return Err(Failure {
+            code: code::REFUSED,
+            message: "the account-limits view is off; set [limits] enabled = true".into(),
+        });
+    }
+    let omp = hub.jobs.ctx().omp.clone();
+    let read = omp
+        .usage
+        .read(omp.path().as_deref(), settings.cache, refresh)
+        .await;
+    let mut accounts: Vec<LimitAccount> = Vec::new();
+    let now = crate::sys::now_ms();
+    let (mut without_usage, mut disabled, mut fetched_ms) = (0, 0, None);
+    let mut stale = read.stale;
+    if let Some(snapshot) = &read.snapshot {
+        fetched_ms = Some(snapshot.fetched_ms);
+        let age = now - snapshot.fetched_ms;
+        stale |= age < 0 || age > crate::jobs::duration_ms(settings.cache);
+        without_usage = snapshot.usage.accounts_without_data;
+        disabled = snapshot.usage.disabled_credentials;
+        for l in &snapshot.usage.limits {
+            let window = LimitWindow {
+                id: l.id.clone(),
+                label: l.label.clone(),
+                used_percent: l.used_percent,
+                reset_ms: l.reset_ms,
+                headroom_percent: settings
+                    .warn_percent
+                    .zip(l.used_percent)
+                    .map(|(w, u)| f64::from(w) - u),
+            };
+            match accounts
+                .iter_mut()
+                .find(|a| a.provider == l.provider_shown() && a.account == l.account)
+            {
+                Some(a) => a.windows.push(window),
+                None => accounts.push(LimitAccount {
+                    provider: l.provider_shown().to_string(),
+                    account: l.account,
+                    windows: vec![window],
+                    notes: Vec::new(),
+                }),
+            }
+        }
+    }
+    let hour = 3_600_000;
+    for a in &mut accounts {
+        let lengths: Vec<i64> = snapshot_windows(read.snapshot.as_ref(), a);
+        if !lengths.contains(&(5 * hour)) {
+            a.notes.push("no five-hour window reported".into());
+        }
+        if !lengths.contains(&(7 * 24 * hour)) {
+            a.notes.push("no weekly window reported".into());
+        }
+    }
+    Ok(Limits {
+        accounts,
+        stale,
+        fetched_ms,
+        error: read.error,
+        warn_percent: settings.warn_percent,
+        without_usage,
+        disabled,
+    })
+}
+
+/// Window lengths of one account's limits.
+fn snapshot_windows(snapshot: Option<&crate::omp::usage::Snapshot>, a: &LimitAccount) -> Vec<i64> {
+    snapshot.map_or_else(Vec::new, |s| {
+        s.usage
+            .limits
+            .iter()
+            .filter(|l| l.provider_shown() == a.provider && l.account == a.account)
+            .filter_map(|l| l.window_ms)
+            .collect()
+    })
 }

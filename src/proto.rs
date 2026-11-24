@@ -6,6 +6,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::jobs::owner::health::Check;
+use crate::jobs::owner::quota::GateView;
+use crate::omp::probe::Report;
 use crate::store::EventRecord;
 use crate::sys::host::{Disk, Load, Memory};
 use crate::sys::latency::Summary;
@@ -26,6 +29,13 @@ pub(crate) mod method {
     pub(crate) const JOB_ENABLE: &str = "job.enable";
     pub(crate) const JOB_DISABLE: &str = "job.disable";
     pub(crate) const CONFIG_RELOAD: &str = "config.reload";
+    pub(crate) const HEALTH: &str = "health";
+    pub(crate) const LIMITS: &str = "limits";
+    pub(crate) const QUOTA: &str = "quota";
+    pub(crate) const QUOTA_LIFT: &str = "quota.lift";
+    pub(crate) const PR_FOLLOW: &str = "pr.follow";
+    pub(crate) const PR_UNFOLLOW: &str = "pr.unfollow";
+    pub(crate) const PR_LIST: &str = "pr.list";
 }
 
 /// Error codes besides the decision classes.
@@ -168,6 +178,16 @@ pub(crate) struct Status {
     /// Panics caught in supervised tasks since start.
     #[serde(default)]
     pub(crate) panics: u64,
+    /// SHA-256 of the config file as last applied.
+    #[serde(default)]
+    pub(crate) config_digest: Option<String>,
+    /// The last OMP probe (HOST-35, PATCH-13).
+    #[serde(default)]
+    pub(crate) omp: Option<Report>,
+    /// Why no session may start with this OMP, if none may (PATCH-09).
+    #[serde(default)]
+    pub(crate) sessions_refused: Option<String>,
+    pub(crate) quota_gate: GateView,
 }
 
 /// `stats` reply.
@@ -307,6 +327,11 @@ pub(crate) struct JobView {
     pub(crate) next_due_ms: Option<i64>,
     pub(crate) skipped: i64,
     pub(crate) error_streak: i64,
+    /// Owner kinds: the last good tick and the current failure reason.
+    #[serde(default)]
+    pub(crate) last_good_ms: Option<i64>,
+    #[serde(default)]
+    pub(crate) last_error: Option<String>,
     pub(crate) destinations: Vec<String>,
     pub(crate) last_run: Option<RunView>,
 }
@@ -336,6 +361,87 @@ pub(crate) struct JobList {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Reloaded {
     pub(crate) jobs: usize,
+}
+
+/// `health` reply: every check, which ones the config ignores, and whether a WARN remains.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Health {
+    pub(crate) checks: Vec<Check>,
+    pub(crate) ignored: Vec<String>,
+    pub(crate) warn: bool,
+}
+
+/// `pr.*` parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct TargetParams {
+    /// A PR reference: `owner/repo#N` or its URL.
+    #[serde(default)]
+    pub(crate) target: Option<String>,
+    /// The `pr` job to use when several exist.
+    #[serde(default)]
+    pub(crate) job: Option<String>,
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+}
+
+/// One followed PR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrView {
+    pub(crate) pr: String,
+    pub(crate) job: String,
+    pub(crate) since_ms: i64,
+    pub(crate) state: String,
+    #[serde(default)]
+    pub(crate) error: Option<String>,
+}
+
+/// `pr.list` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PrList {
+    pub(crate) prs: Vec<PrView>,
+}
+
+/// `limits` parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct LimitsParams {
+    /// Bypass the cache.
+    #[serde(default)]
+    pub(crate) refresh: bool,
+}
+
+/// `limits` reply: the account-limits view (WS req. 37-38).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Limits {
+    pub(crate) accounts: Vec<LimitAccount>,
+    /// The answer is older than the cache period, dated in the future, or the fetch failed.
+    pub(crate) stale: bool,
+    pub(crate) fetched_ms: Option<i64>,
+    pub(crate) error: Option<String>,
+    pub(crate) warn_percent: Option<u8>,
+    /// Accounts OMP lists without usage data, and disabled credentials.
+    pub(crate) without_usage: usize,
+    pub(crate) disabled: usize,
+}
+
+/// One account in the limits view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LimitAccount {
+    pub(crate) provider: String,
+    pub(crate) account: usize,
+    pub(crate) windows: Vec<LimitWindow>,
+    /// For example "no five-hour window reported".
+    pub(crate) notes: Vec<String>,
+}
+
+/// One window of one account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LimitWindow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) used_percent: Option<f64>,
+    pub(crate) reset_ms: Option<i64>,
+    /// Headroom to the configured warning percentage, when set.
+    pub(crate) headroom_percent: Option<f64>,
 }
 
 #[cfg(test)]

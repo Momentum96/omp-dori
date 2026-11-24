@@ -1,10 +1,11 @@
 //! The job engine (DESIGN 6): one scheduler task with a min-heap of due times, the typed event stream
-//! with durable append, routing to destinations, transition memory, and the built-in kinds for timed
-//! jobs (`cron`, `once`) and condition jobs (`probe`).
+//! with durable append, routing to destinations, transition memory, the built-in kinds for timed
+//! jobs (`cron`, `once`) and condition jobs (`probe`), and the owner job kinds (`owner`).
 
 pub(crate) mod cron;
 pub(crate) mod event;
 pub(crate) mod memory;
+pub(crate) mod owner;
 mod route;
 mod run;
 mod schedule;
@@ -18,14 +19,17 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, mpsc, watch};
 
-use crate::config::{Config, Trigger};
+use crate::config::{Config, Job, Owner, Trigger, Work};
 use crate::hub::supervisor::Supervisor;
 use crate::log;
+use crate::omp::Omp;
 use crate::proto::{JobView, RunView};
-use crate::store::{Apply, EventRecord, JobPatch, Store, StoreError};
+use crate::relay::discord::Rest;
+use crate::store::{Apply, EventRecord, JobPatch, MemoryWrite, Store, StoreError};
 use crate::sys::{ErrorClass, now_ms};
 use event::{Emit, EventKind, Severity};
 use memory::Memory;
+use owner::quota::{Gate, GateView};
 pub(crate) use stream::Stream;
 
 /// Job commands running at once across the hub (OJ req. 9).
@@ -96,7 +100,15 @@ pub(crate) struct Ctx {
     pub(crate) config: watch::Receiver<Arc<Config>>,
     pub(crate) files_dir: PathBuf,
     pub(crate) event_log: PathBuf,
+    /// The config file; its directory holds `secrets/`.
+    pub(crate) config_file: PathBuf,
+    pub(crate) omp: Arc<Omp>,
+    /// The quota gate (OJ-08).
+    pub(crate) gate: Gate,
     pub(crate) shutdown: watch::Receiver<bool>,
+    config_error: Mutex<Option<String>>,
+    /// The Discord client, rebuilt when the token or settings change.
+    discord: Mutex<Option<(String, Arc<Rest>)>>,
     command_slots: Semaphore,
     destination_slots: Arc<Semaphore>,
     running: Mutex<HashSet<String>>,
@@ -105,12 +117,19 @@ pub(crate) struct Ctx {
     route_wake: Arc<Notify>,
 }
 
+/// Where the engine keeps and finds its files.
+pub(crate) struct Files {
+    pub(crate) dir: PathBuf,
+    pub(crate) event_log: PathBuf,
+    pub(crate) config_file: PathBuf,
+}
+
 impl Ctx {
     pub(crate) fn new(
         store: Store,
         config: watch::Receiver<Arc<Config>>,
-        files_dir: PathBuf,
-        event_log: PathBuf,
+        files: Files,
+        omp: Arc<Omp>,
         shutdown: watch::Receiver<bool>,
     ) -> Arc<Self> {
         let route_wake = Arc::new(Notify::new());
@@ -119,9 +138,14 @@ impl Ctx {
             stream: Stream::new(store.clone(), Arc::clone(&route_wake)),
             store,
             config,
-            files_dir,
-            event_log,
+            files_dir: files.dir,
+            event_log: files.event_log,
+            config_file: files.config_file,
+            omp,
+            gate: Gate::default(),
             shutdown,
+            config_error: Mutex::new(None),
+            discord: Mutex::new(None),
             command_slots: Semaphore::new(COMMAND_SLOTS),
             destination_slots: Arc::new(Semaphore::new(DESTINATION_SLOTS)),
             running: Mutex::new(HashSet::new()),
@@ -133,6 +157,52 @@ impl Ctx {
 
     fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config.borrow())
+    }
+
+    /// Why the config file on disk is not applied, if it is not.
+    pub(crate) fn config_error(&self) -> Option<String> {
+        self.config_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_config_error(&self, error: Option<String>) {
+        *self
+            .config_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = error;
+    }
+
+    /// The Discord client for the current settings and token; rebuilt when either changes.
+    pub(crate) fn discord(&self, config: &Config) -> Result<Arc<Rest>, String> {
+        let path = owner::health::token_path(config, &self.config_file);
+        let token = match crate::sys::fs::read_private(&path, 4096) {
+            Ok(Some(bytes)) => String::from_utf8(bytes)
+                .map_err(|_| "the Discord token file is not text".to_string())?
+                .trim()
+                .to_string(),
+            Ok(None) => return Err(format!("no Discord token file at {}", path.display())),
+            Err(e) => return Err(format!("Discord token file: {e}")),
+        };
+        if token.is_empty() {
+            return Err("the Discord token file is empty".into());
+        }
+        let base = config.discord.api_base.clone().map_or_else(
+            || crate::relay::http::Base::parse(crate::relay::discord::API),
+            Ok,
+        )?;
+        let digest = ring::digest::digest(&ring::digest::SHA256, token.as_bytes());
+        let key = format!("{base:?}{:?}{:?}", config.discord.guild, digest.as_ref());
+        let mut cached = self.discord.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((k, rest)) = cached.as_ref()
+            && *k == key
+        {
+            return Ok(Arc::clone(rest));
+        }
+        let rest = Arc::new(Rest::new(base, &token, config.discord.guild)?);
+        *cached = Some((key, Arc::clone(&rest)));
+        Ok(rest)
     }
 
     /// Marks a job as running; `false` when a run of it is already in progress (runs never overlap).
@@ -165,6 +235,32 @@ impl Ctx {
     }
 }
 
+/// Runs one occurrence of a job: its command, or one tick of its owner kind.
+pub(crate) async fn perform(
+    ctx: &Ctx,
+    job: &Arc<Job>,
+    scheduled_ms: i64,
+    dry: bool,
+    consume: bool,
+) -> Result<Vec<EventRecord>, JobsError> {
+    match &job.work {
+        Work::Command { .. } => {
+            let request = run::Request {
+                job: Arc::clone(job),
+                scheduled_ms,
+                dry,
+                consume,
+            };
+            run::execute(ctx, request).await
+        }
+        Work::Owner(kind) => owner::tick(ctx, job, kind, dry).await,
+    }
+}
+
+/// Memory job and subject of the owner's quota-gate lifts.
+const HUB: &str = "hub";
+const LIFT: &str = "quota.lift";
+
 /// The engine as the hub sees it.
 #[derive(Clone)]
 pub(crate) struct Jobs {
@@ -172,15 +268,20 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
-    /// Recovers runs and deliveries left by the previous hub, then starts the scheduler and the router
-    /// under the supervisor.
+    /// Recovers runs and deliveries left by the previous hub, restores the quota gate, then starts
+    /// the scheduler and the router under the supervisor.
     pub(crate) async fn start(ctx: Arc<Ctx>, supervisor: &Supervisor) -> Result<Self, JobsError> {
         run::recover(&ctx).await?;
+        restore_gate(&ctx).await?;
         let sched = Arc::clone(&ctx);
         supervisor.spawn("scheduler", move || schedule::scheduler(Arc::clone(&sched)));
         let router = Arc::clone(&ctx);
         supervisor.spawn("router", move || route::router(Arc::clone(&router)));
         Ok(Self { ctx })
+    }
+
+    pub(crate) fn ctx(&self) -> &Arc<Ctx> {
+        &self.ctx
     }
 
     pub(crate) fn stream(&self) -> &Stream {
@@ -203,21 +304,28 @@ impl Jobs {
     pub(crate) async fn list(&self) -> Result<Vec<JobView>, JobsError> {
         let config = self.ctx.config();
         let names: Vec<String> = config.jobs.keys().cloned().collect();
-        let (rows, runs, streaks) = self
+        let (rows, runs, ticks) = self
             .ctx
             .store
             .read(move |r| {
-                let mut streaks = HashMap::new();
+                let mut ticks = HashMap::new();
                 for name in &names {
-                    let errors = r
-                        .memory(name, false)?
-                        .into_iter()
-                        .find(|(_, c, _)| c == "errors")
-                        .and_then(|(_, _, v)| v.parse::<i64>().ok())
+                    let memory = r.memory(name, false)?;
+                    let get = |subject: &str, condition: &str| {
+                        memory
+                            .iter()
+                            .find(|(s, c, _)| s == subject && c == condition)
+                            .map(|(_, _, v)| v.clone())
+                    };
+                    let errors = get(name, "errors")
+                        .or_else(|| get(owner::TICK, "failures"))
+                        .and_then(|v| v.parse::<i64>().ok())
                         .unwrap_or(0);
-                    streaks.insert(name.clone(), errors);
+                    let last_good =
+                        get(owner::TICK, "last_good").and_then(|v| v.parse::<i64>().ok());
+                    ticks.insert(name.clone(), (errors, last_good, get(owner::TICK, "error")));
                 }
-                Ok((r.jobs()?, r.last_runs()?, streaks))
+                Ok((r.jobs()?, r.last_runs()?, ticks))
             })
             .await?;
         let mut out = Vec::with_capacity(config.jobs.len());
@@ -233,7 +341,7 @@ impl Jobs {
             };
             out.push(JobView {
                 name: name.clone(),
-                kind: job.trigger.kind().to_string(),
+                kind: job.kind().to_string(),
                 trigger: job.trigger.canonical(),
                 enabled: job.enabled,
                 dry_run: job.dry_run,
@@ -243,7 +351,9 @@ impl Jobs {
                 needs_ack: row.is_some_and(|r| r.needs_ack),
                 next_due_ms: row.and_then(|r| r.next_due_ms).filter(|_| job.enabled),
                 skipped: row.map_or(0, |r| r.skipped),
-                error_streak: streaks.get(name).copied().unwrap_or(0),
+                error_streak: ticks.get(name).map_or(0, |t| t.0),
+                last_good_ms: ticks.get(name).and_then(|t| t.1),
+                last_error: ticks.get(name).and_then(|t| t.2.clone()),
                 destinations: job.destinations.clone(),
                 last_run: runs.iter().find(|r| &r.job == name).map(|r| RunView {
                     id: r.id,
@@ -276,16 +386,7 @@ impl Jobs {
         if !self.ctx.claim(name) {
             return Err(JobsError::Busy(name.into()));
         }
-        let result = run::execute(
-            &self.ctx,
-            run::Request {
-                job,
-                scheduled_ms: now_ms(),
-                dry: true,
-                consume: false,
-            },
-        )
-        .await;
+        let result = perform(&self.ctx, &job, now_ms(), true, false).await;
         self.ctx.release(name);
         result
     }
@@ -345,7 +446,9 @@ impl Jobs {
                 .and_then(|t| cron.next_after(zone, t))
                 .map(jiff::Timestamp::as_millisecond),
             Trigger::Once { at } => Some(at.as_millisecond()),
-            Trigger::Probe { every, .. } => Some(now.saturating_add(duration_ms(*every))),
+            Trigger::Probe { every, .. } | Trigger::Every { every } => {
+                Some(now.saturating_add(duration_ms(*every)))
+            }
         };
         let patch = JobPatch {
             held: Some(false),
@@ -401,6 +504,170 @@ impl Jobs {
         self.ctx.stream.append(vec![event]).await?;
         Ok(())
     }
+
+    /// The quota gate now.
+    pub(crate) fn gate(&self) -> GateView {
+        self.ctx.gate.view(now_ms())
+    }
+
+    /// The owner lifts the quota gate until the current windows reset (OJ req. 25); the lift
+    /// survives a restart.
+    pub(crate) async fn lift(&self) -> Result<GateView, JobsError> {
+        let view = self.ctx.gate.lift(now_ms());
+        let value = self.ctx.gate.lifted_until().map(|until| until.to_string());
+        self.write_memory(HUB, LIFT, "until", value).await?;
+        Ok(view)
+    }
+
+    async fn write_memory(
+        &self,
+        job: &str,
+        subject: &str,
+        condition: &str,
+        value: Option<String>,
+    ) -> Result<(), JobsError> {
+        let write = MemoryWrite {
+            job: job.into(),
+            subject: subject.into(),
+            condition: condition.into(),
+            dry: false,
+            value,
+        };
+        self.ctx
+            .store
+            .apply(Apply {
+                memory: vec![write],
+                ..Apply::default()
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// The `pr` job that follows PRs named by the owner: the one given, else the only one.
+    fn pr_job(&self, name: Option<&str>) -> Result<String, JobsError> {
+        let config = self.ctx.config();
+        let pr_jobs: Vec<&String> = config
+            .jobs
+            .iter()
+            .filter(|(_, j)| matches!(j.work, Work::Owner(Owner::Pr(_))))
+            .map(|(n, _)| n)
+            .collect();
+        match (name, pr_jobs.as_slice()) {
+            (Some(n), _) if pr_jobs.iter().any(|p| *p == n) => Ok(n.to_string()),
+            (Some(n), _) => Err(JobsError::Refused(format!("'{n}' is not a job of kind pr"))),
+            (None, [one]) => Ok((*one).clone()),
+            (None, []) => Err(JobsError::Refused(
+                "no job of kind pr is configured; add one to follow pull requests".into(),
+            )),
+            (None, _) => Err(JobsError::Refused(
+                "several pr jobs exist; name one with --job".into(),
+            )),
+        }
+    }
+
+    /// Follows a PR (WS req. 40): following again keeps the original start.
+    pub(crate) async fn pr_follow(
+        &self,
+        reference: &str,
+        job: Option<&str>,
+    ) -> Result<String, JobsError> {
+        let pr = owner::pr::parse_ref(reference).ok_or_else(|| {
+            JobsError::Refused(format!(
+                "'{reference}' is neither owner/repo#N nor a PR URL"
+            ))
+        })?;
+        let job = self.pr_job(job)?;
+        let (j, p) = (job.clone(), pr.clone());
+        let known = self
+            .ctx
+            .store
+            .read(move |r| r.memory(&j, false))
+            .await?
+            .into_iter()
+            .any(|(s, c, _)| s == p && c == owner::pr::FOLLOW);
+        if !known {
+            self.write_memory(&job, &pr, owner::pr::FOLLOW, Some(now_ms().to_string()))
+                .await?;
+        }
+        Ok(pr)
+    }
+
+    /// Stops following a PR; a later follow starts afresh.
+    pub(crate) async fn pr_unfollow(
+        &self,
+        reference: &str,
+        job: Option<&str>,
+    ) -> Result<String, JobsError> {
+        let pr = owner::pr::parse_ref(reference).ok_or_else(|| {
+            JobsError::Refused(format!(
+                "'{reference}' is neither owner/repo#N nor a PR URL"
+            ))
+        })?;
+        let job = self.pr_job(job)?;
+        self.write_memory(&job, &pr, owner::pr::FOLLOW, None)
+            .await?;
+        self.write_memory(&job, &pr, "cursor", None).await?;
+        Ok(pr)
+    }
+
+    /// Every followed PR of every `pr` and `github` job.
+    pub(crate) async fn pr_list(&self) -> Result<Vec<crate::proto::PrView>, JobsError> {
+        let config = self.ctx.config();
+        let mut out = Vec::new();
+        for (name, job) in &config.jobs {
+            if !matches!(job.work, Work::Owner(Owner::Pr(_) | Owner::Github(_))) {
+                continue;
+            }
+            let key = name.clone();
+            let rows = self.ctx.store.read(move |r| r.memory(&key, false)).await?;
+            let memory = Memory::new(name, false, rows);
+            for (pr, since) in memory.with_condition(owner::pr::FOLLOW) {
+                let state = memory
+                    .get(&pr, "cursor")
+                    .and_then(|c| serde_json::from_str::<owner::pr::Cursor>(c).ok())
+                    .map_or_else(|| "not read yet".to_string(), |c| c.state);
+                out.push(crate::proto::PrView {
+                    pr: pr.clone(),
+                    job: name.clone(),
+                    since_ms: since.parse().unwrap_or(0),
+                    state,
+                    error: memory.get(&pr, "error").map(str::to_string),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The health report (WS-34).
+    pub(crate) async fn health(&self) -> Result<Vec<owner::health::Check>, JobsError> {
+        owner::health::checks(&self.ctx).await
+    }
+}
+
+/// Rebuilds the quota gate from each quota job's stored causes and the owner's stored lift.
+async fn restore_gate(ctx: &Ctx) -> Result<(), JobsError> {
+    let config = ctx.config();
+    for (name, job) in &config.jobs {
+        if !matches!(job.work, Work::Owner(Owner::Quota(_))) {
+            continue;
+        }
+        let key = name.clone();
+        let rows = ctx.store.read(move |r| r.memory(&key, false)).await?;
+        let memory = Memory::new(name, false, rows);
+        ctx.gate.set(
+            name,
+            owner::quota::stored_causes(memory.get("gate", "hold")),
+        );
+    }
+    let rows = ctx.store.read(|r| r.memory(HUB, false)).await?;
+    let memory = Memory::new(HUB, false, rows);
+    if let Some(until) = memory
+        .get(LIFT, "until")
+        .and_then(|v| v.parse::<i64>().ok())
+    {
+        ctx.gate.restore_lift(Some(until));
+    }
+    Ok(())
 }
 
 pub(crate) fn duration_ms(d: Duration) -> i64 {
@@ -454,7 +721,12 @@ pub(crate) mod tests {
         let (stop_tx, stop_rx) = watch::channel(false);
         let files = dir.join("files");
         crate::sys::fs::ensure_private_dir(&files).unwrap();
-        let ctx = Ctx::new(store, config_rx, files, dir.join("events.jsonl"), stop_rx);
+        let paths = Files {
+            dir: files,
+            event_log: dir.join("events.jsonl"),
+            config_file: dir.join("config.toml"),
+        };
+        let ctx = Ctx::new(store, config_rx, paths, Omp::new(), stop_rx);
         (ctx, stop_tx, dir)
     }
 

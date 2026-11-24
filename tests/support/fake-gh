@@ -1,0 +1,37 @@
+#!/bin/sh
+# A fake `gh` for tests. It answers from JSON files in the `gh-data` directory next to it and
+# appends each call to `gh-data/calls.log`. It never contacts GitHub.
+#   gh pr list ...        -> gh-data/pr-list.json
+#   gh api [-H h] PATH    -> gh-data/<PATH without query, leading / dropped, / as _>.json
+#                            pages after the first answer []
+dir=$(cd "$(dirname "$0")" && pwd)/gh-data
+printf '%s\n' "$*" >> "$dir/calls.log"
+case "$1" in
+pr)
+    file="$dir/pr-list.json"
+    ;;
+api)
+    for last in "$@"; do :; done
+    case "$last" in
+    *"page="*)
+        case "$last" in
+        *"&page=1" | *"?page=1") ;;
+        *) echo '[]'; exit 0 ;;
+        esac
+        ;;
+    esac
+    path=${last%%\?*}
+    path=${path#/}
+    file="$dir/$(printf '%s' "$path" | tr '/' '_').json"
+    ;;
+*)
+    echo "fake gh: unsupported command $1" >&2
+    exit 2
+    ;;
+esac
+if [ -f "$file" ]; then
+    cat "$file"
+else
+    echo "fake gh: no fixture $(basename "$file")" >&2
+    exit 1
+fi

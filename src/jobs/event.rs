@@ -41,81 +41,287 @@ pub(crate) enum EventKind {
     ProbeFired,
     ProbeError,
     ProbeRecovered,
+    /// An owner job's tick failed (one per distinct reason) or overran its deadline.
+    TickFailed,
+    TickRecovered,
+    GithubPr,
+    GithubNotification,
+    PrBaseline,
+    PrFeedback,
+    PrCheckFailed,
+    PrPushed,
+    PrMerged,
+    PrClosed,
+    PrReopened,
+    QuotaLevel,
+    QuotaRecovered,
+    QuotaHold,
+    QuotaReleased,
+    BackupRefused,
+    BackupClean,
+    BackupPushFailed,
+    HealthProblem,
+    HealthCleared,
+    ItemNew,
+    PressureAlert,
+    PressureClear,
+    PressureReady,
+    PressureBusy,
 }
 
-const ALL: [EventKind; 10] = [
-    EventKind::HubStarted,
-    EventKind::HubStalled,
-    EventKind::ConfigInvalid,
-    EventKind::ConfigValid,
-    EventKind::RunDone,
-    EventKind::RunSkipped,
-    EventKind::RunBroken,
-    EventKind::ProbeFired,
-    EventKind::ProbeError,
-    EventKind::ProbeRecovered,
+/// Kind, wire name, template fields and default wording.
+type KindRow = (
+    EventKind,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+);
+
+const KINDS: [KindRow; 35] = [
+    (
+        EventKind::HubStarted,
+        "hub.started",
+        &["version", "jobs"],
+        "hub {version} started with {jobs} jobs",
+    ),
+    (
+        EventKind::HubStalled,
+        "hub.stalled",
+        &["at"],
+        "hub restarted after its main loop stalled at {at}",
+    ),
+    (
+        EventKind::ConfigInvalid,
+        "config.invalid",
+        &["error"],
+        "config not applied, the previous one stays in force: {error}",
+    ),
+    (
+        EventKind::ConfigValid,
+        "config.valid",
+        &[],
+        "config valid again and applied",
+    ),
+    (
+        EventKind::RunDone,
+        "run.done",
+        &[
+            "job",
+            "outcome",
+            "exit",
+            "signal",
+            "timed_out",
+            "bytes",
+            "log",
+            "scheduled",
+        ],
+        "{job}: {outcome}, {bytes} bytes of output",
+    ),
+    (
+        EventKind::RunSkipped,
+        "run.skipped",
+        &["job", "count", "reason"],
+        "{job}: {count} occurrence(s) skipped ({reason})",
+    ),
+    (
+        EventKind::RunBroken,
+        "run.broken",
+        &["job", "run", "started"],
+        "{job}: run {run} was broken off; the job is on hold until acknowledged",
+    ),
+    (
+        EventKind::ProbeFired,
+        "probe.fired",
+        &["job", "bytes", "log", "scheduled"],
+        "{job}: condition met, {bytes} bytes of output",
+    ),
+    (
+        EventKind::ProbeError,
+        "probe.error",
+        &["job", "reason", "run", "log"],
+        "{job}: probe error: {reason}",
+    ),
+    (
+        EventKind::ProbeRecovered,
+        "probe.recovered",
+        &["job", "errors"],
+        "{job}: probe works again after {errors} error(s)",
+    ),
+    (
+        EventKind::TickFailed,
+        "job.failed",
+        &["job", "reason"],
+        "{job}: tick failed: {reason}",
+    ),
+    (
+        EventKind::TickRecovered,
+        "job.recovered",
+        &["job", "failures"],
+        "{job}: works again after {failures} failed tick(s)",
+    ),
+    (
+        EventKind::GithubPr,
+        "github.pr",
+        &["repo", "number", "title", "state", "author", "url"],
+        "new PR {repo}#{number} by {author} ({state}): {title}",
+    ),
+    (
+        EventKind::GithubNotification,
+        "github.notification",
+        &["repo", "reason", "title", "kind"],
+        "{repo}: {reason} on {kind} \"{title}\"",
+    ),
+    (
+        EventKind::PrBaseline,
+        "pr.baseline",
+        &["pr", "title", "state"],
+        "following {pr} ({state}): {title}",
+    ),
+    (
+        EventKind::PrFeedback,
+        "pr.feedback",
+        &["pr", "author", "what", "excerpt", "url"],
+        "{pr}: {what} by {author}: {excerpt}",
+    ),
+    (
+        EventKind::PrCheckFailed,
+        "pr.check_failed",
+        &["pr", "check", "conclusion", "head"],
+        "{pr}: check {check} {conclusion} on {head}",
+    ),
+    (
+        EventKind::PrPushed,
+        "pr.pushed",
+        &["pr", "authors", "count", "old", "new", "rewritten"],
+        "{pr}: head moved {old} -> {new} ({count} new commit(s) by {authors}; history rewritten: {rewritten})",
+    ),
+    (
+        EventKind::PrMerged,
+        "pr.merged",
+        &["pr", "commit"],
+        "{pr} merged as {commit}",
+    ),
+    (
+        EventKind::PrClosed,
+        "pr.closed",
+        &["pr"],
+        "{pr} closed without merging",
+    ),
+    (
+        EventKind::PrReopened,
+        "pr.reopened",
+        &["pr"],
+        "{pr} reopened",
+    ),
+    (
+        EventKind::QuotaLevel,
+        "quota.level",
+        &[
+            "limit", "provider", "account", "percent", "window", "reset_in",
+        ],
+        "quota {provider} account {account} {limit}: {percent}% used of the {window} window, resets in {reset_in}",
+    ),
+    (
+        EventKind::QuotaRecovered,
+        "quota.recovered",
+        &["limit", "provider", "account", "percent"],
+        "quota {provider} account {account} {limit} is back to {percent}%",
+    ),
+    (
+        EventKind::QuotaHold,
+        "quota.hold",
+        &["limits", "level"],
+        "quota gate closed at {level}%: new session starts wait ({limits})",
+    ),
+    (
+        EventKind::QuotaReleased,
+        "quota.released",
+        &["reason"],
+        "quota gate open: {reason}",
+    ),
+    (
+        EventKind::BackupRefused,
+        "backup.refused",
+        &["files", "rule"],
+        "backup refused, nothing committed: {rule} in {files}",
+    ),
+    (
+        EventKind::BackupClean,
+        "backup.clean",
+        &["commit"],
+        "backup committed cleanly again ({commit})",
+    ),
+    (
+        EventKind::BackupPushFailed,
+        "backup.push_failed",
+        &["reason"],
+        "backup push failed, the commit stays local: {reason}",
+    ),
+    (
+        EventKind::HealthProblem,
+        "health.problem",
+        &["check", "detail"],
+        "health: {check}: {detail}",
+    ),
+    (
+        EventKind::HealthCleared,
+        "health.cleared",
+        &["check"],
+        "health: {check} is fine again",
+    ),
+    (
+        EventKind::ItemNew,
+        "items.new",
+        &["job", "id", "title"],
+        "{job}: {title}",
+    ),
+    (
+        EventKind::PressureAlert,
+        "pressure.alert",
+        &["reasons"],
+        "host under pressure: {reasons}",
+    ),
+    (
+        EventKind::PressureClear,
+        "pressure.clear",
+        &[],
+        "host pressure cleared",
+    ),
+    (
+        EventKind::PressureReady,
+        "pressure.ready",
+        &["load"],
+        "host ready for heavy compute (load {load}%)",
+    ),
+    (
+        EventKind::PressureBusy,
+        "pressure.busy",
+        &["load"],
+        "host busy again (load {load}%)",
+    ),
 ];
 
 impl EventKind {
+    fn row(self) -> &'static KindRow {
+        // Every variant has exactly one row; the test below checks the table is complete.
+        KINDS.iter().find(|r| r.0 == self).unwrap_or(&KINDS[0])
+    }
+
     pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::HubStarted => "hub.started",
-            Self::HubStalled => "hub.stalled",
-            Self::ConfigInvalid => "config.invalid",
-            Self::ConfigValid => "config.valid",
-            Self::RunDone => "run.done",
-            Self::RunSkipped => "run.skipped",
-            Self::RunBroken => "run.broken",
-            Self::ProbeFired => "probe.fired",
-            Self::ProbeError => "probe.error",
-            Self::ProbeRecovered => "probe.recovered",
-        }
+        self.row().1
     }
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
-        ALL.into_iter().find(|k| k.name() == name)
+        KINDS.iter().find(|r| r.1 == name).map(|r| r.0)
     }
 
     /// Fields a template for this kind may name.
     pub(crate) fn fields(self) -> &'static [&'static str] {
-        match self {
-            Self::HubStarted => &["version", "jobs"],
-            Self::HubStalled => &["at"],
-            Self::ConfigInvalid => &["error"],
-            Self::ConfigValid => &[],
-            Self::RunDone => &[
-                "job",
-                "outcome",
-                "exit",
-                "signal",
-                "timed_out",
-                "bytes",
-                "log",
-                "scheduled",
-            ],
-            Self::RunSkipped => &["job", "count", "reason"],
-            Self::RunBroken => &["job", "run", "started"],
-            Self::ProbeFired => &["job", "bytes", "log", "scheduled"],
-            Self::ProbeError => &["job", "reason", "run", "log"],
-            Self::ProbeRecovered => &["job", "errors"],
-        }
+        self.row().2
     }
 
     fn default_template(self) -> &'static str {
-        match self {
-            Self::HubStarted => "hub {version} started with {jobs} jobs",
-            Self::HubStalled => "hub restarted after its main loop stalled at {at}",
-            Self::ConfigInvalid => "config not applied, the previous one stays in force: {error}",
-            Self::ConfigValid => "config valid again and applied",
-            Self::RunDone => "{job}: {outcome}, {bytes} bytes of output",
-            Self::RunSkipped => "{job}: {count} occurrence(s) skipped ({reason})",
-            Self::RunBroken => {
-                "{job}: run {run} was broken off; the job is on hold until acknowledged"
-            }
-            Self::ProbeFired => "{job}: condition met, {bytes} bytes of output",
-            Self::ProbeError => "{job}: probe error: {reason}",
-            Self::ProbeRecovered => "{job}: probe works again after {errors} error(s)",
-        }
+        self.row().3
     }
 }
 
@@ -290,10 +496,15 @@ mod tests {
 
     #[test]
     fn defaults_parse_and_names_round_trip() {
-        for kind in ALL {
+        let mut names: Vec<&str> = KINDS.iter().map(|r| r.1).collect();
+        for (kind, name, _, _) in KINDS {
+            assert_eq!(kind.row().1, name, "one row per kind");
             Template::parse(kind.default_template(), kind).unwrap();
             assert_eq!(EventKind::from_name(kind.name()), Some(kind));
         }
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), KINDS.len(), "names are unique");
         assert_eq!(EventKind::from_name("run.nope"), None);
     }
 

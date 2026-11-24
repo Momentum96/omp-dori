@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ring::digest;
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until, timeout};
 
@@ -135,28 +135,11 @@ pub(crate) struct Running {
 
 /// Starts the command. The caller may record [`Running::pid`] before awaiting [`Running::wait`].
 pub(crate) fn spawn(spec: &Spec<'_>) -> Result<Running, CommandError> {
-    let (program, args) = spec.argv.split_first().ok_or(CommandError::EmptyArgv)?;
     let (out_sink, err_sink) = sinks(spec)?;
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for key in PASS_ENV {
-        if let Some(value) = std::env::var_os(key) {
-            cmd.env(key, value);
-        }
-    }
-    for (key, value) in spec.env {
-        cmd.env(key, OsStr::new(value));
-    }
-    if let Some(cwd) = spec.cwd {
-        cmd.current_dir(cwd);
-    }
+    let (mut cmd, program) = command(spec.argv, spec.cwd, spec.env)?;
+    cmd.stdin(Stdio::null());
     let mut child = cmd.spawn().map_err(|source| CommandError::Spawn {
-        program: program.clone(),
+        program: program.to_string(),
         source,
     })?;
     let pid = child.id();
@@ -172,9 +155,110 @@ pub(crate) fn spawn(spec: &Spec<'_>) -> Result<Running, CommandError> {
     })
 }
 
+/// The one place a child command is built: argument vector, empty environment plus the pass-through
+/// list and the caller's variables, stdout and stderr piped, killed when dropped.
+fn command<'a>(
+    argv: &'a [String],
+    cwd: Option<&Path>,
+    env: &[(&str, &str)],
+) -> Result<(Command, &'a str), CommandError> {
+    let (program, rest) = argv.split_first().ok_or(CommandError::EmptyArgv)?;
+    let mut cmd = Command::new(program);
+    cmd.args(rest)
+        .env_clear()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for key in PASS_ENV {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    for (key, value) in env {
+        cmd.env(key, OsStr::new(value));
+    }
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    Ok((cmd, program))
+}
+
 /// Spawns and waits in one call, with no cancellation.
 pub(crate) async fn run(spec: &Spec<'_>) -> Result<Finished, CommandError> {
     Ok(spawn(spec)?.wait(None).await)
+}
+
+/// A child the caller talks to over its stdin and stdout (OMP in rpc-ui mode). Its stderr goes to an
+/// owner-only file capped at `stderr_cap` bytes, or is discarded.
+pub(crate) struct Attached {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: tokio::task::JoinHandle<Sink>,
+}
+
+/// Starts an attached child. An existing `stderr_file` is replaced.
+pub(crate) fn attach(
+    argv: &[String],
+    cwd: Option<&Path>,
+    env: &[(&str, &str)],
+    stderr_file: Option<&Path>,
+    stderr_cap: u64,
+) -> Result<Attached, CommandError> {
+    let file = match stderr_file {
+        Some(path) => {
+            let _ = std::fs::remove_file(path);
+            Some(create_private(path).map_err(CommandError::Output)?)
+        }
+        None => None,
+    };
+    let sink = Sink {
+        file,
+        buffer: Vec::new(),
+        capture: false,
+        hash: None,
+        cap: stderr_cap,
+        counter: Arc::default(),
+        write_failed: false,
+    };
+    let (mut cmd, program) = command(argv, cwd, env)?;
+    cmd.stdin(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|source| CommandError::Spawn {
+        program: program.to_string(),
+        source,
+    })?;
+    let stderr = child.stderr.take();
+    Ok(Attached {
+        stdin: child.stdin.take(),
+        stdout: child.stdout.take(),
+        stderr: tokio::spawn(pump(stderr, sink)),
+        child,
+    })
+}
+
+impl Attached {
+    pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.stdin.take()
+    }
+
+    pub(crate) fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Closes stdin (the child's signal to finish), waits up to `wait`, then sends TERM and KILL after
+    /// `grace` (DESIGN 4.2). The caller keeps reading stdout meanwhile, so a full pipe cannot block
+    /// the exit.
+    pub(crate) async fn close(mut self, wait: Duration, grace: Duration) -> Exit {
+        drop(self.stdin.take());
+        drop(self.stdout.take());
+        let status = match timeout(wait, self.child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => terminate(&mut self.child, grace).await,
+        };
+        let mut held = false;
+        let _ = join_sink(&mut self.stderr, Instant::now() + PIPE_DRAIN, &mut held).await;
+        status.map_or(Exit::Unknown, exit_of)
+    }
 }
 
 enum Ended {

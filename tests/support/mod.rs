@@ -17,12 +17,16 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+pub mod discord;
+
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 
 /// A hub sandbox: short root under /tmp (socket paths have a 103-byte limit on macOS).
 pub struct TestHub {
     pub root: PathBuf,
     pub child: Option<Child>,
+    /// Extra environment for the hub and CLI processes.
+    pub env: Vec<(String, PathBuf)>,
 }
 
 impl TestHub {
@@ -37,7 +41,11 @@ impl TestHub {
         for dir in ["home", "config/cataly", "state", "run"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        let hub = Self { root, child: None };
+        let hub = Self {
+            root,
+            child: None,
+            env: Vec::new(),
+        };
         hub.write_config(config);
         hub
     }
@@ -76,6 +84,9 @@ impl TestHub {
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_RUNTIME_DIR", self.root.join("run"));
+        for (key, value) in &self.env {
+            cmd.env(key, value);
+        }
         cmd
     }
 
@@ -224,6 +235,65 @@ impl TestHub {
             .find(|j| j["name"] == name)
             .cloned()
             .expect("job listed")
+    }
+
+    /// Copies `tests/support/fake-<name>` to `<root>/bin/<name>` with its empty data directory
+    /// `<root>/bin/<name>-data`; returns the executable's path.
+    pub fn install_fake(&self, name: &str) -> PathBuf {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support")
+            .join(format!("fake-{name}"));
+        let bin = self.root.join("bin");
+        std::fs::create_dir_all(bin.join(format!("{name}-data"))).unwrap();
+        let target = bin.join(name);
+        std::fs::copy(&source, &target).unwrap();
+        std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        target
+    }
+
+    /// Writes (or with `None` removes) a fixture file of an installed fake.
+    pub fn fixture(&self, fake: &str, file: &str, text: Option<&str>) {
+        let path = self
+            .root
+            .join("bin")
+            .join(format!("{fake}-data"))
+            .join(file);
+        match text {
+            Some(t) => std::fs::write(path, t).unwrap(),
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Writes an owner-only file (a token file, for example).
+    pub fn private_file(&self, name: &str, text: &str) -> PathBuf {
+        let path = self.root.join(name);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        path
+    }
+
+    /// One dry tick of a job: the reply's events.
+    pub fn run_job(&self, name: &str) -> Vec<serde_json::Value> {
+        self.json(&["job", "run", name, "--json"])["events"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// One dry tick of a job: the kinds of its events.
+    pub fn tick(&self, name: &str) -> Vec<String> {
+        self.run_job(name)
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap().to_string())
+            .collect()
     }
 }
 

@@ -1,5 +1,5 @@
 //! Secret-shape masking: the one place that recognises token-shaped strings (DESIGN 10.1). Built-in
-//! shapes only; owner patterns arrive with the backup job.
+//! shapes, used to mask text and, through [`find_rule`], by the backup scan beside owner patterns.
 
 use std::borrow::Cow;
 
@@ -74,6 +74,36 @@ pub(crate) fn mask(text: &str) -> Cow<'_, str> {
     }
     out.push_str(text.get(copied..).unwrap_or_default());
     Cow::Owned(out)
+}
+
+/// The name of the first built-in shape found in `bytes`, never the matched text.
+pub(crate) fn find_rule(bytes: &[u8]) -> Option<&'static str> {
+    let (start, _) = next_secret(bytes, 0)?;
+    let rest = bytes.get(start..)?;
+    let name = if rest.starts_with(PEM_BEGIN) {
+        "private key block"
+    } else if rest.starts_with(b"gh") || rest.starts_with(b"github_pat_") {
+        "GitHub token"
+    } else if rest.starts_with(b"xox") || rest.starts_with(b"xapp-") {
+        "Slack token"
+    } else if rest.starts_with(b"glpat-") {
+        "GitLab token"
+    } else if rest.starts_with(b"sk-") {
+        "API key"
+    } else if rest.starts_with(b"AKIA") {
+        "AWS access key"
+    } else if rest.starts_with(b"AIza") {
+        "Google API key"
+    } else if rest.starts_with(b"eyJ") {
+        "JSON web token"
+    } else if bytes.get(start.saturating_sub(7)..start) == Some(&b"Bearer "[..]) {
+        "bearer credential"
+    } else if discord(bytes, start).is_some() {
+        "Discord bot token"
+    } else {
+        "Telegram bot token"
+    };
+    Some(name)
 }
 
 fn boundary(bytes: &[u8], at: usize) -> bool {

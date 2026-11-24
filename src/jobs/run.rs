@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::config::{Fire, Job, Trigger};
+use crate::config::{Fire, Job, Trigger, Work};
 use crate::store::{Apply, EventRecord, RunEnd, RunRecord, RunStart};
 use crate::sys::command::{self, Exit, KILL_GRACE, Output, Spec};
 use crate::sys::fs::{ensure_private_dir, read_private};
@@ -106,16 +106,6 @@ fn outcome_text(class: &Class) -> String {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
 /// Performs one run end to end and returns the events it produced.
 pub(super) async fn execute(ctx: &Ctx, req: Request) -> Result<Vec<EventRecord>, JobsError> {
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -125,6 +115,12 @@ pub(super) async fn execute(ctx: &Ctx, req: Request) -> Result<Vec<EventRecord>,
         .await
         .map_err(|_| JobsError::Stopped)?;
     let job = &req.job;
+    let Work::Command { argv, cwd } = &job.work else {
+        return Err(JobsError::Refused(format!(
+            "job '{}' runs no command",
+            job.name
+        )));
+    };
     let probe = matches!(job.trigger, Trigger::Probe { .. });
     let dir = ctx.files_dir.join("runs").join(&job.name);
     ensure_private_dir(&dir).map_err(JobsError::Fs)?;
@@ -149,8 +145,8 @@ pub(super) async fn execute(ctx: &Ctx, req: Request) -> Result<Vec<EventRecord>,
         ("CATALY_DRY", if req.dry { "1" } else { "0" }),
     ];
     let spec = Spec {
-        argv: &job.argv,
-        cwd: Some(&job.cwd),
+        argv,
+        cwd: Some(cwd),
         env: &env,
         timeout: job.timeout,
         kill_grace: KILL_GRACE,
@@ -234,7 +230,7 @@ async fn run_child(
     }
     facts.timed_out = done.timed_out;
     facts.bytes = i64::try_from(done.stdout_bytes).unwrap_or(i64::MAX);
-    facts.hash = done.stdout_sha256.map(|h| hex(&h));
+    facts.hash = done.stdout_sha256.map(|h| crate::sys::hex(&h));
     if done.truncated || done.pipes_held {
         crate::log::warn(
             "job output incomplete",
@@ -280,7 +276,9 @@ async fn apply(
     let mut delete_own = false;
     let mut delete_earlier_bad = false;
     match &job.trigger {
-        Trigger::Cron { .. } | Trigger::Once { .. } => emits.push(timed_emit(&job.name, facts)),
+        Trigger::Cron { .. } | Trigger::Once { .. } | Trigger::Every { .. } => {
+            emits.push(timed_emit(&job.name, facts));
+        }
         Trigger::Probe {
             fire,
             skip_identical,
@@ -521,7 +519,7 @@ pub(super) async fn recover(ctx: &Ctx) -> Result<(), JobsError> {
         let job = config
             .jobs
             .get(&run.job)
-            .filter(|j| j.trigger.kind() == kind_of(run));
+            .filter(|j| matches!(j.work, Work::Command { .. }) && j.trigger.kind() == kind_of(run));
         apply(ctx, job, &Facts::from_record(run)).await?;
     }
     if found.uncertain_deliveries > 0 {
@@ -692,7 +690,10 @@ mod tests {
         assert!(events[0].text.ends_with("probe error: time limit"));
         // Same job with a quick command: first success fires (recovery note first), second is identical.
         let quick = Arc::new(Job {
-            argv: vec!["echo".into(), "same".into()],
+            work: Work::Command {
+                argv: vec!["echo".into(), "same".into()],
+                cwd: "/".into(),
+            },
             ..(*job).clone()
         });
         let kinds: Vec<String> = execute(&ctx, req(&quick))

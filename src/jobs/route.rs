@@ -1,16 +1,21 @@
 //! Routing (WS req. 7, OJ req. 7): every event goes to the rotating owner-readable event log; events
 //! with destinations get one attempt per destination. An attempt is marked durably before it starts,
 //! so a hub that stops mid-attempt leaves it "uncertain" and it is never repeated (DESIGN 9.3).
-//! Destinations of this slice: local commands. Chat destinations plug in behind the same match.
+//! Destinations: local commands and Discord channels.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::time::timeout;
+
 use crate::config::Destination;
 use crate::log;
+use crate::relay::discord::{ChannelRef, Sent};
+use crate::relay::text::{DISCORD_LIMIT, utf16_len};
 use crate::store::{Delivery, EventRecord, Store};
 use crate::sys::ErrorClass;
 use crate::sys::command::{self, KILL_GRACE, Output, Spec};
@@ -25,6 +30,8 @@ const LOG_TAIL: u64 = 64 * 1024;
 /// Event commands: 30 s each (DESIGN 9.4).
 const DESTINATION_TIMEOUT: Duration = Duration::from_secs(30);
 const DESTINATION_OUTPUT_CAP: u64 = 64 * 1024;
+/// One messenger delivery, all parts and retries included (WS req. 64).
+const DISCORD_DEADLINE: Duration = Duration::from_secs(30);
 const PAGE: u32 = 256;
 
 pub(super) async fn router(ctx: Arc<Ctx>) -> Result<(), JobsError> {
@@ -154,7 +161,7 @@ async fn deliver_waiting(ctx: &Arc<Ctx>) -> Result<(), JobsError> {
             let Ok(_slot) = slots.acquire_owned().await else {
                 return;
             };
-            let (state, detail) = attempt(&dest, &event).await;
+            let (state, detail) = attempt(&task_ctx, &destination, &dest, &event).await;
             if let Err(e) = task_ctx
                 .store
                 .delivery(event_id, destination.clone(), state, detail)
@@ -177,15 +184,86 @@ struct Undelivered {
 }
 
 /// One attempt; the error class decides the receipt: in doubt is recorded as uncertain and never
-/// repeated, anything else as failed.
-async fn attempt(dest: &Destination, event: &EventRecord) -> (Delivery, Option<String>) {
+/// repeated, anything else as failed. A sent post keeps its message IDs as the receipt.
+async fn attempt(
+    ctx: &Ctx,
+    name: &str,
+    dest: &Destination,
+    event: &EventRecord,
+) -> (Delivery, Option<String>) {
     let result = match dest {
-        Destination::Command { argv } => run_command(argv, event).await,
+        Destination::Command { argv } => run_command(argv, event).await.map(|()| None),
+        Destination::Discord { channel } => post_discord(ctx, name, channel, event).await.map(Some),
     };
     match result {
-        Ok(()) => (Delivery::Sent, None),
+        Ok(receipt) => (Delivery::Sent, receipt),
         Err(u) if u.class == ErrorClass::InDoubt => (Delivery::Uncertain, Some(u.detail)),
         Err(u) => (Delivery::Failed, Some(u.detail)),
+    }
+}
+
+/// The text of a job post: the event line, then the body in a code block when the whole fits one
+/// Discord message, else a pointer to where the body is (WS req. 64).
+fn post_text(event: &EventRecord, log: &Path) -> String {
+    let mut text = event.text.clone();
+    if let Some(body) = event.body.as_deref().filter(|b| !b.trim().is_empty()) {
+        let with_body = format!(
+            "{text}\n```\n{}\n```",
+            body.trim_end().replace("```", "'''")
+        );
+        if utf16_len(&with_body) <= DISCORD_LIMIT {
+            return with_body;
+        }
+        let _ = write!(text, "\n(output in {}, event {})", log.display(), event.id);
+    } else if let Some(path) = &event.body_path {
+        let _ = write!(text, "\n(output in {path})");
+    }
+    text
+}
+
+/// One Discord post within the delivery deadline. Mentions are never parsed; the nonce comes from
+/// the event and destination, so a retry after an uncertain answer cannot duplicate the post.
+async fn post_discord(
+    ctx: &Ctx,
+    name: &str,
+    channel: &ChannelRef,
+    event: &EventRecord,
+) -> Result<String, Undelivered> {
+    let config = ctx.config();
+    let rest = ctx.discord(&config).map_err(|detail| Undelivered {
+        class: ErrorClass::Rejected,
+        detail,
+    })?;
+    let text = post_text(event, &ctx.event_log);
+    let seed = format!("event:{}:{name}", event.id);
+    let posted = timeout(
+        DISCORD_DEADLINE,
+        rest.post(channel, &text, &seed, &config.outgoing),
+    )
+    .await
+    .map_err(|_| Undelivered {
+        class: ErrorClass::InDoubt,
+        detail: "no answer within the 30 s delivery deadline".into(),
+    })?;
+    let ids: Vec<String> = posted.ids.iter().map(ToString::to_string).collect();
+    match posted.outcome {
+        Sent::Confirmed => Ok(format!("message {}", ids.join(" "))),
+        Sent::Rejected(why) => Err(Undelivered {
+            class: ErrorClass::Rejected,
+            detail: with_ids(why, &ids),
+        }),
+        Sent::Uncertain(why) => Err(Undelivered {
+            class: ErrorClass::InDoubt,
+            detail: with_ids(why, &ids),
+        }),
+    }
+}
+
+fn with_ids(why: String, ids: &[String]) -> String {
+    if ids.is_empty() {
+        why
+    } else {
+        format!("{why} (confirmed before it: message {})", ids.join(" "))
     }
 }
 

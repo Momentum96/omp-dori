@@ -44,6 +44,18 @@ impl Memory {
         true
     }
 
+    /// Every stored `(subject, value)` with this condition, sorted by subject.
+    pub(crate) fn with_condition(&self, condition: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter(|((_, c), _)| c == condition)
+            .map(|((s, _), v)| (s.clone(), v.clone()))
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Forgets a condition; returns what was stored.
     pub(crate) fn clear(&mut self, subject: &str, condition: &str) -> Option<String> {
         let previous = self

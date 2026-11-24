@@ -176,6 +176,16 @@ pub(crate) fn open_append_private(path: &Path) -> Result<File, FsError> {
 /// Replaces `path` atomically with `bytes`: unique temporary file (0600) in the same directory, write,
 /// fsync, rename over the target, fsync the directory.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+    publish(path, bytes, true)
+}
+
+/// Creates `path` atomically with `bytes` like [`write_atomic`], but fails when `path` exists: the
+/// finished temporary file is hard-linked into place, which never overwrites.
+pub(crate) fn create_atomic(path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+    publish(path, bytes, false)
+}
+
+fn publish(path: &Path, bytes: &[u8], replace: bool) -> Result<(), FsError> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let dir = path
         .parent()
@@ -193,7 +203,12 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FsError> {
         let mut file = create_private(&tmp)?;
         file.write_all(bytes).map_err(|e| FsError::io(&tmp, e))?;
         file.sync_all().map_err(|e| FsError::io(&tmp, e))?;
-        fs::rename(&tmp, path).map_err(|e| FsError::io(path, e))?;
+        if replace {
+            fs::rename(&tmp, path).map_err(|e| FsError::io(path, e))?;
+        } else {
+            fs::hard_link(&tmp, path).map_err(|e| FsError::io(path, e))?;
+            fs::remove_file(&tmp).map_err(|e| FsError::io(&tmp, e))?;
+        }
         sync_dir(dir)
     })();
     if result.is_err() {
@@ -233,6 +248,25 @@ pub(crate) mod tests {
         let _ = fs::remove_dir_all(&dir);
         ensure_private_dir(&dir).unwrap();
         dir
+    }
+
+    /// Marks a test script executable by its owner only.
+    pub(crate) fn make_executable(path: &Path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn atomic_create_never_overwrites() {
+        let dir = scratch("fs-create");
+        let path = dir.join("c.txt");
+        create_atomic(&path, b"first").unwrap();
+        assert!(create_atomic(&path, b"second").is_err());
+        assert_eq!(read_private(&path, 16).unwrap().unwrap(), b"first");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "no temporary file left"
+        );
     }
 
     #[test]

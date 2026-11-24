@@ -3,6 +3,7 @@
 mod args;
 mod client;
 pub(crate) mod out;
+mod setup;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::config;
 use crate::jobs::instant_text;
+use crate::jobs::owner::quota::GateView;
 use crate::proto::{self, Events, JobList, Stats, Status, method};
 use crate::store::EventRecord;
 use crate::sys::paths::Paths;
@@ -67,6 +69,7 @@ pub(crate) fn main() -> ExitCode {
         Ok(()) => exit::OK,
         Err(Failure::Usage(m)) => fail(exit::USAGE, &m),
         Err(Failure::Refused(m)) => fail(exit::FAILED, &m),
+        Err(Failure::Status(code, m)) => fail(code, &m),
         Err(Failure::Client(ClientError::NoHub)) => fail(
             exit::NO_HUB,
             &format!(
@@ -86,6 +89,8 @@ fn fail(code: u8, message: &str) -> u8 {
 enum Failure {
     Usage(String),
     Refused(String),
+    /// A distinct exit status with its message (a failed limits fetch exits 2, WS req. 38).
+    Status(u8, String),
     Client(ClientError),
 }
 
@@ -107,7 +112,13 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
             .map_or(paths.config_file.as_path(), Path::new);
         return config_check(file, as_json);
     }
+    if p.is(&["setup"]) {
+        return setup::run(p, paths, as_json);
+    }
     let mut hub = Client::connect(&paths.socket)?;
+    if let Some(done) = owner_verbs(p, &mut hub, as_json) {
+        return done;
+    }
     match p.spec.path {
         ["status"] => {
             let reply = hub.call(method::STATUS, json!({}), CALL_TIMEOUT)?;
@@ -364,6 +375,14 @@ fn print_status(s: &Status) {
         s.jobs, s.jobs_running
     ));
     out::line(&format!("events   last id {}", s.last_event_id));
+    match &s.omp {
+        Some(r) => out::line(&format!("omp      {}", r.summary())),
+        None => out::line("omp      not probed yet"),
+    }
+    if let Some(why) = &s.sessions_refused {
+        out::line(&format!("sessions refused: {why}"));
+    }
+    print_gate(&s.quota_gate);
     if s.task_restarts > 0 || s.panics > 0 {
         out::line(&format!(
             "tasks    {} restarts, {} panics",
@@ -372,6 +391,182 @@ fn print_status(s: &Status) {
     }
 }
 
+fn print_gate(g: &GateView) {
+    let causes: Vec<String> = g
+        .causes
+        .iter()
+        .map(|c| format!("{} until {}", c.limit, instant_text(c.release_ms)))
+        .collect();
+    let line = match (g.held, causes.is_empty(), g.lifted_until_ms) {
+        (true, false, _) => format!("closed: new sessions wait ({})", causes.join(", ")),
+        (false, false, Some(until)) => {
+            format!(
+                "lifted by the owner until {} ({})",
+                instant_text(until),
+                causes.join(", ")
+            )
+        }
+        _ => "open".to_string(),
+    };
+    out::line(&format!("quota    {line}"));
+}
+
+/// `health`, `limits`, `quota` and `pr` verbs; `None` for anything else.
+fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(), Failure>> {
+    let target = p.args.first().cloned();
+    let result = match p.spec.path {
+        ["health"] => health(hub, as_json),
+        ["limits"] => limits(hub, p.flag("--refresh"), as_json),
+        ["quota"] => hub
+            .call(method::QUOTA, json!({}), CALL_TIMEOUT)
+            .map_err(Failure::from)
+            .and_then(|v| show(v, as_json, |g: GateView| print_gate(&g))),
+        ["quota", "lift"] => hub
+            .call(method::QUOTA_LIFT, json!({}), CALL_TIMEOUT)
+            .map_err(Failure::from)
+            .and_then(|v| show(v, as_json, |g: GateView| print_gate(&g))),
+        ["pr", verb @ ("follow" | "unfollow")] => {
+            let m = if *verb == "follow" {
+                method::PR_FOLLOW
+            } else {
+                method::PR_UNFOLLOW
+            };
+            hub.call(
+                m,
+                json!({ "target": target, "job": p.value("--job") }),
+                CALL_TIMEOUT,
+            )
+            .map_err(Failure::from)
+            .and_then(|v| {
+                show(v, as_json, |v: Value| {
+                    out::line(&format!(
+                        "{verb}ing {}",
+                        v.get("pr").and_then(Value::as_str).unwrap_or_default()
+                    ));
+                })
+            })
+        }
+        ["pr", "list"] => hub
+            .call(method::PR_LIST, json!({}), CALL_TIMEOUT)
+            .map_err(Failure::from)
+            .and_then(|v| {
+                show(v, as_json, |l: proto::PrList| {
+                    if l.prs.is_empty() {
+                        out::line("no pull requests followed");
+                    }
+                    for pr in &l.prs {
+                        let error = pr
+                            .error
+                            .as_deref()
+                            .map_or_else(String::new, |e| format!("  error: {e}"));
+                        out::line(&format!(
+                            "{:<32} {:<12} {:<8} since {}{error}",
+                            pr.pr,
+                            pr.job,
+                            pr.state,
+                            instant_text(pr.since_ms)
+                        ));
+                    }
+                })
+            }),
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Prints a reply as JSON, or decodes it and prints it as text.
+fn show<T: serde::de::DeserializeOwned>(
+    value: Value,
+    as_json: bool,
+    print: impl FnOnce(T),
+) -> Result<(), Failure> {
+    if as_json {
+        out::json(&value);
+        return Ok(());
+    }
+    print(decode(value)?);
+    Ok(())
+}
+
+fn health(hub: &mut Client, as_json: bool) -> Result<(), Failure> {
+    let reply = hub.call(method::HEALTH, json!({}), CALL_TIMEOUT)?;
+    let report: proto::Health = decode(reply.clone())?;
+    if as_json {
+        out::json(&reply);
+    } else {
+        for c in &report.checks {
+            let ignored = if report.ignored.contains(&c.name) {
+                " (ignored)"
+            } else {
+                ""
+            };
+            let next = c
+                .next
+                .as_deref()
+                .map_or_else(String::new, |n| format!("; next: {n}"));
+            out::line(&format!(
+                "{:<5} {:<24} {}{next}{ignored}",
+                c.level.to_uppercase(),
+                c.name,
+                c.detail
+            ));
+        }
+    }
+    if report.warn {
+        return Err(Failure::Refused("health: warnings remain".into()));
+    }
+    Ok(())
+}
+
+fn limits(hub: &mut Client, refresh: bool, as_json: bool) -> Result<(), Failure> {
+    let reply = hub.call(method::LIMITS, json!({ "refresh": refresh }), CALL_TIMEOUT)?;
+    let view: proto::Limits = decode(reply.clone())?;
+    if as_json {
+        out::json(&reply);
+    } else {
+        if view.accounts.is_empty() {
+            out::line("no account data from OMP (nothing is shown as zero use)");
+        }
+        for a in &view.accounts {
+            out::line(&format!("{} account {}", a.provider, a.account));
+            for w in &a.windows {
+                let used = w
+                    .used_percent
+                    .map_or_else(|| "unknown".into(), |u| format!("{u:.0}%"));
+                let reset = w.reset_ms.map_or_else(
+                    || "reset unknown".into(),
+                    |r| format!("resets {}", instant_text(r)),
+                );
+                let room = w.headroom_percent.map_or_else(String::new, |h| {
+                    format!(", {h:.0} points to the warning level")
+                });
+                out::line(&format!("  {:<12} {used} used, {reset}{room}", w.label));
+            }
+            for n in &a.notes {
+                out::line(&format!("  note: {n}"));
+            }
+        }
+        if view.without_usage > 0 || view.disabled > 0 {
+            out::line(&format!(
+                "{} account(s) without usage data, {} disabled",
+                view.without_usage, view.disabled
+            ));
+        }
+        if view.stale {
+            out::line(&format!(
+                "stale: {}",
+                view.fetched_ms.map_or_else(
+                    || "never fetched".into(),
+                    |f| format!("fetched {}", instant_text(f))
+                )
+            ));
+        }
+    }
+    match view.error {
+        Some(e) => Err(Failure::Status(2, format!("limits fetch failed: {e}"))),
+        None => Ok(()),
+    }
+}
 fn mib(bytes: u64) -> String {
     format!(
         "{}.{} MiB",

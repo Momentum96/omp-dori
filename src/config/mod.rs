@@ -1,6 +1,9 @@
-//! The owner's TOML configuration (WS req. 79-82, OJ req. 2): `[hub]`, `[destinations.<name>]` and
-//! `[jobs.<name>]`. Validation is strict and every error names its setting path. A missing file means
-//! built-in defaults; an invalid file is never applied.
+//! The owner's TOML configuration (WS req. 79-82, OJ req. 2): `[hub]`, `[omp]`, `[discord]`,
+//! `[outgoing]`, `[limits]`, `[health]`, `[destinations.<name>]` and `[jobs.<name>]`. Validation is
+//! strict and every error names its setting path. A missing file means built-in defaults; an invalid
+//! file is never applied.
+
+pub(crate) mod owner;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,6 +18,10 @@ use toml::{Table, Value};
 use crate::jobs::cron::{self, Cron};
 use crate::jobs::event::{EventKind, Template, Templates};
 use crate::log::Level;
+use crate::relay::discord::{ChannelRef, Snowflake};
+use crate::relay::http::Base;
+use crate::relay::text::Checks;
+pub(crate) use owner::Owner;
 
 /// Largest config file accepted.
 const FILE_MAX: u64 = 1024 * 1024;
@@ -23,11 +30,19 @@ pub(crate) const LOG_DESTINATION: &str = "log";
 const PROBE_MIN: Duration = Duration::from_secs(30);
 const DAY: Duration = Duration::from_hours(24);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Account-limits cache period: default and minimum (WS req. 38).
+const LIMITS_CACHE: Duration = Duration::from_mins(5);
+const LIMITS_CACHE_MIN: Duration = Duration::from_mins(1);
 
 /// A validated configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) hub: HubSettings,
+    pub(crate) omp: OmpSettings,
+    pub(crate) discord: DiscordSettings,
+    pub(crate) outgoing: Checks,
+    pub(crate) limits: LimitsSettings,
+    pub(crate) health: HealthSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
 }
@@ -38,6 +53,15 @@ impl Default for Config {
             hub: HubSettings {
                 log_level: Level::Info,
             },
+            omp: OmpSettings { path: "omp".into() },
+            discord: DiscordSettings::default(),
+            outgoing: Checks::default(),
+            limits: LimitsSettings {
+                enabled: false,
+                cache: LIMITS_CACHE,
+                warn_percent: None,
+            },
+            health: HealthSettings::default(),
             destinations: BTreeMap::new(),
             jobs: BTreeMap::new(),
         }
@@ -49,11 +73,43 @@ pub(crate) struct HubSettings {
     pub(crate) log_level: Level,
 }
 
+/// `[omp]`: the executable, an absolute path or a name looked up on `PATH` (HOST req. 17).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OmpSettings {
+    pub(crate) path: String,
+}
+
+/// `[discord]`: where the bot token is, the guild for channel names, and the loopback-only test
+/// override of the API base (DISC-OUT req. 10).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DiscordSettings {
+    /// Default `<config dir>/secrets/discord-token`.
+    pub(crate) token_file: Option<PathBuf>,
+    pub(crate) guild: Option<Snowflake>,
+    pub(crate) api_base: Option<Base>,
+}
+
+/// `[limits]`: the account-limits view (WS req. 37-38, 81).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LimitsSettings {
+    pub(crate) enabled: bool,
+    pub(crate) cache: Duration,
+    pub(crate) warn_percent: Option<u8>,
+}
+
+/// `[health]`: check names left out of the report's status (WS req. 78).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HealthSettings {
+    pub(crate) ignore: Vec<String>,
+}
+
 /// Where events can go besides the store and the event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Destination {
     /// A local command run with the event as JSON in `CATALY_EVENT`.
     Command { argv: Vec<String> },
+    /// A Discord channel or thread.
+    Discord { channel: ChannelRef },
 }
 
 /// One configured job.
@@ -64,10 +120,29 @@ pub(crate) struct Job {
     pub(crate) dry_run: bool,
     pub(crate) destinations: Vec<String>,
     pub(crate) templates: Templates,
-    pub(crate) argv: Vec<String>,
-    pub(crate) cwd: PathBuf,
+    /// The command's time limit, or the owner kind's per-tick deadline.
     pub(crate) timeout: Duration,
     pub(crate) trigger: Trigger,
+    pub(crate) work: Work,
+}
+
+/// What a job does when it runs.
+#[derive(Debug, Clone)]
+pub(crate) enum Work {
+    /// Timed and condition jobs: one owner command.
+    Command { argv: Vec<String>, cwd: PathBuf },
+    /// A built-in owner job kind.
+    Owner(Owner),
+}
+
+impl Job {
+    /// The kind name shown and stored: `cron`, `once`, `probe`, or the owner kind.
+    pub(crate) fn kind(&self) -> &'static str {
+        match &self.work {
+            Work::Command { .. } => self.trigger.kind(),
+            Work::Owner(owner) => owner.name(),
+        }
+    }
 }
 
 /// What makes a job run.
@@ -87,6 +162,10 @@ pub(crate) enum Trigger {
         fire: Fire,
         skip_identical: bool,
     },
+    /// Owner job kinds: a tick every interval, the first at registration.
+    Every {
+        every: Duration,
+    },
 }
 
 /// When a condition job fires.
@@ -104,6 +183,15 @@ impl Trigger {
             Self::Cron { .. } => "cron",
             Self::Once { .. } => "once",
             Self::Probe { .. } => "probe",
+            Self::Every { .. } => "every",
+        }
+    }
+
+    /// The interval of interval-driven jobs (condition jobs and owner kinds).
+    pub(crate) fn every(&self) -> Option<Duration> {
+        match self {
+            Self::Probe { every, .. } | Self::Every { every } => Some(*every),
+            Self::Cron { .. } | Self::Once { .. } => None,
         }
     }
 
@@ -115,6 +203,7 @@ impl Trigger {
             } => format!("cron {expr} {zone_name}"),
             Self::Once { at } => format!("once {at}"),
             Self::Probe { every, .. } => format!("probe every {}s", every.as_secs()),
+            Self::Every { every } => format!("every {}s", every.as_secs()),
         }
     }
 }
@@ -139,6 +228,17 @@ pub(crate) fn describe(errors: &[ConfigError]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// SHA-256 (hex) of the config file's bytes; `None` when it is missing or unreadable.
+pub(crate) fn file_digest(path: &Path) -> Option<String> {
+    let bytes = crate::sys::fs::read_private(path, FILE_MAX).ok()??;
+    Some(sha256_hex(&bytes))
+}
+
+/// Lower-case hex SHA-256.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    crate::sys::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
 /// Reads and validates the file; a missing file yields the defaults.
@@ -181,10 +281,11 @@ pub(crate) fn parse(text: &str) -> Result<Config, Vec<ConfigError>> {
         }
         hub.finish(&mut errors);
     }
+    sections(&mut errors, &mut root, &mut config);
     if let Some(mut dests) = root.table(&mut errors, "destinations") {
         for (name, value) in dests.entries() {
             let path = dests.child(name);
-            if let Some(d) = destination(&mut errors, &path, name, value) {
+            if let Some(d) = destination(&mut errors, &path, name, value, &config.discord) {
                 config.destinations.insert(name.clone(), d);
             }
         }
@@ -219,6 +320,7 @@ fn destination(
     path: &str,
     name: &str,
     value: &Value,
+    discord: &DiscordSettings,
 ) -> Option<Destination> {
     if !valid_name(name) || name == LOG_DESTINATION {
         errors.push(ConfigError {
@@ -240,10 +342,28 @@ fn destination(
         Some("command") => s
             .argv(errors, "argv")
             .map(|argv| Destination::Command { argv }),
+        Some("discord") => match s.required_string(errors, "channel").map(ChannelRef::parse) {
+            Some(Some(ChannelRef::Name(_))) if discord.guild.is_none() => {
+                errors.push(s.error(
+                    "channel",
+                    "a channel name needs [discord] guild; or give the channel ID",
+                ));
+                None
+            }
+            Some(Some(channel)) => Some(Destination::Discord { channel }),
+            Some(None) => {
+                errors.push(s.error(
+                    "channel",
+                    "expected a channel or thread ID, or a channel name",
+                ));
+                None
+            }
+            None => None,
+        },
         Some(other) => {
             errors.push(s.error(
                 "kind",
-                &format!("unknown destination kind '{other}' (this build knows: command)"),
+                &format!("unknown destination kind '{other}' (this build knows: command, discord)"),
             ));
             None
         }
@@ -251,6 +371,78 @@ fn destination(
     };
     s.finish(errors);
     dest
+}
+
+/// `[omp]`, `[discord]`, `[outgoing]`, `[limits]` and `[health]`.
+fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut Config) {
+    if let Some(mut omp) = root.table(errors, "omp") {
+        if let Some(path) = omp.string(errors, "path") {
+            if path.is_empty() || (path.contains('/') && !Path::new(path).is_absolute()) {
+                errors.push(omp.error("path", "expected an absolute path or a command name"));
+            } else {
+                config.omp.path = path.to_string();
+            }
+        }
+        omp.finish(errors);
+    }
+    if let Some(mut d) = root.table(errors, "discord") {
+        if let Some(file) = d.string(errors, "token_file") {
+            if Path::new(file).is_absolute() {
+                config.discord.token_file = Some(PathBuf::from(file));
+            } else {
+                errors.push(d.error("token_file", "must be an absolute path"));
+            }
+        }
+        if let Some(guild) = d.string(errors, "guild") {
+            config.discord.guild = Snowflake::parse(guild);
+            if config.discord.guild.is_none() {
+                errors.push(d.error("guild", "expected a Discord ID"));
+            }
+        }
+        if let Some(base) = d.string(errors, "api_base") {
+            match Base::parse(base) {
+                Ok(b) if b.is_loopback() => config.discord.api_base = Some(b),
+                Ok(_) => {
+                    errors.push(d.error("api_base", "the test override must point at localhost"));
+                }
+                Err(e) => errors.push(d.error("api_base", &e)),
+            }
+        }
+        d.finish(errors);
+    }
+    if let Some(mut o) = root.table(errors, "outgoing") {
+        config.outgoing.placeholders = o.strings(errors, "placeholder_words").unwrap_or_default();
+        for (i, c) in o
+            .strings(errors, "banned_characters")
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            let mut chars = c.chars();
+            match (chars.next(), chars.next()) {
+                (Some(one), None) => config.outgoing.banned.push(one),
+                _ => errors.push(ConfigError {
+                    path: format!("{}[{i}]", o.child("banned_characters")),
+                    message: "expected exactly one character".into(),
+                }),
+            }
+        }
+        o.finish(errors);
+    }
+    if let Some(mut l) = root.table(errors, "limits") {
+        config.limits.enabled = l.bool(errors, "enabled").unwrap_or(false);
+        if let Some(cache) = l.duration(errors, "cache", LIMITS_CACHE_MIN, DAY) {
+            config.limits.cache = cache;
+        }
+        config.limits.warn_percent = l
+            .integer(errors, "warn_percent", 1, 100)
+            .and_then(|p| u8::try_from(p).ok());
+        l.finish(errors);
+    }
+    if let Some(mut h) = root.table(errors, "health") {
+        config.health.ignore = h.strings(errors, "ignore").unwrap_or_default();
+        h.finish(errors);
+    }
 }
 
 fn job(
@@ -277,29 +469,49 @@ fn job(
     };
     let before = errors.len();
     let mut s = Section::new(path.to_string(), table);
-    let trigger = match s.required_string(errors, "kind") {
-        Some("cron") => cron_trigger(errors, &mut s),
-        Some("once") => once_trigger(errors, &mut s),
-        Some("probe") => probe_trigger(errors, &mut s),
-        Some(other) => {
-            errors.push(s.error(
-                "kind",
-                &format!("unknown job kind '{other}' (this build knows: cron, once, probe)"),
-            ));
-            None
+    let kind = s.required_string(errors, "kind");
+    let (trigger, work, default_timeout) = match kind {
+        Some(k @ ("cron" | "once" | "probe")) => {
+            let trigger = match k {
+                "cron" => cron_trigger(errors, &mut s),
+                "once" => once_trigger(errors, &mut s),
+                _ => probe_trigger(errors, &mut s),
+            };
+            let argv = s.argv(errors, "argv");
+            let cwd = s.required_string(errors, "cwd").map(PathBuf::from);
+            if cwd.as_ref().is_some_and(|c| !c.is_absolute()) {
+                errors.push(s.error("cwd", "must be an absolute path"));
+            }
+            let work = argv.zip(cwd).map(|(argv, cwd)| Work::Command { argv, cwd });
+            (trigger, work, DEFAULT_TIMEOUT)
         }
-        None => None,
+        Some(other) => match owner::parse(other, errors, &mut s) {
+            Some(parsed) => (
+                Some(Trigger::Every {
+                    every: parsed.every,
+                }),
+                Some(Work::Owner(parsed.owner)),
+                parsed.timeout,
+            ),
+            None if owner::is_kind(other) => (None, None, DEFAULT_TIMEOUT),
+            None => {
+                errors.push(s.error(
+                    "kind",
+                    &format!(
+                        "unknown job kind '{other}' (this build knows: cron, once, probe, {})",
+                        owner::KIND_NAMES.join(", ")
+                    ),
+                ));
+                (None, None, DEFAULT_TIMEOUT)
+            }
+        },
+        None => (None, None, DEFAULT_TIMEOUT),
     };
     let enabled = s.bool(errors, "enabled").unwrap_or(true);
     let dry_run = s.bool(errors, "dry_run").unwrap_or(false);
-    let argv = s.argv(errors, "argv");
-    let cwd = s.required_string(errors, "cwd").map(PathBuf::from);
-    if cwd.as_ref().is_some_and(|c| !c.is_absolute()) {
-        errors.push(s.error("cwd", "must be an absolute path"));
-    }
     let timeout = s
         .duration(errors, "timeout", Duration::from_secs(1), DAY)
-        .unwrap_or(DEFAULT_TIMEOUT);
+        .unwrap_or(default_timeout);
     let dests = s.strings(errors, "destinations").unwrap_or_default();
     for (i, d) in dests.iter().enumerate() {
         if d != LOG_DESTINATION && !destinations.contains_key(d) {
@@ -309,9 +521,10 @@ fn job(
             });
         }
     }
-    let templates = trigger
-        .as_ref()
-        .map_or_else(Vec::new, |t| templates(errors, &mut s, t));
+    let templates = match (&trigger, &work) {
+        (Some(t), Some(w)) => templates(errors, &mut s, allowed_events(t, w)),
+        _ => Vec::new(),
+    };
     s.finish(errors);
     if errors.len() > before {
         return None;
@@ -322,11 +535,28 @@ fn job(
         dry_run,
         destinations: dests.into_iter().filter(|d| d != LOG_DESTINATION).collect(),
         templates,
-        argv: argv?,
-        cwd: cwd?,
         timeout,
         trigger: trigger?,
+        work: work?,
     })
+}
+
+/// Event kinds a job may emit, so templates for any other kind are refused.
+fn allowed_events(trigger: &Trigger, work: &Work) -> &'static [EventKind] {
+    match (trigger, work) {
+        (_, Work::Owner(owner)) => owner.events(),
+        (Trigger::Probe { .. }, _) => &[
+            EventKind::ProbeFired,
+            EventKind::ProbeError,
+            EventKind::ProbeRecovered,
+            EventKind::RunBroken,
+        ],
+        _ => &[
+            EventKind::RunDone,
+            EventKind::RunSkipped,
+            EventKind::RunBroken,
+        ],
+    }
 }
 
 fn cron_trigger(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Option<Trigger> {
@@ -396,20 +626,11 @@ fn probe_trigger(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Option<T
     })
 }
 
-fn templates(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, trigger: &Trigger) -> Templates {
-    let allowed: &[EventKind] = match trigger {
-        Trigger::Cron { .. } | Trigger::Once { .. } => &[
-            EventKind::RunDone,
-            EventKind::RunSkipped,
-            EventKind::RunBroken,
-        ],
-        Trigger::Probe { .. } => &[
-            EventKind::ProbeFired,
-            EventKind::ProbeError,
-            EventKind::ProbeRecovered,
-            EventKind::RunBroken,
-        ],
-    };
+fn templates(
+    errors: &mut Vec<ConfigError>,
+    s: &mut Section<'_>,
+    allowed: &[EventKind],
+) -> Templates {
     let Some(mut t) = s.table(errors, "templates") else {
         return Vec::new();
     };
@@ -538,6 +759,39 @@ impl<'a> Section<'a> {
 
     fn bool(&mut self, errors: &mut Vec<ConfigError>, key: &str) -> Option<bool> {
         self.typed(errors, key, "true or false", Value::as_bool)
+    }
+
+    fn integer(
+        &mut self,
+        errors: &mut Vec<ConfigError>,
+        key: &str,
+        min: i64,
+        max: i64,
+    ) -> Option<i64> {
+        let n = self.typed(errors, key, "a whole number", Value::as_integer)?;
+        if (min..=max).contains(&n) {
+            Some(n)
+        } else {
+            errors.push(self.error(key, &format!("must be between {min} and {max}")));
+            None
+        }
+    }
+
+    /// An array of tables, each as its own section with path `key[i]`.
+    fn tables(&mut self, errors: &mut Vec<ConfigError>, key: &str) -> Option<Vec<Section<'a>>> {
+        let path = self.child(key);
+        let items = self.typed(errors, key, "a list of tables", Value::as_array)?;
+        let mut out = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            match item.as_table() {
+                Some(t) => out.push(Section::new(format!("{path}[{i}]"), t)),
+                None => errors.push(ConfigError {
+                    path: format!("{path}[{i}]"),
+                    message: "expected a table".into(),
+                }),
+            }
+        }
+        Some(out)
     }
 
     fn strings(&mut self, errors: &mut Vec<ConfigError>, key: &str) -> Option<Vec<String>> {
@@ -725,9 +979,12 @@ dry_run = true
             errors("[destinations.log]\nkind = \"command\"\nargv = [\"x\"]\n")[0]
                 .starts_with("destinations.log")
         );
+        assert_eq!(
+            errors("[destinations.d]\nkind = \"discord\"\n"),
+            ["destinations.d.channel: required"]
+        );
         assert!(
-            errors("[destinations.d]\nkind = \"discord\"\n")[0]
-                .contains("unknown destination kind")
+            errors("[destinations.d]\nkind = \"slack\"\n")[0].contains("unknown destination kind")
         );
         assert!(errors("[jobs.\"bad name\"]\nkind = \"once\"\n")[0].starts_with("jobs.bad name"));
         assert!(errors("not toml =")[0].starts_with("(file)"));
