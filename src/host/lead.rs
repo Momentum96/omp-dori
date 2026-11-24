@@ -8,8 +8,11 @@
 //!
 //! Resume rule (acceptance check 12): the lead resumes its last session (same ID and file) after a
 //! clean close; after an unclean stop with a free lease it resumes with a note; with a held lease it
-//! is reported and not started. A configured lead session ID must be resumed exactly.
+//! is reported and not started. A configured lead session ID must be resumed exactly. When its OMP
+//! exits by itself the lead is restarted on the same session with backoff, and held for the owner
+//! after more than 5 restarts in 10 minutes (DESIGN 2.2).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -176,6 +179,45 @@ fn unclean(row: &SessionRow) -> Option<String> {
     }
 }
 
+/// Automatic restarts after the lead's child exited by itself, by the supervision rule of DESIGN 2.2:
+/// 1 s doubling to 60 s; more than 5 within 10 minutes hold the lead until the owner starts it.
+const RESTART_FIRST: Duration = Duration::from_secs(1);
+const RESTART_MAX: Duration = Duration::from_secs(60);
+const RESTART_WINDOW: Duration = Duration::from_mins(10);
+const RESTART_LIMIT: usize = 5;
+
+#[derive(Default)]
+struct Restarts {
+    /// When each restart within the window was planned.
+    recent: VecDeque<Instant>,
+    /// The next restart: when, and the session (ID, transcript) it resumes.
+    due: Option<(Instant, (String, PathBuf))>,
+}
+
+impl Restarts {
+    /// Plans the next restart: its delay and its number within the window, or `None` at the limit.
+    fn plan(&mut self, now: Instant, session: (String, PathBuf)) -> Option<(Duration, usize)> {
+        while self
+            .recent
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= RESTART_WINDOW)
+        {
+            self.recent.pop_front();
+        }
+        if self.recent.len() >= RESTART_LIMIT {
+            self.due = None;
+            return None;
+        }
+        let doublings = u32::try_from(self.recent.len()).unwrap_or(u32::MAX);
+        let delay = RESTART_FIRST
+            .saturating_mul(2u32.saturating_pow(doublings))
+            .min(RESTART_MAX);
+        self.recent.push_back(now);
+        self.due = Some((now + delay, session));
+        Some((delay, self.recent.len()))
+    }
+}
+
 /// The standing lead.
 pub(crate) struct Lead<R: Runtime> {
     env: Env<R>,
@@ -187,6 +229,9 @@ pub(crate) struct Lead<R: Runtime> {
     wake: Notify,
     recovered: AtomicBool,
     overlay: OnceLock<PathBuf>,
+    restarts: Mutex<Restarts>,
+    /// The hub asked the current child to close, so its end is no exit by itself.
+    closing: AtomicBool,
     /// Internal `deliver` call to the prompt line written (DESIGN 2.3 wake, hub part).
     pub(crate) wake_latency: Latency,
     /// Prompt line written to the entry found in the session file.
@@ -209,6 +254,8 @@ impl<R: Runtime> Lead<R> {
             wake: Notify::new(),
             recovered: AtomicBool::new(false),
             overlay: OnceLock::new(),
+            restarts: Mutex::new(Restarts::default()),
+            closing: AtomicBool::new(false),
             wake_latency: Latency::default(),
             confirm_latency: Latency::default(),
         })
@@ -227,6 +274,10 @@ impl<R: Runtime> Lead<R> {
 
     fn set_phase(&self, phase: Phase, reason: Option<String>) {
         *self.phase() = (phase, reason);
+    }
+
+    fn restarts(&self) -> MutexGuard<'_, Restarts> {
+        self.restarts.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn emit(&self, emit: Emit) {
@@ -248,6 +299,9 @@ impl<R: Runtime> Lead<R> {
                 if !self.recovered.swap(true, Ordering::AcqRel) {
                     self.recover().await;
                 }
+                if self.restart_wait() == Some(Duration::ZERO) {
+                    self.restart().await;
+                }
                 if self.wants_autostart() {
                     match self.start(false).await {
                         Ok(_) => last_refusal = None,
@@ -260,13 +314,16 @@ impl<R: Runtime> Lead<R> {
                 }
                 let _ = self.flush(None).await;
             }
-            let tick = if self.mailbox.unconfirmed().await {
+            let mut tick = if self.mailbox.unconfirmed().await {
                 CONFIRM_TICK
             } else if self.wants_autostart() || self.env.omp.report().is_none() {
                 AUTOSTART_TICK.min(SWEEP)
             } else {
                 SWEEP
             };
+            if let Some(wait) = self.restart_wait() {
+                tick = tick.min(wait);
+            }
             tokio::select! {
                 () = self.wake.notified() => {}
                 _ = probed.changed() => {}
@@ -410,8 +467,19 @@ impl<R: Runtime> Lead<R> {
         Ok(exe)
     }
 
-    /// Starts the lead (COORD req. 2): refused when a lead runs; resume or fresh by [`plan`].
+    /// Starts the lead (COORD req. 2): refused when a lead runs; resume or fresh by [`plan`]. Earlier
+    /// automatic restarts no longer count.
     pub(crate) async fn start(self: &Arc<Self>, fresh: bool) -> Result<View, String> {
+        *self.restarts() = Restarts::default();
+        self.launch(fresh, None).await
+    }
+
+    /// A start; `again` is the session an automatic restart resumes.
+    async fn launch(
+        self: &Arc<Self>,
+        fresh: bool,
+        again: Option<(String, PathBuf)>,
+    ) -> Result<View, String> {
         let _one = self.starting.lock().await;
         if self.current().is_some_and(|s| s.alive()) {
             return Err("a lead is already running".into());
@@ -427,7 +495,11 @@ impl<R: Runtime> Lead<R> {
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .ok_or("no working directory: set [lead] cwd")?;
         let cwd = std::fs::canonicalize(&cwd).map_err(|e| format!("lead cwd: {e}"))?;
-        let (target, expected, note) = self.target(&settings, fresh, &cwd).await?;
+        let automatic = again.is_some();
+        let (target, expected, note) = match again {
+            Some((id, file)) => self.again(id, file, &cwd).await?,
+            None => self.target(&settings, fresh, &cwd).await?,
+        };
         self.overlay(&config)?;
         let handle = super::random_hex(8);
         let now = now_ms();
@@ -485,7 +557,7 @@ impl<R: Runtime> Lead<R> {
                     .await;
                 Ok(self.view().await)
             }
-            Err(e) => Err(self.not_started(handle, &e).await),
+            Err(e) => Err(self.not_started(handle, &e, automatic).await),
         }
     }
 
@@ -569,8 +641,10 @@ impl<R: Runtime> Lead<R> {
         })
         .await;
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
+        self.closing.store(false, Ordering::Release);
         self.set_phase(Phase::Live, started.held.clone());
-        tokio::spawn(Arc::clone(self).watch(handle, session.subscribe()));
+        let identity = (started.session_id.clone(), PathBuf::from(&started.file));
+        tokio::spawn(Arc::clone(self).watch(handle, identity, session.subscribe()));
         self.emit(
             Emit::new(EventKind::LeadStarted, Severity::Info, false, "lead")
                 .with("session", &started.session_id)
@@ -600,8 +674,9 @@ impl<R: Runtime> Lead<R> {
         self.wake.notify_one();
     }
 
-    /// A start that did not bind: the record says why, and the owner hears it.
-    async fn not_started(&self, handle: String, e: &StartError) -> String {
+    /// A start that did not bind: the record says why, and the owner hears it unless the start was
+    /// an automatic restart (its retry or hold reports instead).
+    async fn not_started(&self, handle: String, e: &StartError, automatic: bool) -> String {
         let detail = e.to_string();
         self.update(SessionUpdate {
             handle,
@@ -610,6 +685,9 @@ impl<R: Runtime> Lead<R> {
             ..SessionUpdate::default()
         })
         .await;
+        if automatic {
+            return detail;
+        }
         let phase = match e {
             StartError::Refused(_) => Phase::NotStarted,
             StartError::Failed(_) => Phase::Held,
@@ -620,6 +698,103 @@ impl<R: Runtime> Lead<R> {
                 .with("reason", &detail),
         );
         detail
+    }
+
+    /// The target of an automatic restart: exactly the session that exited (HOST req. 81).
+    async fn again(
+        &self,
+        id: String,
+        file: PathBuf,
+        cwd: &Path,
+    ) -> Result<(Target, Option<String>, Option<String>), String> {
+        let dir = self.env.state_dir.join("sessions").join("lead");
+        match transcript::verify(file.clone(), dir, id.clone(), cwd.to_path_buf()).await {
+            Ok(Some(_)) => Ok((
+                Target::Resume(file),
+                Some(id),
+                Some("resumed after its OMP process exited by itself".into()),
+            )),
+            _ => Err(format!(
+                "the transcript of lead session {id} did not verify for an exact resume"
+            )),
+        }
+    }
+
+    /// How long until the planned automatic restart; zero when it is due.
+    fn restart_wait(&self) -> Option<Duration> {
+        self.restarts()
+            .due
+            .as_ref()
+            .map(|(at, _)| at.saturating_duration_since(Instant::now()))
+    }
+
+    /// The automatic restart (DESIGN 2.2): the same session when its lease is free (HOST req. 86-88).
+    async fn restart(self: &Arc<Self>) {
+        let Some((_, (id, file))) = self.restarts().due.take() else {
+            return;
+        };
+        if self.current().is_some_and(|s| s.alive()) {
+            // The owner started the lead meanwhile.
+            return;
+        }
+        let lease = self.lease(&id).await;
+        if lease != Lease::Free {
+            let reason = format!(
+                "the lead's OMP exited and its session {id} {}; not restarted, held for the owner",
+                if lease == Lease::Held {
+                    "is held by another OMP"
+                } else {
+                    "has an unknown lease"
+                }
+            );
+            self.set_phase(Phase::Held, Some(reason.clone()));
+            self.emit(
+                Emit::new(EventKind::LeadNotStarted, Severity::Warning, true, "lead")
+                    .with("reason", &reason),
+            );
+            return;
+        }
+        match self.launch(false, Some((id.clone(), file.clone()))).await {
+            Ok(_) => log::info("lead restarted", &[("session", &id)]),
+            Err(reason) => {
+                log::warn("lead restart failed", &[("reason", &reason)]);
+                self.exited((id, file), &format!("its restart failed: {reason}"), None);
+            }
+        }
+    }
+
+    /// After the child exited by itself (`exit` is its status), or a restart failed: plans the next
+    /// restart, or past the limit holds the lead for the owner (DESIGN 2.2). Every exit is an event
+    /// (HOST req. 70); the owner is alerted at the first exit of a series and at the hold.
+    fn exited(&self, session: (String, PathBuf), why: &str, exit: Option<&str>) {
+        let planned = self.restarts().plan(Instant::now(), session);
+        let next = match planned {
+            Some((delay, _)) => format!("restarting in {} s", delay.as_secs()),
+            None => format!(
+                "more than {RESTART_LIMIT} restarts within 10 minutes, held until `cataly lead start`"
+            ),
+        };
+        let reason = format!("{why}; {next}");
+        if let Some(exit) = exit {
+            let urgent = matches!(planned, Some((_, 1)));
+            self.emit(
+                Emit::new(EventKind::SessionStopped, Severity::Warning, urgent, "lead")
+                    .with("role", "lead")
+                    .with("how", "exited")
+                    .with("detail", format!("{exit}; {next}")),
+            );
+        }
+        if planned.is_some() {
+            self.set_phase(Phase::Stopped, Some(reason));
+            self.wake.notify_one();
+        } else {
+            self.set_phase(Phase::Held, Some(reason.clone()));
+            self.emit(
+                Emit::new(EventKind::SessionFenced, Severity::Warning, true, "lead")
+                    .with("role", "lead")
+                    .with("reason", &reason),
+            );
+        }
     }
 
     /// Writes the overlay once per hub run (DESIGN 4.2).
@@ -638,10 +813,11 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
-    /// Follows one session's events: hub events, inbox wakes and the stop record.
+    /// Follows one session's events: hub events, inbox wakes, the stop record and the restart.
     async fn watch(
         self: Arc<Self>,
         handle: String,
+        identity: (String, PathBuf),
         mut events: broadcast::Receiver<(u64, SessionEvent)>,
     ) {
         loop {
@@ -719,15 +895,15 @@ impl<R: Runtime> Lead<R> {
                         ..SessionUpdate::default()
                     })
                     .await;
-                    if record.how == "exited" {
-                        self.emit(
-                            Emit::new(EventKind::SessionStopped, Severity::Warning, true, "lead")
-                                .with("role", "lead")
-                                .with("how", &record.how)
-                                .with("detail", record.detail.as_deref().unwrap_or("")),
+                    self.set_phase(Phase::Stopped, Some(format!("stopped: {}", record.how)));
+                    if record.how == "exited" && !self.closing.load(Ordering::Acquire) {
+                        let exit = record.detail.as_deref().unwrap_or("no exit status");
+                        self.exited(
+                            identity,
+                            &format!("its OMP exited by itself ({exit})"),
+                            Some(exit),
                         );
                     }
-                    self.set_phase(Phase::Stopped, Some(format!("stopped: {}", record.how)));
                     self.wake.notify_one();
                     return;
                 }
@@ -752,6 +928,12 @@ impl<R: Runtime> Lead<R> {
             .flush(session.as_deref(), blocked)
             .await
             .map_err(|e| e.to_string())?;
+        self.report(notes, called).await;
+        Ok(())
+    }
+
+    /// Records what a flush or a delivery found.
+    async fn report(&self, notes: Vec<Note>, called: Option<Instant>) {
         for note in notes {
             match note {
                 Note::Sent { written } => {
@@ -812,20 +994,28 @@ impl<R: Runtime> Lead<R> {
                 }
             }
         }
-        Ok(())
     }
 
     /// Hands a message to the lead (COORD-10, COORD-15): stored, then delivered at once when the lead
     /// can read. Accepted even with no lead session; it goes out once a lead exists (COORD req. 24).
     pub(crate) async fn deliver(&self, request: Message) -> Result<Receipt, String> {
         let called = Instant::now();
-        let (receipt, stored) = self.mailbox.admit(&request).await?;
+        let (receipt, stored) = {
+            let _one = self.flushing.lock().await;
+            let session = self.current();
+            let blocked = session
+                .as_ref()
+                .is_some_and(|s| s.snapshot().quota_blocked.is_some());
+            let (receipt, stored, notes) = self
+                .mailbox
+                .deliver(&request, session.as_deref(), blocked)
+                .await?;
+            self.report(notes, Some(called)).await;
+            (receipt, stored)
+        };
         let Some(id) = stored else {
             return Ok(receipt);
         };
-        if let Err(e) = self.flush(Some(called)).await {
-            log::warn("lead inbox flush failed", &[("error", &e)]);
-        }
         self.wake.notify_one();
         Ok(self.mailbox.receipt(request.request_id, id).await)
     }
@@ -923,15 +1113,35 @@ impl<R: Runtime> Lead<R> {
             .events_after(after, super::headless::EVENT_PAGE))
     }
 
-    /// Stops the lead; refused while it works or has a dialog unless forced (HOST req. 83).
+    /// Stops the lead; refused while it works or has a dialog unless forced (HOST req. 83). With no
+    /// lead running it cancels a planned automatic restart.
     pub(crate) async fn stop(&self, force: bool) -> Result<View, String> {
-        let session = self.live()?;
+        let session = match self.live() {
+            Ok(session) => session,
+            Err(e) => {
+                if self.restarts().due.take().is_none() {
+                    return Err(e);
+                }
+                self.set_phase(
+                    Phase::Stopped,
+                    Some("the automatic restart was cancelled".into()),
+                );
+                return Ok(self.view().await);
+            }
+        };
         let snapshot = session.snapshot();
         if !force && (snapshot.status == Status::Working || !snapshot.dialogs.is_empty()) {
             return Err("the lead is working or has a pending dialog; use --force".into());
         }
         let handle = snapshot.handle.clone();
-        let record = session.close(force).await?;
+        self.closing.store(true, Ordering::Release);
+        let record = match session.close(force).await {
+            Ok(record) => record,
+            Err(e) => {
+                self.closing.store(false, Ordering::Release);
+                return Err(e);
+            }
+        };
         // Written before the answer, so an immediate start sees the stop record.
         self.update(SessionUpdate {
             handle,
@@ -950,6 +1160,7 @@ impl<R: Runtime> Lead<R> {
             return;
         };
         let handle = session.snapshot().handle.clone();
+        self.closing.store(true, Ordering::Release);
         match tokio::time::timeout(STOP_BUDGET + Duration::from_secs(5), session.close(true)).await
         {
             Ok(Ok(record)) => {
@@ -1061,5 +1272,34 @@ mod tests {
             plan(Some(&gone), Some("s1"), false, Lease::Free),
             Plan::Refuse(_)
         ));
+    }
+
+    /// DESIGN 2.2: restarts wait 1, 2, 4, 8 and 16 s; a sixth within 10 minutes is refused (the lead
+    /// is held); once the oldest restart is 10 minutes old one more is allowed.
+    #[test]
+    fn restarts_back_off_and_stop_at_the_limit() {
+        let mut restarts = Restarts::default();
+        let start = Instant::now();
+        let session = || ("s1".to_string(), PathBuf::from("/s.jsonl"));
+        let mut delays = Vec::new();
+        for n in 0..5u64 {
+            let (delay, count) = restarts
+                .plan(start + Duration::from_secs(n), session())
+                .unwrap();
+            assert_eq!(count, usize::try_from(n + 1).unwrap());
+            delays.push(delay.as_secs());
+        }
+        assert_eq!(delays, [1, 2, 4, 8, 16]);
+        assert!(restarts.due.is_some());
+        assert_eq!(
+            restarts.plan(start + Duration::from_secs(5), session()),
+            None
+        );
+        assert!(restarts.due.is_none(), "nothing stays planned once held");
+        let later = start + RESTART_WINDOW;
+        assert_eq!(
+            restarts.plan(later, session()),
+            Some((Duration::from_secs(16), 5))
+        );
     }
 }

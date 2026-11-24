@@ -91,6 +91,9 @@ pub(crate) struct Delivery {
     pub(crate) timing: Timing,
     /// Steer the running turn instead of waking or queueing.
     pub(crate) steer: bool,
+    /// The caller read the state back ([`Control::refresh`]) after this delivery was asked for; the
+    /// checks use that readback unless an event made it stale since (HOST req. 50).
+    pub(crate) fresh: bool,
 }
 
 /// The result of a delivery (HOST req. 54).
@@ -232,6 +235,8 @@ pub(crate) trait Control: Send + Sync + 'static {
     fn events_after(&self, after: u64, limit: usize) -> EventPage;
     /// Whether the child is still running.
     fn alive(&self) -> bool;
+    /// Reads the state back (HOST req. 5); a caller may overlap it with its own work.
+    fn refresh(&self) -> impl Future<Output = Result<(), String>> + Send;
     fn deliver(&self, delivery: Delivery) -> impl Future<Output = DeliverOutcome> + Send;
     fn interrupt(&self) -> impl Future<Output = Result<String, String>> + Send;
     fn set_model(&self, selector: &str) -> impl Future<Output = Result<String, String>> + Send;

@@ -353,25 +353,31 @@ fn lead_end_to_end_and_resume() {
     let rss = hub.json(&["stats", "--json"])["rss_bytes"]
         .as_u64()
         .unwrap();
-    for n in 0..5 {
+    // Wakes of an idle lead: each message waits until the previous turn ended and settled.
+    let wakes = 40;
+    for n in 0..wakes {
+        wait_lead(&hub, |v| {
+            v["sent"] == 0 && v["waiting"] == 0 && v["session"]["status"] == "idle"
+        });
         let out = hub.cli(&["lead", "send", &format!("hello {n}"), "--json"]);
         assert!(out.status.success(), "{out:?}");
         let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert!(
-            ["sent", "delivered", "waiting"].contains(&receipt["state"].as_str().unwrap()),
+            ["sent", "delivered"].contains(&receipt["state"].as_str().unwrap()),
             "{receipt}"
         );
-        wait_lead(&hub, |v| v["sent"] == 0 && v["waiting"] == 0);
     }
+    wait_lead(&hub, |v| v["sent"] == 0 && v["waiting"] == 0);
     let stats = hub.json(&["stats", "--json"]);
     eprintln!(
-        "MEASURE rss_lead_attached={rss} wake={} confirm={} agent_start={}",
-        stats["wake_latency"], stats["confirm_latency"], stats["agent_start_latency"]
+        "MEASURE rss_lead_attached={rss} wake={} confirm={} agent_start={} store_commit={}",
+        stats["wake_latency"],
+        stats["confirm_latency"],
+        stats["agent_start_latency"],
+        stats["store_commit_latency"]
     );
-    assert!(
-        stats["confirm_latency"]["count"].as_u64().unwrap() >= 5,
-        "{stats}"
-    );
+    assert_eq!(stats["wake_latency"]["count"], wakes, "{stats}");
+    assert_eq!(stats["confirm_latency"]["count"], wakes, "{stats}");
     // The overlay pins the safety settings (check 9: modelFallback on, no auto-redeem).
     let overlay: Value = serde_json::from_str(
         &std::fs::read_to_string(hub.state().join("omp-overlay.yml")).unwrap(),
@@ -437,8 +443,20 @@ fn lead_falls_back_along_the_owner_chain() {
         sandbox.model.seen()
     );
     assert!(kinds.iter().any(|k| k == "session.fallback"), "{kinds:?}");
-    // OMP reports one `retry_fallback_applied` per fallen-back request; the hub turns each into one
-    // quiet event, never a reset or another account.
+    // A second turn runs on the fallback model; the one move stays one quiet event.
+    let settled =
+        |v: &Value| v["sent"] == 0 && v["waiting"] == 0 && v["session"]["status"] == "idle";
+    wait_lead(&hub, settled);
+    assert!(hub.cli(&["lead", "send", "hello again"]).status.success());
+    let idle = wait_lead(&hub, settled);
+    assert_eq!(idle["session"]["model"], "fake/backup", "{idle}");
+    let fallbacks: Vec<Value> = hub
+        .events()
+        .into_iter()
+        .filter(|e| e["kind"] == "session.fallback")
+        .collect();
+    assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
+    assert_eq!(fallbacks[0]["urgent"], false);
     assert!(sandbox.model.seen().iter().any(|m| m == "backup"));
     assert!(hub.stop().success());
     let _ = std::fs::remove_dir_all(&sandbox.root);

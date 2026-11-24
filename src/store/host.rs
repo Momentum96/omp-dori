@@ -191,6 +191,13 @@ pub(crate) enum HostWrite {
         delivery: DeliveryRow,
         inbox: Vec<i64>,
     },
+    /// [`HostWrite::Admit`], and when the message is stored, [`HostWrite::Send`] of the batch that
+    /// carries it (`inbox` lists the other rows): one commit on the wake path (DESIGN 2.3, 7.2).
+    AdmitSend {
+        admit: Admit,
+        delivery: DeliveryRow,
+        inbox: Vec<i64>,
+    },
     /// Ends or re-opens a delivery: `delivered`, `in_doubt`, `failed`, `misdelivered`, `superseded`
     /// (never written: its rows become pending again), or `sent` again for the one resend.
     Resolve {
@@ -293,32 +300,20 @@ pub(super) fn write(
         HostWrite::Session(u) => update(tx, u, now),
         HostWrite::Admit(a) => admit(tx, a, now).map(HostDone::Admitted),
         HostWrite::Send { delivery, inbox } => {
-            let d = delivery;
-            tx.execute(
-                &format!(
-                    "INSERT INTO deliveries ({DELIVERY_COLUMNS}) VALUES \
-                     (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', 0, ?8, ?9, NULL)"
-                ),
-                params![
-                    d.id,
-                    d.target,
-                    d.handle,
-                    d.session_id,
-                    d.session_file,
-                    d.kind,
-                    d.text,
-                    d.created_ms,
-                    d.sent_ms
-                ],
-            )?;
-            for id in inbox {
-                tx.execute(
-                    "UPDATE inbox SET state = 'sent', delivery_id = ?2, updated_ms = ?3 \
-                     WHERE id = ?1 AND state = 'pending'",
-                    params![id, d.id, now],
-                )?;
-            }
+            send(tx, delivery, inbox, now)?;
             Ok(HostDone::Done)
+        }
+        HostWrite::AdmitSend {
+            admit: a,
+            delivery,
+            inbox,
+        } => {
+            let admitted = admit(tx, a, now)?;
+            if let Admitted::Stored(id) = admitted {
+                send(tx, delivery, inbox, now)?;
+                send_rows(tx, &delivery.id, &[id], now)?;
+            }
+            Ok(HostDone::Admitted(admitted))
         }
         HostWrite::Resolve { id, state, detail } => resolve(tx, id, state, detail.as_deref(), now),
         HostWrite::Settle {
@@ -357,6 +352,43 @@ pub(super) fn write(
             )
             .map(HostDone::Rows),
     }
+}
+
+fn send(tx: &Transaction<'_>, d: &DeliveryRow, inbox: &[i64], now: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        &format!(
+            "INSERT INTO deliveries ({DELIVERY_COLUMNS}) VALUES \
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'sent', 0, ?8, ?9, NULL)"
+        ),
+        params![
+            d.id,
+            d.target,
+            d.handle,
+            d.session_id,
+            d.session_file,
+            d.kind,
+            d.text,
+            d.created_ms,
+            d.sent_ms
+        ],
+    )?;
+    send_rows(tx, &d.id, inbox, now)
+}
+
+fn send_rows(
+    tx: &Transaction<'_>,
+    delivery: &str,
+    inbox: &[i64],
+    now: i64,
+) -> rusqlite::Result<()> {
+    for id in inbox {
+        tx.execute(
+            "UPDATE inbox SET state = 'sent', delivery_id = ?2, updated_ms = ?3 \
+             WHERE id = ?1 AND state = 'pending'",
+            params![id, delivery, now],
+        )?;
+    }
+    Ok(())
 }
 
 fn admit(tx: &Transaction<'_>, a: &Admit, now: i64) -> rusqlite::Result<Admitted> {

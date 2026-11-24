@@ -137,24 +137,23 @@ fn clock(ms: i64) -> String {
 }
 
 /// One message as its text; several as one prompt that says how many arrived while the agent was
-/// busy, then each numbered with its sender, in arrival order (COORD req. 17).
-pub(crate) fn batch_text(delivery_id: &str, rows: &[InboxRow]) -> String {
+/// busy, then each numbered with its sender, in arrival order (COORD req. 17). Each part is sender,
+/// arrival time and text.
+pub(crate) fn batch_text(delivery_id: &str, parts: &[(&str, i64, &str)]) -> String {
     let head = marker(delivery_id);
-    match rows {
-        [one] => format!("{head} from {}\n{}", one.sender, one.text),
+    match parts {
+        [(sender, _, text)] => format!("{head} from {sender}\n{text}"),
         many => {
             let mut text = format!(
                 "{head} {} messages arrived while you were busy:",
                 many.len()
             );
-            for (n, row) in many.iter().enumerate() {
+            for (n, (sender, at_ms, body)) in many.iter().enumerate() {
                 let _ = write!(
                     text,
-                    "\n\n{}. from {} at {}:\n{}",
+                    "\n\n{}. from {sender} at {}:\n{body}",
                     n + 1,
-                    row.sender,
-                    clock(row.created_ms),
-                    row.text
+                    clock(*at_ms),
                 );
             }
             text
@@ -190,6 +189,20 @@ fn receipt_of(request_id: Option<String>, row: Option<&InboxRow>) -> Receipt {
     }
 }
 
+/// The delivery that writes a recorded batch, and the batch ID.
+fn outgoing(batch: &DeliveryRow, timing: Timing) -> (String, Delivery) {
+    (
+        batch.id.clone(),
+        Delivery {
+            expected_session: batch.session_id.clone(),
+            text: batch.text.clone(),
+            timing,
+            steer: false,
+            fresh: false,
+        },
+    )
+}
+
 /// What a check of a written batch found.
 enum Check {
     Delivered(i64),
@@ -207,9 +220,109 @@ pub(crate) struct Mailbox {
     pub(crate) store: Store,
 }
 
+/// A batch ready to be recorded and written.
+struct Batch {
+    delivery: DeliveryRow,
+    /// Pending rows it carries.
+    inbox: Vec<i64>,
+    timing: Timing,
+    /// It also carries the message being admitted.
+    extra: bool,
+}
+
 impl Mailbox {
     /// Stores a message (COORD req. 15, 19; HOST req. 57-59). `Err` is a refusal; nothing was stored.
     pub(crate) async fn admit(&self, req: &Message) -> Result<(Receipt, Option<i64>), String> {
+        let admit = self.offer(req)?;
+        let done = self
+            .store
+            .host(HostWrite::Admit(admit))
+            .await
+            .map_err(|e| e.to_string())?;
+        self.admitted(req.request_id.clone(), done).await
+    }
+
+    /// Stores a message and delivers what may go now (COORD req. 15, 24). When the target can take
+    /// it at once, the message and the batch that carries it are stored in one commit before the
+    /// batch is written: one durable commit on the wake path (DESIGN 2.3, 7.2). Otherwise it is
+    /// stored and the inbox is flushed as usual. `Err` is a refusal; nothing was stored.
+    pub(crate) async fn deliver<S: Control>(
+        &self,
+        req: &Message,
+        session: Option<&S>,
+        quota_blocked: bool,
+    ) -> Result<(Receipt, Option<i64>, Vec<Note>), String> {
+        let admit = self.offer(req)?;
+        let target = self.target.clone();
+        let clear = self
+            .store
+            .read(move |r| r.sent_deliveries(&target))
+            .await
+            .is_ok_and(|sent| sent.is_empty());
+        let live = session.filter(|s| s.alive());
+        let batch = match live {
+            Some(s) if clear => self
+                .batch(s, quota_blocked, Some(req))
+                .await
+                .map_err(|e| e.to_string())?
+                .filter(|b| b.extra),
+            _ => None,
+        };
+        let (Some(batch), Some(session)) = (batch, live) else {
+            let done = self
+                .store
+                .host(HostWrite::Admit(admit))
+                .await
+                .map_err(|e| e.to_string())?;
+            let (receipt, stored) = self.admitted(req.request_id.clone(), done).await?;
+            let notes = match stored {
+                Some(_) => self.flush(session, quota_blocked).await,
+                None => Ok(Vec::new()),
+            };
+            return Ok((receipt, stored, self.stored_anyway(notes)));
+        };
+        let Batch {
+            delivery,
+            inbox,
+            timing,
+            ..
+        } = batch;
+        let (id, mut outgoing) = outgoing(&delivery, timing);
+        // The readback the write needs runs while the commit waits for its fsync.
+        let (done, refreshed) = tokio::join!(
+            self.store.host(HostWrite::AdmitSend {
+                admit,
+                delivery,
+                inbox,
+            }),
+            session.refresh()
+        );
+        let done = done.map_err(|e| e.to_string())?;
+        let (receipt, stored) = self.admitted(req.request_id.clone(), done).await?;
+        if stored.is_none() {
+            // Not stored (a repeat or a duplicate): its batch was not recorded either.
+            return Ok((receipt, None, Vec::new()));
+        }
+        outgoing.fresh = refreshed.is_ok();
+        let note = self.write(session, id, outgoing).await;
+        let notes = self.stored_anyway(note.map(|n| n.into_iter().collect()));
+        Ok((receipt, stored, notes))
+    }
+
+    /// A store failure after the message was stored is logged, not reported as a refusal: the
+    /// message waits in the inbox for the next flush.
+    fn stored_anyway(&self, notes: Result<Vec<Note>, StoreError>) -> Vec<Note> {
+        notes.unwrap_or_else(|e| {
+            crate::log::warn(
+                "inbox flush failed",
+                &[("target", &self.target), ("error", &e)],
+            );
+            Vec::new()
+        })
+    }
+
+    /// Checks a message and turns it into its store record.
+    fn offer(&self, req: &Message) -> Result<Admit, String> {
         if let Some(id) = &req.request_id
             && !valid_request_id(id)
         {
@@ -221,21 +334,24 @@ impl Mailbox {
         if req.text.len() > TEXT_MAX {
             return Err("the text is over 256 KiB".into());
         }
-        let done = self
-            .store
-            .host(HostWrite::Admit(Admit {
-                target: self.target.clone(),
-                request_id: req.request_id.clone(),
-                digest: digest("prompt", &req.text),
-                sender: req.sender.clone(),
-                text: req.text.clone(),
-                urgent: req.urgent,
-                owner: req.owner,
-                identity: req.identity.clone(),
-            }))
-            .await
-            .map_err(|e| e.to_string())?;
-        let rid = req.request_id.clone();
+        Ok(Admit {
+            target: self.target.clone(),
+            request_id: req.request_id.clone(),
+            digest: digest("prompt", &req.text),
+            sender: req.sender.clone(),
+            text: req.text.clone(),
+            urgent: req.urgent,
+            owner: req.owner,
+            identity: req.identity.clone(),
+        })
+    }
+
+    /// The receipt for what the store did with an offered message.
+    async fn admitted(
+        &self,
+        rid: Option<String>,
+        done: HostDone,
+    ) -> Result<(Receipt, Option<i64>), String> {
         match done {
             HostDone::Admitted(Admitted::Stored(id)) => Ok((
                 receipt_of(rid, None).with_state(ReceiptState::Waiting, id),
@@ -463,6 +579,7 @@ impl Mailbox {
                 text: d.text.clone(),
                 timing: Timing::Any,
                 steer: false,
+                fresh: false,
             })
             .await;
         match outcome {
@@ -493,6 +610,33 @@ impl Mailbox {
         let Some(session) = session.filter(|s| s.alive()) else {
             return Ok(None);
         };
+        let Some(Batch {
+            delivery,
+            inbox,
+            timing,
+            ..
+        }) = self.batch(session, quota_blocked, None).await?
+        else {
+            return Ok(None);
+        };
+        let (id, mut outgoing) = outgoing(&delivery, timing);
+        let (done, refreshed) = tokio::join!(
+            self.store.host(HostWrite::Send { delivery, inbox }),
+            session.refresh()
+        );
+        done?;
+        outgoing.fresh = refreshed.is_ok();
+        self.write(session, id, outgoing).await
+    }
+
+    /// The batch of pending rows, and `extra` (a message being admitted), that may go to `session`
+    /// now; `None` when nothing may go.
+    async fn batch<S: Control>(
+        &self,
+        session: &S,
+        quota_blocked: bool,
+        extra: Option<&Message>,
+    ) -> Result<Option<Batch>, StoreError> {
         let snapshot = session.snapshot();
         let (Some(session_id), Some(file)) = (&snapshot.session_id, &snapshot.session_file) else {
             return Ok(None);
@@ -504,55 +648,60 @@ impl Mailbox {
             Status::Working => ("follow_up", Timing::Working),
             _ => return Ok(None),
         };
+        let may_go = |owner: bool, identity: Option<&str>| {
+            !quota_blocked || owner || identity.is_some_and(|i| i.starts_with(QUOTA_PREFIX))
+        };
+        let extra = extra.filter(|m| may_go(m.owner, m.identity.as_deref()));
         let target = self.target.clone();
         let rows: Vec<InboxRow> = self
             .store
             .read(move |r| r.inbox_open(&target))
             .await?
             .into_iter()
-            .filter(|r| r.state == "pending")
-            .filter(|r| {
-                !quota_blocked
-                    || r.owner
-                    || r.identity
-                        .as_deref()
-                        .is_some_and(|i| i.starts_with(QUOTA_PREFIX))
-            })
+            .filter(|r| r.state == "pending" && may_go(r.owner, r.identity.as_deref()))
             .collect();
         // Quiet notes never wake a session (COORD-10).
-        if !rows.iter().any(|r| r.urgent || r.owner) {
+        if !rows.iter().any(|r| r.urgent || r.owner) && !extra.is_some_and(|m| m.urgent || m.owner)
+        {
             return Ok(None);
         }
-        let id = super::random_hex(8);
-        let text = batch_text(&id, &rows);
         let now = now_ms();
-        self.store
-            .host(HostWrite::Send {
-                delivery: DeliveryRow {
-                    id: id.clone(),
-                    target: self.target.clone(),
-                    handle: snapshot.handle.clone(),
-                    session_id: session_id.clone(),
-                    session_file: file.clone(),
-                    kind: kind.into(),
-                    text: text.clone(),
-                    state: "sent".into(),
-                    resent: false,
-                    created_ms: now,
-                    sent_ms: now,
-                    detail: None,
-                },
-                inbox: rows.iter().map(|r| r.id).collect(),
-            })
-            .await?;
-        let outcome = session
-            .deliver(Delivery {
-                expected_session: session_id.clone(),
+        let parts: Vec<(&str, i64, &str)> = rows
+            .iter()
+            .map(|r| (r.sender.as_str(), r.created_ms, r.text.as_str()))
+            .chain(extra.map(|m| (m.sender.as_str(), now, m.text.as_str())))
+            .collect();
+        let id = super::random_hex(8);
+        let text = batch_text(&id, &parts);
+        Ok(Some(Batch {
+            delivery: DeliveryRow {
+                id,
+                target: self.target.clone(),
+                handle: snapshot.handle.clone(),
+                session_id: session_id.clone(),
+                session_file: file.clone(),
+                kind: kind.into(),
                 text,
-                timing,
-                steer: false,
-            })
-            .await;
+                state: "sent".into(),
+                resent: false,
+                created_ms: now,
+                sent_ms: now,
+                detail: None,
+            },
+            inbox: rows.iter().map(|r| r.id).collect(),
+            timing,
+            extra: extra.is_some(),
+        }))
+    }
+
+    /// Writes a recorded batch to its session and settles what came of it.
+    async fn write<S: Control>(
+        &self,
+        session: &S,
+        id: String,
+        delivery: Delivery,
+    ) -> Result<Option<Note>, StoreError> {
+        let outcome = session.deliver(delivery).await;
         match outcome {
             DeliverOutcome::Delivered { written, .. } => Ok(Some(Note::Sent { written })),
             DeliverOutcome::NotReady(status) => {
@@ -630,30 +779,13 @@ mod tests {
         }
     }
 
-    fn row(sender: &str, text: &str, at: i64) -> InboxRow {
-        InboxRow {
-            id: 1,
-            sender: sender.into(),
-            text: text.into(),
-            urgent: true,
-            owner: false,
-            identity: None,
-            state: "pending".into(),
-            delivery_id: None,
-            created_ms: at,
-        }
-    }
-
     #[test]
     fn batches_number_their_messages() {
         assert_eq!(
-            batch_text("ab", &[row("owner", "hi", 0)]),
+            batch_text("ab", &[("owner", 0, "hi")]),
             "[cataly:ab] from owner\nhi"
         );
-        let two = batch_text(
-            "ab",
-            &[row("owner", "one", 0), row("lane x", "two", 60_000)],
-        );
+        let two = batch_text("ab", &[("owner", 0, "one"), ("lane x", 60_000, "two")]);
         assert!(two.starts_with("[cataly:ab] 2 messages arrived while you were busy:"));
         assert!(two.contains("\n\n1. from owner at 00:00 UTC:\none"));
         assert!(two.contains("\n\n2. from lane x at 00:01 UTC:\ntwo"));
@@ -703,6 +835,60 @@ mod tests {
         let (again, stored) = mailbox.admit(&owner("hello", Some("r1"))).await.unwrap();
         assert_eq!((again.state, stored), (ReceiptState::Delivered, None));
         assert!(mailbox.admit(&owner("other", Some("r1"))).await.is_err());
+        assert_eq!(fake.seen("prompt").len(), 1);
+    }
+
+    /// The wake path: the message and the batch that carries it (with a waiting quiet note) are
+    /// stored in one commit before the prompt is written; while that batch waits for its entry, the
+    /// next message is only stored; a repeated request ID sends nothing.
+    #[tokio::test]
+    async fn deliver_stores_and_sends_in_one_commit() {
+        let (mailbox, fake, session) = box_and_session("inbox-one-commit").await;
+        let note = Message {
+            sender: HUB_SENDER.into(),
+            text: "fyi".into(),
+            urgent: false,
+            owner: false,
+            identity: None,
+            request_id: None,
+        };
+        mailbox.admit(&note).await.unwrap();
+        fake.set(|s| s.write_entries = false);
+        let commits = || {
+            mailbox
+                .store
+                .commit_latency()
+                .summary()
+                .map_or(0, |s| s.count)
+        };
+        let before = commits();
+        let (receipt, id, notes) = mailbox
+            .deliver(&owner("hello", Some("r1")), Some(&*session), false)
+            .await
+            .unwrap();
+        assert_eq!(commits(), before + 1, "one commit before the write");
+        assert!(id.is_some() && receipt.state == ReceiptState::Waiting);
+        assert!(
+            matches!(notes.as_slice(), [Note::Sent { written: Some(_) }]),
+            "{notes:?}"
+        );
+        let prompt = fake.wait_seen("prompt", 1).await;
+        let text = prompt["message"].as_str().unwrap();
+        assert!(
+            text.contains("2 messages arrived") && text.contains("fyi") && text.contains("hello")
+        );
+        let receipt = mailbox.receipt(Some("r1".into()), id.unwrap()).await;
+        assert_eq!(receipt.state, ReceiptState::Sent);
+        let (_, later, notes) = mailbox
+            .deliver(&owner("later", None), Some(&*session), false)
+            .await
+            .unwrap();
+        assert!(later.is_some() && notes.is_empty(), "{notes:?}");
+        let (again, stored, _) = mailbox
+            .deliver(&owner("hello", Some("r1")), Some(&*session), false)
+            .await
+            .unwrap();
+        assert_eq!((again.state, stored), (ReceiptState::Sent, None));
         assert_eq!(fake.seen("prompt").len(), 1);
     }
 

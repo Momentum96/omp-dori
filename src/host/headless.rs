@@ -138,12 +138,22 @@ struct State {
     quota_blocked: Option<String>,
     spend_offers: VecDeque<i64>,
     cancelled_offers: HashSet<String>,
+    /// The fallback model OMP moved to and the hub reported, until the requested model is back.
     fallback_to: Option<String>,
+    /// OMP's latest fallback report, until a readback shows its model in use.
+    fallback_report: Option<FallbackReport>,
     /// When the last delivery's line was written, until its turn starts.
     wake_written: Option<Instant>,
     seq: u64,
     log: VecDeque<(u64, SessionEvent)>,
     updated_ms: i64,
+}
+
+/// One `retry_fallback_applied` report.
+struct FallbackReport {
+    from: String,
+    to: String,
+    reason: String,
 }
 
 /// Who ended the child.
@@ -215,6 +225,15 @@ fn is_usage_limit(error: &Value) -> bool {
     ) || ["usage limit", "quota", "limit reached", "limit exceeded"]
         .iter()
         .any(|p| message.contains(p))
+}
+
+/// Whether an OMP model selector (`provider/id`, optionally `:<thinking>`) names `model`.
+fn names_model(selector: &str, model: &str) -> bool {
+    let rest = selector.as_bytes().get(model.len()..).unwrap_or_default();
+    matches!(rest.first(), None | Some(b':'))
+        && selector
+            .get(..model.len())
+            .is_some_and(|base| same_model(base, model))
 }
 
 impl Session {
@@ -343,7 +362,12 @@ impl Session {
 
     async fn deliver_now(&self, d: Delivery) -> DeliverOutcome {
         let inner = &self.inner;
-        let fresh = inner.readback().await;
+        // A readback the caller made after asking stands unless an event made it stale since.
+        let fresh = if d.fresh && inner.lock().fresh {
+            Ok(())
+        } else {
+            inner.readback().await
+        };
         let (status, checks) = {
             let st = inner.lock();
             (Inner::status_of(&st).0, ready_for(&st, &d.expected_session))
@@ -589,8 +613,10 @@ impl Inner {
             if state.idle() {
                 st.turn_started_ms = None;
             }
+            let previous = st.latest.as_ref().and_then(|s| s.model.clone());
             st.latest = Some(state);
             st.fresh = true;
+            self.track_model(&mut st, previous);
             self.publish(&mut st);
             fault
         };
@@ -601,6 +627,62 @@ impl Inner {
             }
             None => Ok(()),
         }
+    }
+
+    /// Model events from what readbacks show (HOST req. 77): one `ModelChanged` per change, one
+    /// `Fallback` per change OMP reported as a fallback (a repeated report of the same move adds
+    /// nothing), one `FallbackRecovered` when the requested model is back.
+    fn track_model(&self, st: &mut State, previous: Option<String>) {
+        let Some(model) = st.latest.as_ref().and_then(|s| s.model.clone()) else {
+            return;
+        };
+        if previous.is_some_and(|p| p != model) {
+            self.emit(
+                st,
+                SessionEvent::ModelChanged {
+                    model: model.clone(),
+                },
+            );
+        }
+        self.settle_fallback(st);
+    }
+
+    /// Matches a pending fallback report against the model in use.
+    fn settle_fallback(&self, st: &mut State) {
+        let Some(model) = st.latest.as_ref().and_then(|s| s.model.clone()) else {
+            return;
+        };
+        if st.fallback_to.is_some() && same_model(&model, &self.requested_model) {
+            st.fallback_to = None;
+            self.emit(
+                st,
+                SessionEvent::FallbackRecovered {
+                    model: model.clone(),
+                },
+            );
+        }
+        if !st
+            .fallback_report
+            .as_ref()
+            .is_some_and(|r| names_model(&r.to, &model))
+        {
+            return;
+        }
+        let Some(report) = st.fallback_report.take() else {
+            return;
+        };
+        if st.fallback_to.as_deref() == Some(model.as_str()) {
+            return;
+        }
+        st.fallback_to = Some(model);
+        self.emit(
+            st,
+            SessionEvent::Fallback {
+                from: report.from,
+                to: report.to,
+                reason: report.reason,
+            },
+        );
     }
 
     /// Ends the child: end of input, 15 s, TERM, 5 s, KILL (decision 8), and writes the stop record.
@@ -710,41 +792,27 @@ impl Inner {
                         v.as_str().map_or_else(|| v.to_string(), str::to_string)
                     })
                 };
+                // The report is checked against the model in use: OMP may repeat it for one move,
+                // and its advisors report their own fallbacks, which do not move the session.
                 let mut st = self.lock();
-                st.fallback_to = Some(text("to"));
-                self.emit(
-                    &mut st,
-                    SessionEvent::Fallback {
-                        from: text("from"),
-                        to: text("to"),
-                        reason: text("reason"),
-                    },
-                );
+                st.fallback_report = Some(FallbackReport {
+                    from: text("from"),
+                    to: text("to"),
+                    reason: text("reason"),
+                });
+                self.settle_fallback(&mut st);
+                st.fresh = false;
+                self.publish(&mut st);
+                drop(st);
+                self.queue_readback();
             }
             "model_changed" => {
-                let model = dialogs::model_of(frame.get("model")).or_else(|| {
-                    frame
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                });
-                if let Some(model) = model {
-                    let mut st = self.lock();
-                    let restored =
-                        st.fallback_to.is_some() && same_model(&model, &self.requested_model);
-                    self.emit(
-                        &mut st,
-                        SessionEvent::ModelChanged {
-                            model: model.clone(),
-                        },
-                    );
-                    if restored {
-                        st.fallback_to = None;
-                        self.emit(&mut st, SessionEvent::FallbackRecovered { model });
-                    }
-                    drop(st);
-                    self.queue_readback();
-                }
+                // OMP 19.1.1 sends this frame without the model; the readback names it.
+                let mut st = self.lock();
+                st.fresh = false;
+                self.publish(&mut st);
+                drop(st);
+                self.queue_readback();
             }
             "rpc_frame_error" => {
                 self.fault("OMP lost a frame (rpc_frame_error); trust in the stream ended");
@@ -986,6 +1054,10 @@ impl Control for Session {
         self.inner.lock().stop.is_none()
     }
 
+    async fn refresh(&self) -> Result<(), String> {
+        self.inner.readback().await
+    }
+
     async fn deliver(&self, delivery: Delivery) -> DeliverOutcome {
         let _busy = match self.begin() {
             Ok(b) => b,
@@ -1061,6 +1133,13 @@ impl Control for Session {
                 inner.fault(&format!("model change unconfirmed: {e}"));
                 return Err("model change unconfirmed; check the current model".into());
             }
+        }
+        {
+            // A change asked for here is no fallback; the readback after it must be new.
+            let mut st = inner.lock();
+            st.fallback_report = None;
+            st.fresh = false;
+            inner.publish(&mut st);
         }
         inner.readback().await?;
         let now = inner.lock().latest.as_ref().and_then(|s| s.model.clone());
@@ -1197,6 +1276,7 @@ mod tests {
                 text: "/help me".into(),
                 timing: Timing::Any,
                 steer: false,
+                fresh: false,
             })
             .await;
         assert!(
@@ -1223,6 +1303,7 @@ mod tests {
                 text: "x".into(),
                 timing: Timing::Any,
                 steer: false,
+                fresh: false,
             })
             .await;
         assert!(matches!(wrong, DeliverOutcome::NotReady(_)), "{wrong:?}");
@@ -1238,6 +1319,7 @@ mod tests {
                 text: "x".into(),
                 timing: Timing::Any,
                 steer: true,
+                fresh: false,
             })
             .await;
         assert_eq!(
@@ -1251,6 +1333,7 @@ mod tests {
                 text: "second".into(),
                 timing: Timing::Any,
                 steer: false,
+                fresh: false,
             })
             .await;
         assert!(
@@ -1270,6 +1353,7 @@ mod tests {
                 text: "x".into(),
                 timing: Timing::Idle,
                 steer: false,
+                fresh: false,
             })
             .await;
         assert_eq!(idle_only, DeliverOutcome::NotReady(Status::Working));
@@ -1286,6 +1370,7 @@ mod tests {
                     text: "hello".into(),
                     timing: Timing::Any,
                     steer: false,
+                    fresh: false,
                 })
                 .await
         };
@@ -1367,15 +1452,35 @@ mod tests {
         assert!(snapshot.dialogs.is_empty(), "offers never stay pending");
     }
 
-    /// Acceptance check 9 (session side): OMP's fallback is reported once, its restore once; a
-    /// usage-limit `prompt_result` marks the session quota-blocked; `extraUsage` fences.
+    /// Acceptance check 9 (session side): one fallback event per move OMP makes, however often it
+    /// reports it, and one restore; a usage-limit `prompt_result` marks the session quota-blocked;
+    /// `extraUsage` fences.
     #[tokio::test]
     async fn fallback_quota_and_extra_usage() {
         let fake = Fake::start();
         let session = started(&fake).await;
         let mut events = session.subscribe();
-        fake.push(json!({"type": "retry_fallback_applied", "from": "fake/primary", "to": "fake/backup", "role": "default", "reason": "usage limit"}));
-        fake.push(json!({"type": "model_changed", "model": {"provider": "fake", "id": "primary"}}));
+        let report = json!({"type": "retry_fallback_applied", "from": "fake/primary:high", "to": "fake/backup:high", "role": "default", "reason": "usage limit"});
+        // A message after the reports: once it shows, the reports before it are handled.
+        let sync = json!({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "sync"}]}});
+        // OMP switches the model (a bare `model_changed`), then reports the fallback.
+        fake.set(|s| s.model = ("fake".into(), "backup".into()));
+        fake.push(json!({"type": "model_changed"}));
+        fake.push(report.clone());
+        fake.wait_for(&session, |s| s.model.as_deref() == Some("fake/backup"))
+            .await;
+        // The same move reported again, and an advisor's report that moves nothing.
+        fake.push(report);
+        fake.push(json!({"type": "model_changed"}));
+        fake.push(json!({"type": "retry_fallback_applied", "from": "fake/primary", "to": "fake/other", "role": "advisor", "reason": "usage limit"}));
+        fake.push(sync);
+        fake.wait_for(&session, |s| s.recent.iter().any(|e| e.text == "sync"))
+            .await;
+        // OMP restores the requested model.
+        fake.set(|s| s.model = ("fake".into(), "primary".into()));
+        fake.push(json!({"type": "model_changed"}));
+        fake.wait_for(&session, |s| s.model.as_deref() == Some("fake/primary"))
+            .await;
         fake.push(json!({"type": "prompt_result", "id": "x", "agentInvoked": true, "status": "error",
             "error": {"message": "You have hit your usage limit", "retryable": false}, "sessionSettled": true}));
         let snapshot = fake.wait_for(&session, |s| s.quota_blocked.is_some()).await;
@@ -1387,16 +1492,29 @@ mod tests {
                 .contains("usage limit")
         );
         let mut kinds = Vec::new();
-        while kinds.len() < 4 {
-            let (_, event) = timeout(Duration::from_secs(2), events.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            kinds.push(event);
+        while let Ok((_, event)) = events.try_recv() {
+            if matches!(
+                event,
+                SessionEvent::Fallback { .. }
+                    | SessionEvent::FallbackRecovered { .. }
+                    | SessionEvent::ModelChanged { .. }
+                    | SessionEvent::QuotaBlocked { .. }
+            ) {
+                kinds.push(event);
+            }
         }
-        assert!(matches!(&kinds[0], SessionEvent::Fallback { to, .. } if to == "fake/backup"));
-        assert!(matches!(&kinds[2], SessionEvent::FallbackRecovered { .. }));
-        assert!(matches!(&kinds[3], SessionEvent::QuotaBlocked { .. }));
+        assert_eq!(kinds.len(), 5, "{kinds:?}");
+        assert!(
+            matches!(&kinds[0], SessionEvent::ModelChanged { model } if model == "fake/backup")
+        );
+        assert!(
+            matches!(&kinds[1], SessionEvent::Fallback { from, to, .. } if from == "fake/primary:high" && to == "fake/backup:high")
+        );
+        assert!(
+            matches!(&kinds[2], SessionEvent::ModelChanged { model } if model == "fake/primary")
+        );
+        assert!(matches!(&kinds[3], SessionEvent::FallbackRecovered { .. }));
+        assert!(matches!(&kinds[4], SessionEvent::QuotaBlocked { .. }));
         fake.set(|s| s.extra_usage = true);
         let outcome = session
             .deliver(Delivery {
@@ -1404,6 +1522,7 @@ mod tests {
                 text: "owner request".into(),
                 timing: Timing::Any,
                 steer: false,
+                fresh: false,
             })
             .await;
         assert!(

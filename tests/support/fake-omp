@@ -4,8 +4,59 @@
 #   omp --version            -> "omp/<omp-data/version>" (19.1.1 when the file is absent)
 #   omp usage --json         -> omp-data/usage.json; exit 1 when absent (usage unavailable)
 #   omp session lease --json -> omp-data/lease.json, else {"held":[],"unknown":[]}
-#   anything else (rpc mode) -> exit 3: this fake speaks no rpc-ui
+#   rpc mode (--mode rpc-ui) -> exit 3 (no rpc-ui in this fake) unless omp-data/rpc exists; then a
+#                               minimal rpc-ui peer: the ready frame, every command answered with
+#                               success, get_state naming the session it created (--session-dir) or
+#                               resumed (--resume), the model from --model, and no turns. Each such
+#                               process appends its PID to omp-data/pids.
 dir=$(cd "$(dirname "$0")" && pwd)/omp-data
+
+rpc() {
+    model=fake/primary
+    sessions=
+    resume=
+    for arg in "$@"; do
+        case "$arg" in
+        --model=*) model=${arg#--model=} ;;
+        --session-dir=*) sessions=${arg#--session-dir=} ;;
+        --resume=*) resume=${arg#--resume=} ;;
+        esac
+    done
+    umask 077
+    if [ -n "$resume" ]; then
+        file=$resume
+        id=${file##*Z_}
+        id=${id%.jsonl}
+    elif [ -n "$sessions" ]; then
+        hex=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        id=$(printf '%s' "$hex" | sed 's/^\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)$/\1-\2-\3-\4-\5/')
+        file=$sessions/$(date -u +%Y-%m-%dT%H-%M-%S-000Z)_$id.jsonl
+        printf '{"type":"session","version":3,"id":"%s","cwd":"%s"}\n' "$id" "$(pwd -P)" > "$file"
+    else
+        id=probe-session
+        file=
+    fi
+    echo $$ >> "$dir/pids"
+    if [ -n "$file" ]; then
+        state=$(printf '"sessionId":"%s","sessionFile":"%s"' "$id" "$file")
+    else
+        state=$(printf '"sessionId":"%s","sessionFile":null' "$id")
+    fi
+    state=$(printf '%s,"isStreaming":false,"isCompacting":false,"queuedMessageCount":0,"isSettled":true,"goal":null,"model":{"provider":"%s","id":"%s"}' \
+        "$state" "${model%%/*}" "${model#*/}")
+    echo '{"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1]}'
+    while IFS= read -r line; do
+        cid=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+        kind=$(printf '%s' "$line" | sed -n 's/.*"type":"\([a-z_]*\)".*/\1/p')
+        case "$kind" in
+        get_state) data="{$state}" ;;
+        get_session_lease) data='{"held":[],"unknown":[]}' ;;
+        *) data='{}' ;;
+        esac
+        printf '{"type":"response","id":"%s","command":"%s","success":true,"data":%s}\n' "$cid" "$kind" "$data"
+    done
+}
+
 case "$1" in
 --version)
     if [ -f "$dir/version" ]; then
@@ -30,7 +81,11 @@ session)
     fi
     ;;
 *)
-    echo 'fake omp: no rpc-ui in this fake' >&2
-    exit 3
+    if [ -f "$dir/rpc" ]; then
+        rpc "$@"
+    else
+        echo 'fake omp: no rpc-ui in this fake' >&2
+        exit 3
+    fi
     ;;
 esac

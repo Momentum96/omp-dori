@@ -111,3 +111,51 @@ The wake figure misses its target: it includes two `synchronous=FULL` commits (i
 delivery record before the write) and one `get_state` readback. Per DESIGN 7.2 the first remedy is to
 batch the admission and delivery-record commits into one; not done in this slice. Release-build and
 macOS figures are not measured yet. Release binary: 8.6 MB.
+
+## Wake after closing the slice-2a gaps (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Same scenario in release (`CATALY_CONTRACT_OMP=1 cargo test --release --test contract_session
+lead_end_to_end_and_resume -- --nocapture`), now 40 wakes of an idle lead (each message sent after
+the previous turn ended and the lead read back idle), figures from `cataly stats --json`. Three runs:
+
+| Measure | Before (slice 2a, debug, 5 sends) | Now, release, 40 wakes per run | Target |
+| --- | --- | --- | --- |
+| Wake, hub part: `deliver` call to `prompt` line written | p50 22.7 ms | p50 8.5 / 8.6 / 8.7 ms; p99 31.2 / 38.2 / 25.3 ms | p50 ≤ 5 ms, p99 ≤ 25 ms |
+| Store commit (`synchronous=FULL`, every commit of the run) | p50 8.3 ms (part A) | p50 8.0 / 8.2 / 8.2 ms | none set |
+| Prompt written to OMP `agent_start` | p50 5.4 ms | p50 9.1 / 7.3 / 6.3 ms | part of end-to-end 150 ms |
+| Hub RSS with the lead attached (OMP excluded), release | 18.4-18.8 MiB (debug) | 10.3-10.6 MiB | ≤ 30 MiB idle + ≤ 1 MiB per session |
+
+The hot path now holds one durable commit (inbox row and delivery record together) and the `get_state`
+readback HOST req. 50 requires runs while that commit waits for its fsync. Before the overlap (one
+commit, readback after it) the same release run measured p50 12.0 ms, p99 22.3 ms.
+
+**Floor on this disk.** A bare `synchronous=FULL` WAL commit of one 100-byte row (Python's sqlite3,
+SQLite 3.45.1, 300 commits in `/tmp` on the same ext4 NVMe volume, 100 % full): p50 8.35 ms, p99
+9.73 ms, minimum 7.69 ms. The fsync alone is above the 5 ms target, so p50 ≤ 5 ms is not reachable
+with a durable commit on this machine; the hub adds about 0.2-0.4 ms above that floor at p50 (8.5-8.7
+ms against 8.0-8.35 ms). Remaining gap to the target: about 3.5 ms, all of it the fsync. The p99 tail
+(25-38 ms, max 60-87 ms) was not broken down; the likely causes are waits behind other work on the
+same path (an inbox flush, with its confirmation search and own commit, holding the inbox lock when
+the message arrives, or another commit queued ahead in the single writer). Weaker durability would
+close the p50 gap; DESIGN 7.2 rules it
+out, so the target needs a decision by the owner (accept the disk floor, or a faster disk on the
+measurement machine). macOS figures are still not measured.
+
+```sh
+cargo build --release
+CATALY_CONTRACT_OMP=1 cargo test --release --test contract_session lead_end_to_end_and_resume -- --nocapture
+python3 - <<'EOF'   # the floor: 300 single-row FULL commits
+import sqlite3, time
+c = sqlite3.connect('/tmp/cy-floor.db', isolation_level=None)
+c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA synchronous=FULL')
+c.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+s = []
+for _ in range(300):
+    t = time.perf_counter(); c.execute('BEGIN IMMEDIATE')
+    c.execute('INSERT INTO t (v) VALUES (?)', ('x' * 100,)); c.execute('COMMIT')
+    s.append((time.perf_counter() - t) * 1000)
+s.sort(); print(s[149], s[296], s[0])
+EOF
+```
+
+Release binary after these changes: 8,688,376 bytes.

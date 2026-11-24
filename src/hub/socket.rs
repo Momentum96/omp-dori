@@ -272,15 +272,42 @@ mod tests {
     use crate::sys::fs::tests::scratch;
     use std::os::unix::fs::PermissionsExt;
 
+    /// The child of [`stale_socket_replaced_live_one_refused`]: binds the socket and exits, leaving
+    /// the file behind as a crashed hub would.
+    #[test]
+    #[ignore = "run by stale_socket_replaced_live_one_refused as a child process"]
+    fn stale_socket_child() {
+        let Ok(path) = std::env::var("CATALY_STALE_SOCKET") else {
+            return;
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _listener = rt.block_on(async { bind(Path::new(&path)).unwrap() });
+    }
+
     #[tokio::test]
     async fn stale_socket_replaced_live_one_refused() {
         let dir = scratch("sock");
-        let path = dir.join("hub.sock");
-        let first = bind(&path).unwrap();
-        assert!(matches!(bind(&path), Err(BindError::Live)));
+        let live = dir.join("live.sock");
+        let first = bind(&live).unwrap();
+        assert!(matches!(bind(&live), Err(BindError::Live)));
         drop(first);
-        // The file remains after the listener is gone: it is stale now.
-        assert!(path.exists());
+        // The stale file comes from a process that has exited. A listener closed in this process
+        // is not reliably gone: another test thread that forks at that moment holds a copy of
+        // every descriptor until its child calls exec, and the socket still accepts meanwhile.
+        let path = dir.join("hub.sock");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "hub::socket::tests::stale_socket_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("CATALY_STALE_SOCKET", &path)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(path.exists(), "the file remains after its process is gone");
         let second = bind(&path).unwrap();
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,

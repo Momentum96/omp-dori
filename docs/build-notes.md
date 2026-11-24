@@ -206,12 +206,54 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   schema. `goal.continuationModes` is `["interactive", "rpc"]`. `[fallback]` changes need a hub restart.
 - `-e <bridge>` and the role instructions text come with 2c; `--append-system-prompt` takes `[lead]
   instructions` when set. `set_event_filter` is not sent yet (all events are read).
-- The child environment is the runner's pass-through list (adds USER, LOGNAME, LC_ALL, TZ to DESIGN
-  4.2's list) plus listed credentials, `PI_*` profile overrides, `CATALY_SOCKET`, `CATALY_LAUNCH`.
-- The lead is not restarted automatically after its child exits by itself (event `session.stopped`);
-  `cataly lead start` resumes it. Goals (HOST-19), the transcript page (HOST req. 79) and view-token
-  checks on calls are not built in this slice; the view token is in the snapshot.
+- The child environment is the runner's pass-through list plus listed credentials, `PI_*` profile
+  overrides, `CATALY_SOCKET`, `CATALY_LAUNCH`. **Deviation from HOST req. 21 / DESIGN 4.2, decided:**
+  the list adds USER, LOGNAME, LC_ALL and TZ to PATH, HOME, TMPDIR and LANG, and they stay. None is a
+  secret (the purpose of HOST-06 is to keep secrets out), and the tools the agent runs through OMP read
+  them: git and ssh take the user name from USER/LOGNAME, an owner who sets LC_ALL (for example
+  `C.UTF-8` for stable sorting) or TZ expects `date`, logs and sorting in the agent's shell to match
+  his own. One pass-through list for job commands and OMP children keeps one implementation
+  (`sys::command`) for one concern.
+- Goals (HOST-19), the transcript page (HOST req. 79) and view-token checks on calls are not built in
+  this slice; the view token is in the snapshot.
 - Memory admission applies only the memory part of the pressure rule (disk and session count are
   not start checks; the cap is). Usage-limit errors are recognised from `prompt_result.error` code or
   message text (OMP documents no code for it).
 - Store schema v2 (additive): `sessions`, `inbox`, `deliveries`, `receipts`, `once_ids`.
+
+## Gap closing after slice 2a
+
+- **Lead restart.** When the lead's OMP exits by itself (not after `lead stop` or hub shutdown), the
+  hub restarts it by the supervision rule of DESIGN 2.2: 1 s, doubling to 60 s; a restart that would be
+  the sixth within 10 minutes is not made, the lead is held (`phase: held`, `session.fenced`, urgent)
+  until `cataly lead start`, which also clears the count. Each restart resumes exactly the session that
+  exited (same ID and transcript, checked like a resume) after `omp session lease` shows it free; a held
+  or unknown lease holds the lead and alerts the owner (HOST req. 86-88). Every exit is a
+  `session.stopped` event (HOST req. 70) whose text names the next step; only the first exit of a series
+  is urgent. The lead hears it once: the resume note has the once-only identity of the session. A failed
+  restart counts as a restart and is retried on the same schedule without an alert of its own; `lead
+  stop` while a restart is planned cancels it.
+- **Wake path, one commit.** `Mailbox::deliver` stores an arriving message and, when the lead can take
+  it now (live, idle or working, no batch waiting for its entry, and the message may go), records the
+  batch that carries it in the same transaction (`HostWrite::AdmitSend`) before the prompt is written;
+  otherwise the message is stored and the inbox flushed as before. The fresh readback HOST req. 50
+  requires stays (HOST req. 55 counts it in the budget), but runs while the commit waits for its fsync:
+  `Control::refresh` overlaps it, and `Delivery.fresh` lets the session use that readback unless an event
+  made it stale meanwhile. The flush path records its batch the same way.
+- **Model fallback events.** OMP 19.1.1 sends `model_changed` without a model and reports a fallback
+  with `retry_fallback_applied`, which its advisors also emit for their own model and which can repeat
+  for one move. The session now derives model events from readbacks: one `ModelChanged` per model a
+  readback shows, one `Fallback` when the model in use becomes the one OMP reported (a repeated report of
+  the same move adds nothing; an advisor's report that moves nothing stays pending), one
+  `FallbackRecovered` when the requested model is back (before, the restore was never seen with stock
+  OMP). Measured against stock OMP: one `retry_fallback_applied` per move in a two-turn run; the
+  contract test asserts exactly one `session.fallback`.
+- **Flaky `stale_socket_replaced_live_one_refused`.** Root cause in the test, not the hub: it closed a
+  listener and immediately expected the socket to refuse, but unit tests share one process, and another
+  test thread that spawns a child at that moment holds a copy of every descriptor between fork and exec.
+  The listening socket then still accepted for about 0.3 ms (observed: test-binary children with the
+  copied descriptor table at the failure, refusal 0.27-0.44 ms later). The stale socket file now comes
+  from a child process (the test binary running an ignored helper) that bound it and exited. The hub's
+  rule (replace only when connecting is refused) is unchanged; a crashed hub's socket has no such copy.
+- `tests/support/fake-omp` has an rpc-ui mode (fixture `rpc`): ready frame, every command answered,
+  `get_state` naming the session it created or resumed. `tests/lead.rs` uses it for the restart test.
