@@ -26,6 +26,20 @@ prose from the earlier Cataly tree or from the project that tree was copied from
 3. The audited spec is committed under `spec/`, and the audit is recorded in
    `docs/cleanroom-log.md`.
 
+## Vetted imports
+
+The owner wrote all Rust in the earlier tree himself. Such a file may be brought into this
+repository only by the coordinator, and only when all of these hold:
+
+1. Every line of the file is attributed to the owner in the earlier repository's history.
+2. The file is not a translation of code that came from the upstream project.
+3. The file carries no name, comment or data layout taken from the upstream project.
+4. The design in `DESIGN.md` needs what the file does, so it replaces work, not adds to it.
+
+Imported files arrive under `import/`, each listed in `docs/cleanroom-log.md` with its
+source path, commit and the result of the four checks. Build agents then adapt them to
+this repository's names and structure. Everything else is still written from `spec/`.
+
 ## Record
 
 `docs/cleanroom-log.md` lists, for every spec and every implementation task, which role
