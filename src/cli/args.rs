@@ -1,0 +1,281 @@
+//! The in-house argument parser (COORD-53): a verb path, then flags. A value flag always takes the next
+//! word verbatim, even when it starts with dashes; a value flag at the end, an unknown flag, a missing
+//! or extra argument and an empty argument are refused with one line. `--help` prints usage and runs
+//! nothing.
+
+use std::fmt::Write as _;
+
+/// One command the CLI knows.
+#[derive(Debug)]
+pub(crate) struct Spec {
+    pub(crate) path: &'static [&'static str],
+    pub(crate) args: &'static [&'static str],
+    pub(crate) flags: &'static [&'static str],
+    pub(crate) values: &'static [&'static str],
+    pub(crate) summary: &'static str,
+}
+
+pub(crate) const COMMANDS: [Spec; 10] = [
+    Spec {
+        path: &["hub"],
+        args: &[],
+        flags: &[],
+        values: &[],
+        summary: "run the hub in the foreground",
+    },
+    Spec {
+        path: &["status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show the hub's state",
+    },
+    Spec {
+        path: &["events"],
+        args: &[],
+        flags: &["--json", "--follow"],
+        values: &["--since", "--after", "--limit"],
+        summary: "show events; --since 10m|<instant>, --after <id>, --follow to keep reading",
+    },
+    Spec {
+        path: &["stats"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "memory and latency figures",
+    },
+    Spec {
+        path: &["job", "list"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "list jobs and their state",
+    },
+    Spec {
+        path: &["job", "run"],
+        args: &["name"],
+        flags: &["--json"],
+        values: &[],
+        summary: "run one dry tick of a job now and show its events",
+    },
+    Spec {
+        path: &["job", "enable"],
+        args: &["name"],
+        flags: &["--json", "--ack"],
+        values: &[],
+        summary: "resume a held job (--ack after a broken-off run)",
+    },
+    Spec {
+        path: &["job", "disable"],
+        args: &["name"],
+        flags: &["--json"],
+        values: &[],
+        summary: "put a job on hold",
+    },
+    Spec {
+        path: &["config", "check"],
+        args: &[],
+        flags: &["--json"],
+        values: &["--file"],
+        summary: "validate the config file (or --file <path>) without applying it",
+    },
+    Spec {
+        path: &["config", "reload"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "apply the config file; an invalid file is refused and the running config kept",
+    },
+];
+
+/// A parsed command line.
+#[derive(Debug)]
+pub(crate) struct Parsed {
+    pub(crate) spec: &'static Spec,
+    pub(crate) args: Vec<String>,
+    flags: Vec<&'static str>,
+    values: Vec<(&'static str, String)>,
+}
+
+impl Parsed {
+    pub(crate) fn flag(&self, name: &str) -> bool {
+        self.flags.contains(&name)
+    }
+
+    pub(crate) fn value(&self, name: &str) -> Option<&str> {
+        self.values
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub(crate) fn is(&self, path: &[&str]) -> bool {
+        self.spec.path == path
+    }
+}
+
+/// What the command line asks for.
+#[derive(Debug)]
+pub(crate) enum Invocation {
+    Run(Parsed),
+    /// Usage text to print; nothing runs.
+    Help(String),
+}
+
+/// Parses the words after the program name; the error is the one-line refusal.
+pub(crate) fn parse(words: &[String]) -> Result<Invocation, String> {
+    match words.first().map(String::as_str) {
+        None | Some("help" | "--help" | "-h") => return Ok(Invocation::Help(usage(None))),
+        _ => {}
+    }
+    let spec = COMMANDS
+        .iter()
+        .filter(|c| c.path.len() <= words.len() && c.path.iter().zip(words).all(|(p, w)| p == w))
+        .max_by_key(|c| c.path.len())
+        .ok_or_else(|| {
+            let typed: Vec<&str> = words.iter().take(2).map(String::as_str).collect();
+            format!("unknown command '{}'; see cataly --help", typed.join(" "))
+        })?;
+    let mut parsed = Parsed {
+        spec,
+        args: Vec::new(),
+        flags: Vec::new(),
+        values: Vec::new(),
+    };
+    let mut rest = words.iter().skip(spec.path.len());
+    while let Some(word) = rest.next() {
+        let word = word.as_str();
+        if word == "--help" || word == "-h" {
+            return Ok(Invocation::Help(usage(Some(spec))));
+        }
+        if let Some(name) = spec.values.iter().find(|v| **v == word) {
+            let value = rest.next().ok_or_else(|| format!("{word} needs a value"))?;
+            if value.trim().is_empty() {
+                return Err(format!("{word} needs a non-empty value"));
+            }
+            if parsed.value(name).is_some() {
+                return Err(format!("{word} given twice"));
+            }
+            parsed.values.push((name, value.clone()));
+        } else if let Some(name) = spec.flags.iter().find(|f| **f == word) {
+            parsed.flags.push(name);
+        } else if word.starts_with('-') && word.len() > 1 {
+            return Err(format!("unknown flag {word} for '{}'", spec.path.join(" ")));
+        } else if parsed.args.len() < spec.args.len() {
+            if word.trim().is_empty() {
+                return Err(format!(
+                    "empty {} refused",
+                    spec.args.get(parsed.args.len()).unwrap_or(&"argument")
+                ));
+            }
+            parsed.args.push(word.to_string());
+        } else {
+            return Err(format!(
+                "unexpected argument '{word}' for '{}'",
+                spec.path.join(" ")
+            ));
+        }
+    }
+    if let Some(missing) = spec.args.get(parsed.args.len()) {
+        return Err(format!("'{}' needs <{missing}>", spec.path.join(" ")));
+    }
+    Ok(Invocation::Run(parsed))
+}
+
+fn synopsis(spec: &Spec) -> String {
+    let mut s = format!("cataly {}", spec.path.join(" "));
+    for a in spec.args {
+        let _ = write!(s, " <{a}>");
+    }
+    for v in spec.values {
+        let _ = write!(s, " [{v} <value>]");
+    }
+    for f in spec.flags {
+        let _ = write!(s, " [{f}]");
+    }
+    s
+}
+
+/// Usage for one command, or for all.
+pub(crate) fn usage(spec: Option<&Spec>) -> String {
+    if let Some(spec) = spec {
+        return format!("{}\n  {}\n", synopsis(spec), spec.summary);
+    }
+    let mut text = String::from("usage: cataly <command> [flags]\n\ncommands:\n");
+    for c in &COMMANDS {
+        let _ = writeln!(text, "  {:<16} {}", c.path.join(" "), c.summary);
+    }
+    text.push_str(
+        "\nflags that take a value use the next word as it is, even when it starts with '-'.\n",
+    );
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(s: &[&str]) -> Vec<String> {
+        s.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    fn run(s: &[&str]) -> Parsed {
+        match parse(&words(s)).unwrap() {
+            Invocation::Run(p) => p,
+            Invocation::Help(h) => panic!("unexpected help: {h}"),
+        }
+    }
+
+    #[test]
+    fn verbs_flags_and_values() {
+        let p = run(&["events", "--since", "10m", "--follow", "--json"]);
+        assert!(p.is(&["events"]) && p.flag("--follow") && p.flag("--json"));
+        assert_eq!(p.value("--since"), Some("10m"));
+        let p = run(&["job", "enable", "nightly", "--ack"]);
+        assert!(p.is(&["job", "enable"]) && p.flag("--ack"));
+        assert_eq!(p.args, ["nightly"]);
+    }
+
+    #[test]
+    fn value_flags_take_the_next_word_verbatim() {
+        let p = run(&["config", "check", "--file", "--help"]);
+        assert_eq!(p.value("--file"), Some("--help"));
+        let p = run(&["events", "--after", "-5"]);
+        assert_eq!(p.value("--after"), Some("-5"));
+    }
+
+    #[test]
+    fn refusals_are_single_lines() {
+        for (input, needle) in [
+            (&["events", "--since"][..], "--since needs a value"),
+            (&["job", "run"][..], "needs <name>"),
+            (&["job", "run", ""][..], "empty name refused"),
+            (&["job", "run", "a", "b"][..], "unexpected argument 'b'"),
+            (&["status", "--verbose"][..], "unknown flag --verbose"),
+            (&["launch"][..], "unknown command 'launch'"),
+            (&["events", "--limit", " "][..], "non-empty value"),
+            (
+                &["events", "--limit", "1", "--limit", "2"][..],
+                "given twice",
+            ),
+        ] {
+            let err = parse(&words(input)).unwrap_err();
+            assert!(err.contains(needle), "{input:?}: {err}");
+            assert!(!err.contains('\n'));
+        }
+    }
+
+    #[test]
+    fn help_runs_nothing() {
+        assert!(matches!(parse(&[]).unwrap(), Invocation::Help(_)));
+        assert!(matches!(
+            parse(&words(&["--help"])).unwrap(),
+            Invocation::Help(_)
+        ));
+        match parse(&words(&["job", "run", "--help"])).unwrap() {
+            Invocation::Help(h) => assert!(h.starts_with("cataly job run <name>")),
+            Invocation::Run(_) => panic!("help expected"),
+        }
+        assert!(usage(None).contains("config check"));
+    }
+}

@@ -1,0 +1,370 @@
+//! Control-socket messages (DESIGN 8): newline-delimited JSON, at most 1 MiB per line. Request
+//! `{v, id, method, params}`; reply `{v, id, ok}` or `{v, id, err: {code, message}}`; streams send
+//! `{v, id, item}` lines. `v` is the protocol major; fields are only added within a major and unknown
+//! fields are ignored.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::store::EventRecord;
+use crate::sys::host::{Disk, Load, Memory};
+use crate::sys::latency::Summary;
+
+/// Control protocol major.
+pub(crate) const VERSION: u32 = 1;
+/// Longest line either side sends.
+pub(crate) const MAX_LINE: usize = 1024 * 1024;
+
+/// Method names.
+pub(crate) mod method {
+    pub(crate) const STATUS: &str = "status";
+    pub(crate) const STATS: &str = "stats";
+    pub(crate) const EVENTS_SINCE: &str = "events.since";
+    pub(crate) const EVENTS_FOLLOW: &str = "events.follow";
+    pub(crate) const JOB_LIST: &str = "job.list";
+    pub(crate) const JOB_RUN: &str = "job.run";
+    pub(crate) const JOB_ENABLE: &str = "job.enable";
+    pub(crate) const JOB_DISABLE: &str = "job.disable";
+    pub(crate) const CONFIG_RELOAD: &str = "config.reload";
+}
+
+/// Error codes besides the decision classes.
+pub(crate) mod code {
+    pub(crate) const VERSION_MISMATCH: &str = "version_mismatch";
+    pub(crate) const UNKNOWN_METHOD: &str = "unknown_method";
+    pub(crate) const BAD_REQUEST: &str = "bad_request";
+    pub(crate) const NOT_FOUND: &str = "not_found";
+    pub(crate) const BUSY: &str = "busy";
+    pub(crate) const REFUSED: &str = "refused";
+    pub(crate) const INTERNAL: &str = "internal";
+}
+
+/// A request as sent on the wire.
+#[derive(Debug, Serialize)]
+pub(crate) struct Request<'a> {
+    pub(crate) v: u32,
+    pub(crate) id: u64,
+    pub(crate) method: &'a str,
+    pub(crate) params: Value,
+}
+
+/// A request as the hub reads it, after [`decode`] checked its `v`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Incoming {
+    pub(crate) id: u64,
+    pub(crate) method: String,
+    #[serde(default)]
+    pub(crate) params: Value,
+}
+
+/// An error body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ErrorBody {
+    pub(crate) code: String,
+    pub(crate) message: String,
+}
+
+/// Any line the hub sends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Response {
+    pub(crate) v: u32,
+    pub(crate) id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ok: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) err: Option<ErrorBody>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) item: Option<Value>,
+}
+
+impl Response {
+    pub(crate) fn ok(id: u64, value: Value) -> Self {
+        Self {
+            v: VERSION,
+            id,
+            ok: Some(value),
+            err: None,
+            item: None,
+        }
+    }
+
+    pub(crate) fn err(id: u64, code: &str, message: impl Into<String>) -> Self {
+        Self {
+            v: VERSION,
+            id,
+            ok: None,
+            err: Some(ErrorBody {
+                code: code.into(),
+                message: message.into(),
+            }),
+            item: None,
+        }
+    }
+
+    pub(crate) fn item(id: u64, value: Value) -> Self {
+        Self {
+            v: VERSION,
+            id,
+            ok: None,
+            err: None,
+            item: Some(value),
+        }
+    }
+
+    /// One JSON line with its newline.
+    pub(crate) fn to_line(&self) -> String {
+        let mut line = serde_json::to_string(self).unwrap_or_else(|e| {
+            format!(
+                r#"{{"v":{VERSION},"id":{},"err":{{"code":"internal","message":"{e}"}}}}"#,
+                self.id
+            )
+        });
+        line.push('\n');
+        line
+    }
+}
+
+/// Decodes a request line; on failure returns the error reply to send.
+pub(crate) fn decode(line: &str) -> Result<Incoming, Box<Response>> {
+    let refuse = |id, code, message: String| Box::new(Response::err(id, code, message));
+    let value: Value = serde_json::from_str(line)
+        .map_err(|e| refuse(0, code::BAD_REQUEST, format!("not JSON: {e}")))?;
+    let id = value.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let v = value.get("v").and_then(Value::as_u64);
+    if v != Some(u64::from(VERSION)) {
+        let found = v.map_or_else(|| "none".to_string(), |v| v.to_string());
+        return Err(refuse(
+            id,
+            code::VERSION_MISMATCH,
+            format!(
+                "this hub speaks control protocol v{VERSION}, the request is v{found}; restart the hub so it \
+                 matches the installed cataly"
+            ),
+        ));
+    }
+    serde_json::from_value(value).map_err(|e| refuse(id, code::BAD_REQUEST, e.to_string()))
+}
+
+/// `status` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Status {
+    pub(crate) version: String,
+    pub(crate) protocol: u32,
+    pub(crate) pid: u32,
+    pub(crate) started_ms: i64,
+    pub(crate) uptime_s: i64,
+    pub(crate) socket: String,
+    pub(crate) state_dir: String,
+    pub(crate) config_file: String,
+    /// Set while the file on disk is invalid and the previous config stays in force.
+    #[serde(default)]
+    pub(crate) config_error: Option<String>,
+    pub(crate) jobs: usize,
+    pub(crate) jobs_running: usize,
+    pub(crate) last_event_id: i64,
+    /// Restarts of supervised tasks since start.
+    #[serde(default)]
+    pub(crate) task_restarts: u64,
+    /// Panics caught in supervised tasks since start.
+    #[serde(default)]
+    pub(crate) panics: u64,
+}
+
+/// `stats` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Stats {
+    pub(crate) rss_bytes: Option<u64>,
+    pub(crate) host_memory: Option<HostMemory>,
+    pub(crate) host_load: Option<HostLoad>,
+    pub(crate) state_disk: Option<HostDisk>,
+    pub(crate) control_latency: Option<LatencySummary>,
+    pub(crate) store_commit_latency: Option<LatencySummary>,
+}
+
+/// Wire copies of the host figures (kept apart so the readers stay internal types).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HostMemory {
+    pub(crate) total: u64,
+    pub(crate) available: u64,
+    pub(crate) cgroup_limit: Option<u64>,
+    pub(crate) cgroup_used: Option<u64>,
+    pub(crate) level_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HostLoad {
+    pub(crate) one: f64,
+    pub(crate) five: f64,
+    pub(crate) fifteen: f64,
+    pub(crate) cores: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HostDisk {
+    pub(crate) total: u64,
+    pub(crate) available: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LatencySummary {
+    pub(crate) count: usize,
+    pub(crate) p50_us: u64,
+    pub(crate) p99_us: u64,
+    pub(crate) max_us: u64,
+}
+
+impl From<Memory> for HostMemory {
+    fn from(m: Memory) -> Self {
+        Self {
+            total: m.total,
+            available: m.available,
+            cgroup_limit: m.cgroup_limit,
+            cgroup_used: m.cgroup_used,
+            level_percent: m.level_percent,
+        }
+    }
+}
+
+impl From<Load> for HostLoad {
+    fn from(l: Load) -> Self {
+        Self {
+            one: l.one,
+            five: l.five,
+            fifteen: l.fifteen,
+            cores: l.cores,
+        }
+    }
+}
+
+impl From<Disk> for HostDisk {
+    fn from(d: Disk) -> Self {
+        Self {
+            total: d.total,
+            available: d.available,
+        }
+    }
+}
+
+impl From<Summary> for LatencySummary {
+    fn from(s: Summary) -> Self {
+        Self {
+            count: s.count,
+            p50_us: s.p50_us,
+            p99_us: s.p99_us,
+            max_us: s.max_us,
+        }
+    }
+}
+
+/// `events.since` and `events.follow` parameters. With neither `after` nor `since_ms`, `since`
+/// returns the newest `limit` events and `follow` starts from now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct EventsParams {
+    #[serde(default)]
+    pub(crate) after: Option<i64>,
+    #[serde(default)]
+    pub(crate) since_ms: Option<i64>,
+    #[serde(default)]
+    pub(crate) limit: Option<u32>,
+}
+
+/// `events.since` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Events {
+    pub(crate) events: Vec<EventRecord>,
+}
+
+/// Parameters naming one job; `request_id` deduplicates a repeated mutating call.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct JobParams {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) ack: bool,
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+}
+
+/// Parameters of a mutating call that names nothing else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Mutation {
+    #[serde(default)]
+    pub(crate) request_id: Option<String>,
+}
+
+/// One job in `job.list`. The flags mirror independent stored facts.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JobView {
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) trigger: String,
+    pub(crate) enabled: bool,
+    pub(crate) dry_run: bool,
+    pub(crate) state: String,
+    pub(crate) held: bool,
+    pub(crate) consumed: bool,
+    pub(crate) needs_ack: bool,
+    pub(crate) next_due_ms: Option<i64>,
+    pub(crate) skipped: i64,
+    pub(crate) error_streak: i64,
+    pub(crate) destinations: Vec<String>,
+    pub(crate) last_run: Option<RunView>,
+}
+
+/// A job's latest run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RunView {
+    pub(crate) id: i64,
+    pub(crate) dry: bool,
+    pub(crate) started_ms: i64,
+    pub(crate) ended_ms: Option<i64>,
+    pub(crate) outcome: Option<String>,
+    pub(crate) exit_code: Option<i64>,
+    pub(crate) stdout_path: Option<String>,
+    pub(crate) stderr_path: Option<String>,
+    /// The time limit ends only the direct child; anything it detached keeps running.
+    pub(crate) note: String,
+}
+
+/// `job.list` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct JobList {
+    pub(crate) jobs: Vec<JobView>,
+}
+
+/// `config.reload` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Reloaded {
+    pub(crate) jobs: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_and_checks_version() {
+        let ok = decode(r#"{"v":1,"id":7,"method":"status","extra":true}"#).unwrap();
+        assert_eq!((ok.id, ok.method.as_str()), (7, "status"));
+        let wrong = decode(r#"{"v":2,"id":9,"method":"status"}"#).unwrap_err();
+        let err = wrong.err.unwrap();
+        assert_eq!((wrong.id, err.code.as_str()), (9, code::VERSION_MISMATCH));
+        assert!(err.message.contains("restart the hub"));
+        assert_eq!(
+            decode("nope").unwrap_err().err.unwrap().code,
+            code::BAD_REQUEST
+        );
+        assert_eq!(decode(r#"{"v":1,"id":3}"#).unwrap_err().id, 3);
+    }
+
+    #[test]
+    fn responses_are_single_lines() {
+        let line = Response::ok(1, serde_json::json!({"a": "x\ny"})).to_line();
+        assert_eq!(line.matches('\n').count(), 1);
+        let back: Response = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.ok.unwrap()["a"], "x\ny");
+        let item: Response =
+            serde_json::from_str(&Response::item(2, Value::Null).to_line()).unwrap();
+        assert!(item.ok.is_none() && item.err.is_none());
+    }
+}

@@ -1,0 +1,294 @@
+//! Routing (WS req. 7, OJ req. 7): every event goes to the rotating owner-readable event log; events
+//! with destinations get one attempt per destination. An attempt is marked durably before it starts,
+//! so a hub that stops mid-attempt leaves it "uncertain" and it is never repeated (DESIGN 9.3).
+//! Destinations of this slice: local commands. Chat destinations plug in behind the same match.
+
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::config::Destination;
+use crate::log;
+use crate::store::{Delivery, EventRecord, Store};
+use crate::sys::ErrorClass;
+use crate::sys::command::{self, KILL_GRACE, Output, Spec};
+use crate::sys::fs::open_append_private;
+
+use super::{Ctx, JobsError};
+
+/// The event log rotates to `<name>.1` at this size, so the last 5 to 10 MiB stay readable.
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+/// Tail read to find the last logged event.
+const LOG_TAIL: u64 = 64 * 1024;
+/// Event commands: 30 s each (DESIGN 9.4).
+const DESTINATION_TIMEOUT: Duration = Duration::from_secs(30);
+const DESTINATION_OUTPUT_CAP: u64 = 64 * 1024;
+const PAGE: u32 = 256;
+
+pub(super) async fn router(ctx: Arc<Ctx>) -> Result<(), JobsError> {
+    let mut log = EventLog::open(ctx.event_log.clone())?;
+    let mut shutdown = ctx.shutdown.clone();
+    loop {
+        log.catch_up(&ctx.store).await?;
+        deliver_waiting(&ctx).await?;
+        if *shutdown.borrow() {
+            return Ok(());
+        }
+        tokio::select! {
+            () = ctx.route_wake.notified() => {}
+            _ = shutdown.changed() => {}
+        }
+    }
+}
+
+/// The owner-readable JSON-lines event log.
+struct EventLog {
+    path: PathBuf,
+    file: File,
+    size: u64,
+    last_id: i64,
+}
+
+impl EventLog {
+    fn open(path: PathBuf) -> Result<Self, JobsError> {
+        let fail = |e: crate::sys::fs::FsError| JobsError::Refused(format!("event log: {e}"));
+        let mut file = open_append_private(&path).map_err(fail)?;
+        let size = file.metadata().map_or(0, |m| m.len());
+        let last_id = last_logged_id(&mut file, size);
+        Ok(Self {
+            path,
+            file,
+            size,
+            last_id,
+        })
+    }
+
+    async fn catch_up(&mut self, store: &Store) -> Result<(), JobsError> {
+        loop {
+            let after = self.last_id;
+            let events = store.read(move |r| r.events_after(after, PAGE)).await?;
+            let Some(last) = events.last().map(|e| e.id) else {
+                return Ok(());
+            };
+            let mut text = String::new();
+            for event in &events {
+                if let Ok(line) = serde_json::to_string(event) {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+            self.rotate_if_full();
+            if let Err(e) = self.file.write_all(text.as_bytes()) {
+                log::warn(
+                    "event log write failed",
+                    &[("path", &self.path.display()), ("error", &e)],
+                );
+            }
+            self.size = self
+                .size
+                .saturating_add(u64::try_from(text.len()).unwrap_or(0));
+            self.last_id = last;
+        }
+    }
+
+    fn rotate_if_full(&mut self) {
+        if self.size < LOG_ROTATE_BYTES {
+            return;
+        }
+        let mut old = self.path.clone().into_os_string();
+        old.push(".1");
+        if std::fs::rename(&self.path, &old).is_ok()
+            && let Ok(fresh) = open_append_private(&self.path)
+        {
+            self.file = fresh;
+            self.size = 0;
+        }
+    }
+}
+
+/// ID of the last complete line in the log, so a restart appends exactly what is missing.
+fn last_logged_id(file: &mut File, size: u64) -> i64 {
+    let start = size.saturating_sub(LOG_TAIL);
+    let mut tail = String::new();
+    if file.seek(SeekFrom::Start(start)).is_err()
+        || file.take(LOG_TAIL).read_to_string(&mut tail).is_err()
+    {
+        return 0;
+    }
+    tail.lines()
+        .rev()
+        .find_map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()?
+                .get("id")?
+                .as_i64()
+        })
+        .unwrap_or(0)
+}
+
+async fn deliver_waiting(ctx: &Arc<Ctx>) -> Result<(), JobsError> {
+    let waiting = ctx.store.read(|r| r.waiting_deliveries(PAGE)).await?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let config = ctx.config();
+    for (event_id, destination) in waiting {
+        let Some(dest) = config.destinations.get(&destination).cloned() else {
+            let detail = Some("destination no longer configured".to_string());
+            ctx.store
+                .delivery(event_id, destination, Delivery::Failed, detail)
+                .await?;
+            continue;
+        };
+        let Some(event) = ctx.store.read(move |r| r.event(event_id)).await? else {
+            continue;
+        };
+        ctx.store
+            .delivery(event_id, destination.clone(), Delivery::Attempting, None)
+            .await?;
+        let task_ctx = Arc::clone(ctx);
+        let slots = Arc::clone(&ctx.destination_slots);
+        tokio::spawn(async move {
+            let Ok(_slot) = slots.acquire_owned().await else {
+                return;
+            };
+            let (state, detail) = attempt(&dest, &event).await;
+            if let Err(e) = task_ctx
+                .store
+                .delivery(event_id, destination.clone(), state, detail)
+                .await
+            {
+                log::warn(
+                    "delivery result not recorded",
+                    &[("destination", &destination), ("error", &e)],
+                );
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Why an attempt did not end confirmed.
+struct Undelivered {
+    class: ErrorClass,
+    detail: String,
+}
+
+/// One attempt; the error class decides the receipt: in doubt is recorded as uncertain and never
+/// repeated, anything else as failed.
+async fn attempt(dest: &Destination, event: &EventRecord) -> (Delivery, Option<String>) {
+    let result = match dest {
+        Destination::Command { argv } => run_command(argv, event).await,
+    };
+    match result {
+        Ok(()) => (Delivery::Sent, None),
+        Err(u) if u.class == ErrorClass::InDoubt => (Delivery::Uncertain, Some(u.detail)),
+        Err(u) => (Delivery::Failed, Some(u.detail)),
+    }
+}
+
+async fn run_command(argv: &[String], event: &EventRecord) -> Result<(), Undelivered> {
+    let json = serde_json::to_string(event).unwrap_or_default();
+    let env = [("CATALY_EVENT", json.as_str())];
+    let spec = Spec {
+        argv,
+        cwd: Some(Path::new("/")),
+        env: &env,
+        timeout: DESTINATION_TIMEOUT,
+        kill_grace: KILL_GRACE,
+        output_cap: DESTINATION_OUTPUT_CAP,
+        output: Output::Capture,
+    };
+    let done = command::run(&spec).await.map_err(|e| Undelivered {
+        class: e.class(),
+        detail: e.to_string(),
+    })?;
+    if done.success() {
+        return Ok(());
+    }
+    if done.timed_out {
+        // The command may have acted before its time ran out.
+        return Err(Undelivered {
+            class: ErrorClass::InDoubt,
+            detail: "time limit reached".into(),
+        });
+    }
+    let said = if done.stderr.is_empty() {
+        &done.stdout
+    } else {
+        &done.stderr
+    };
+    let first = String::from_utf8_lossy(said)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let detail = format!("{:?}: {}", done.exit, super::event::one_line(&first, 200));
+    Err(Undelivered {
+        class: ErrorClass::Rejected,
+        detail: crate::sys::secrets::mask(&detail).into_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jobs::tests::ctx_with;
+    use crate::store::tests::event;
+
+    #[tokio::test]
+    async fn log_and_command_destination() {
+        let cfg = "[destinations.sink]\nkind = \"command\"\nargv = [\"sh\", \"-c\", \"printf %s \\\"$CATALY_EVENT\\\" > \\\"$0.out\\\"\", \"PLACEHOLDER\"]\n\
+                   [destinations.broken]\nkind = \"command\"\nargv = [\"sh\", \"-c\", \"echo nope >&2; exit 4\"]\n";
+        let (_c, _s, dir) = ctx_with("", "route-tmp");
+        let target = dir.join("delivered");
+        let cfg = cfg.replace("PLACEHOLDER", target.to_str().unwrap());
+        let (ctx, stop, _dir) = ctx_with(&cfg, "route");
+        ctx.stream
+            .append(vec![event("j", "run.done", &["sink", "broken", "gone"])])
+            .await
+            .unwrap();
+        let task = tokio::spawn(router(Arc::clone(&ctx)));
+        let mut states = Vec::new();
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            states = ctx.store.read(|r| r.deliveries(1)).await.unwrap();
+            if states
+                .iter()
+                .all(|(_, s, _)| s != "waiting" && s != "attempting")
+            {
+                break;
+            }
+        }
+        let by = |d: &str| states.iter().find(|(n, _, _)| n == d).cloned().unwrap();
+        assert_eq!(by("sink").1, "sent");
+        assert_eq!(by("broken").1, "failed");
+        assert!(by("broken").2.unwrap().contains("nope"));
+        assert_eq!(by("gone").1, "failed");
+        let delivered: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("delivered.out")).unwrap())
+                .unwrap();
+        assert_eq!(delivered["kind"], "run.done");
+        let log = std::fs::read_to_string(&ctx.event_log).unwrap();
+        assert_eq!(log.lines().count(), 1);
+        stop.send(true).unwrap();
+        task.await.unwrap().unwrap();
+        // A new router appends only what is missing.
+        ctx.stream
+            .append(vec![event("j", "run.done", &[])])
+            .await
+            .unwrap();
+        let mut log2 = EventLog::open(ctx.event_log.clone()).unwrap();
+        assert_eq!(log2.last_id, 1);
+        log2.catch_up(&ctx.store).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ctx.event_log)
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+    }
+}
