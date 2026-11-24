@@ -1,6 +1,7 @@
 # Cataly design
 
-Status: proposed, 2026-11-25. Written on the build side of the clean room from the 13 specs in `spec/` only.
+Status: proposed, revised 2026-11-25 after the owner's decisions in `docs/decisions.md`, which override any
+default here (section 12.1). Written on the build side of the clean room from the 13 specs in `spec/` only.
 Every decision below names the principle it serves: **thin** over OMP, **light**, **fast**, **stable**
 (`docs/principles.md`). Only capabilities marked KEEP, SIMPLIFY or MERGE (and, in `spec/omp-patch.md`,
 REPLACE-PUBLIC and MOVE-OUT) are built. `docs/plan.md` assigns each of them to a milestone.
@@ -158,7 +159,7 @@ command name for all six commands; `get_state` fields including `model`, `sessio
 | Events `agent_start`, `agent_end` (`yielded`, `isTerminal`, `awaitingAsyncWork`), `turn_start`, `turn_end`, `message_end`, `tool_execution_start/end`, `queue_update`, `retry_fallback_applied`, `retry_fallback_succeeded`, `model_changed`, `notice`, `extension_error`, `rpc_frame_error` | Status, oversight, model watch | docs |
 | `extension_ui_request` methods `select`, `confirm`, `input` (`secret` hint), `editor`, `ask`, `form`, `cancel`; `extension_ui_response` with `value`, `confirmed`, `cancelled`, `answers`, `data` | Dialogs, approvals, forms, spend guard | docs |
 | End of stdin = drain, dispose, exit 0 | Close (HOST-20) | live |
-| Settings `ask.timeout`, `codexResets.autoRedeem5h`, `codexResets.autoRedeemWeekly`, `claudeResets.autoRedeem5h`, `claudeResets.autoRedeemWeekly`, `claudeResets.autoRedeemFable`, `retry.modelFallback`, `retry.fallbackOn`, `retry.fallbackChains`, `tools.approvalMode` | Overlay (4.2) | docs |
+| Settings `ask.timeout`, `goal.continuationModes`, `codexResets.autoRedeem5h`, `codexResets.autoRedeemWeekly`, `claudeResets.autoRedeem5h`, `claudeResets.autoRedeemWeekly`, `claudeResets.autoRedeemFable`, `retry.modelFallback` (default true), `retry.fallbackOn` (default `any`), `retry.fallbackChains`, `retry.fallbackRevertPolicy` (default `cooldown-expiry`: OMP restores the primary model itself), `tools.approvalMode`; `--config` overlays rank above project and global config | Overlay (4.2) | docs |
 | Env `PI_NOTIFICATIONS=off`, `PI_CODING_AGENT_DIR` (default profile only), `PI_CONFIG_DIR` | Child env, isolated tests | docs |
 | `models.yml` custom provider with `baseUrl` and `api: openai-completions` | Loopback fake model in tests | docs |
 | Session file: header `type: session` with id, cwd, `parentSession`; entries `message` (roles `user`, `assistant`, `toolResult`; assistant `usage`), `model_usage`, `custom_message` with `details`, `compaction`, `session_exit` | Delivery confirmation, spend, answers, reopen checks | docs |
@@ -170,7 +171,7 @@ command name for all six commands; `get_state` fields including `model`, `sessio
 | Failing a provider request from `before_provider_request` | Model barrier (EXT-14) | **unverified**; design uses `ctx.abort()` from `before_agent_start` and `turn_start` instead |
 | Model registry "subscription versus metered billing" | Model readback detail (EXT-14 requirement 40) | **unverified**; field omitted until found |
 | Separate-realm worker's parent session ID in the extension | Shell rules for out-of-process subagents (EXT-04) | **unverified**; `ctx.agent.parentId` covers in-process subagents (docs) |
-| Pinning one OAuth account per session (no automatic account rotation) | Never-spend rule | **unverified**; docs say stored accounts are "ranked and rotated automatically" (see 12, row A14) |
+| Pinning one OAuth account per session (no automatic account rotation) | Only if the owner later counts rotation as "switching account" (12.2, row A14) | **unverified**; docs say stored accounts are "ranked and rotated automatically" |
 | Exact `omp usage --json` field names | Quota job | **unverified** |
 | Tern 0.9.33 CLI: `tern new tab [--cwd DIR] -- COMMAND`, `tern split`, `tern close`, `tern ls --json` | Tern runtime | help (Tern, third party) |
 
@@ -241,7 +242,9 @@ time with immediate "busy" refusal; delivery receipts keyed by request ID (HOST-
 - The bridge is found through OMP's global extension folder (11.2), not passed with `-e`. Passing `-e` as
   well would load it twice. Health fails, and starts are refused, if the extension link is missing or stale.
 - Overlay file (written once per hub run, mode 0600): `ask.timeout: 0`; `goal.continuationModes` including
-  `rpc`; all five saved-reset keys `no`; `retry.modelFallback: false` (owner may choose outage-only, 9.2).
+  `rpc`; all five saved-reset keys `no`; `retry.modelFallback: true` and `retry.fallbackRevertPolicy:
+  cooldown-expiry` (both OMP's defaults, pinned so an owner config cannot silently differ); `retry.fallbackOn`
+  and `retry.fallbackChains` only when set in Cataly's `[fallback]` config (9.2).
 - Child environment starts empty: `PATH`, `HOME`, `TMPDIR`, `LANG`, listed provider credentials,
   `PI_NOTIFICATIONS=off`, `CATALY_LAUNCH=<single-use token>`, `CATALY_SOCKET=<path>`. No relay token, no
   Cataly secret, nothing secret in argv (HOST-06, req. 21).
@@ -307,15 +310,21 @@ the outbox part by part, and posted as a linked reply. The stop gate (EXT-24) re
 
 ### 5.2 Voice is a separate module
 
-Voice (VOICE-01 to VOICE-24) is its own crate behind a Cargo feature, so a build without it carries no audio
-code. It shares only the Discord Gateway connection (voice-state intent, VOICE-03) and the hub's lead-delivery
-API (VOICE-15). Its parts: Discord voice connection with DAVE end-to-end encryption, Opus decode/encode,
-24 kHz resampling and pacing, a realtime model session over WebSocket with delegated tools, a usage ledger
-with hard caps, and the playback-proof queue for lead replies. It has its own spending rules (9.2).
+Voice (VOICE-01 to VOICE-24) is the `cataly-voice` crate behind a Cargo feature, so a build without it carries
+no audio code (10.1). It reaches the hub only through its `VoiceHost` trait: Discord voice events from the one
+Gateway connection (VOICE-03), the lead-delivery API with receipt proof (VOICE-15), status reads and note posts.
+Its parts: Discord voice connection with DAVE end-to-end encryption, Opus decode/encode, 24 kHz resampling and
+pacing, a realtime model session with delegated tools, a usage ledger with hard caps, and the playback-proof
+queue for lead replies. It has its own spending rules (9.2).
 
-Alternative considered: OMP's own live voice (`live_connect` with a host WebRTC peer, docs). Rejected for now:
-it needs a WebRTC stack in the hub (**light**), binds to the lead's process and its Codex sign-in, and loses
-the spec's per-day spending ledger and delivery-honesty rules. Revisit if the owner prefers OMP's live voice.
+**Two transports to the realtime model, one session logic (owner decision 11, VOICE-11, VOICE-12).** The
+session state machine, tools, ledger, pacing and playback proof are written once against a `RealtimeLink`
+trait with two implementations: WebSocket (PCM frames in JSON events) and WebRTC (SDP offer posted over HTTPS,
+then Opus over SRTP plus a data channel for events, through str0m). Config selects the transport; the other
+is not started. Provider standby stays dropped: idle close plus wake on speech covers it. Both transports are
+tested in CI against a fake realtime server and, before each release that changes voice, against the real
+API under the gated live test of `docs/plan.md` milestone 5. OMP's own live voice (`live_connect`, docs) is not
+used: it binds voice to the lead's process and Codex sign-in and has no spending ledger.
 
 ## 6. Job engine
 
@@ -329,7 +338,7 @@ Every timed or watching behaviour is a row in one `jobs` table plus a built-in *
 | `pr` (follower) | WS-24, WS-25 | 3 min | new item, state difference |
 | `github` (owner PRs + notifications) | OJ-05, OJ-06 | 3 min / 1 min | new item |
 | `quota` (+ limits view, quota gate) | OJ-07 to OJ-09, WS-23 | 5 min / 2 min | level crossing |
-| `model` (fallback watch and return) | OJ-10 to OJ-12 | on events + 60 s | state difference |
+| `model` (fallback watch) | OJ-10 to OJ-12 | on events + 60 s | state difference |
 | `spend` (spend-offer guard) | OJ-13 | on every dialog + 60 s sweep | action, reported every time; cannot be disabled or dry |
 | `backup` (git + secret scan) | OJ-15 | 30 min / 5 min | health (hit set), action |
 | `health` (self health, file age) | OJ-16, OJ-18, WS-34 | 2 min | health, 2 strikes |
@@ -341,6 +350,17 @@ Every timed or watching behaviour is a row in one `jobs` table plus a built-in *
 | `planner` | COORD-19 to COORD-36 | 1 h | — |
 | `board` (board posts) | EVR-30, OPC-25 | on change, ≤ 1 per 60 s per destination | body difference |
 | `update` (release notice) | IR-21, IR-22 | 24 h | new version |
+
+**Model watch with fallback on (owner decision 7).** A session on a different model than requested is now
+expected after a quota wall, so the `model` job reports, it does not repair: one quiet event per distinct
+fallback (`retry_fallback_applied`: from, to, reason), one note when the requested model serves again, and an
+urgent event only for "no model" or for a model OMP did not report as a fallback. Returning to the requested
+model is OMP's own `cooldown-expiry` revert, pinned in the overlay (OJ-11); the hub has no second return path,
+and the old 10/20/40-minute recovery ladder is not built. If a session is still off model an hour after the
+requested provider's reset time from the quota job, the owner is told once. The lane model pin follows the
+same rule: the bridge's barrier (EXT-14) accepts the requested model and any model OMP itself announced as the
+fallback target in that session, and aborts on anything else. The start-time readback (HOST req. 27) still
+requires the requested model exactly.
 
 A job instance is configuration: name, kind, enabled, cadence or trigger, per-tick deadline, dry-run flag,
 destinations, kind settings (OJ-01). Several instances of one kind may exist (two backups, two mail watches).
@@ -420,9 +440,8 @@ relay destinations, or kept locally. Messenger posts never mention anyone and pa
   socket is 0600. A stale socket is removed only after a refused connect; the exclusive `hub.lock` is the real
   single-instance guard (DISC-IN-25, WS-32).
 - **Authentication by the file system.** The directory and socket modes, plus a peer-credential check
-  (`SO_PEERCRED` on Linux, `getpeereid` on macOS; Tokio where it exposes them, otherwise a small wrapper in
-  `cataly-sys`) that the connecting UID equals the hub's. Other
-  UIDs are closed without a reply (HOST req. 72).
+  (Tokio's `peer_cred`: `SO_PEERCRED` on Linux, `getpeereid` on macOS) that the connecting UID equals the
+  hub's. Other UIDs are closed without a reply (HOST req. 72).
 - **Authority above that.** Same-UID processes are not a security boundary, so authority is assigned, not
   claimed: a bridge connection gets the role the hub gives its session at hello (lead, lane with key and run,
   none); a CLI connection is the owner, unless its peer PID descends from an OMP child the hub spawned, in which
@@ -456,22 +475,34 @@ relay destinations, or kept locally. Messenger posts never mention anyone and pa
 - The lead's goal tool may not create goals (the lead idles without one, OPC-36); lane goals are set by the hub
   from the brief and done checks. OMP itself refuses a second goal (docs).
 
-### 9.2 Never spend
+### 9.2 Never spend (fallback allowed)
+
+Owner decision 7: a session may fall back to another configured model when a quota runs out. Redeeming saved
+resets, buying credits and paid overage stay refused, in code:
 
 - Overlay sets every saved-reset key to `no`; the hub never runs `omp usage reset` and the bridge's shell veto
   blocks it in every session as a non-overridable rule (OJ-13, OJ requirement 38).
 - Spend-offer dialogs (built-in phrases plus owner phrases) are answered with cancel within 1 s, never with
   "no" or a remembered choice; a dialog that stays is cancelled again, the session is fenced, and the owner is
   alerted. Three offers in 10 minutes fence the session.
-- `retry.modelFallback: false` by default, so OMP cannot move a session to another model or provider on an
-  exhausted quota. Owner option: outage-only fallback (`retry.modelFallback: true` with `retry.fallbackOn:
-  except-usage-limit`); `any` and `usage-limit` are refused by config validation.
-- The hub changes a session's model only to that session's requested model, with readback; it has no code path
-  that picks another provider, account or model.
-- Quota exhaustion (a `usageLimit` in `get_state`, a `prompt_result` error from a usage limit, or the quota job
-  showing the provider at its limit) marks the session quota-blocked: no nudges, reminders or deliveries other
-  than owner requests; the lead is told once (OPC-58, OPC-64). `usageLimit` with `extraUsage` fences the
-  session, because the next request could bill overage.
+- `get_state.usageLimit` reporting `extraUsage` fences the session before its next request, because that
+  request could bill overage.
+- **Fallback is OMP's, not Cataly's.** The overlay sets `retry.modelFallback: true`. Which errors walk a chain
+  (`retry.fallbackOn`) and the chains themselves (`retry.fallbackChains`) come from the owner's OMP config,
+  or from Cataly's `[fallback]` config section when the owner sets it there, in which case the overlay carries
+  it. Cataly never invents a chain. OMP only falls back along a configured chain, so with none configured,
+  "on" changes nothing and health shows that as INFO.
+- The hub itself changes a session's model only back to that session's requested model, with readback; it has
+  no code path that picks another provider, account or model.
+- A fallback to a metered (API-key) model bills per token. That is ordinary model spend, not credits or
+  overage, and it is bounded by the lane's cost ceiling, which also goes to OMP as `--max-cost` (WS-18).
+- Quota exhausted for good (a turn ends with a usage-limit error in `prompt_result`, meaning the chain is
+  exhausted or absent) marks the session quota-blocked: no nudges, reminders or deliveries other than owner
+  requests; the lead is told once (OPC-58, OPC-64).
+- Guidance text for the lead and lanes says: never redeem a reset, buy credits, enable overage or switch
+  account, provider or model yourself; OMP's configured fallback may change the model for you; when it is
+  exhausted, stop, save progress and report. This replaces the stricter "no switching" wording in LANE req. 13
+  and OPC-63/64.
 - The quota gate keeps new session starts (lanes, planner starts) waiting at the hold level; running sessions are
   untouched; only the owner can lift it.
 - Voice is the one paid feature: explicit opt-in, owner-entered prices, daily, total and spending caps checked
@@ -513,29 +544,44 @@ path. The values come from the specs; the main ones:
 - `unsafe` is forbidden in every crate (`#![forbid(unsafe_code)]` through workspace lints).
 - Clippy denies `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `indexing_slicing`,
   `dbg_macro` and `print_stdout` outside the CLI output module; tests are exempt.
-- Errors are typed per crate (`thiserror`) and carry one class used for decisions: `Transient` (retry with
+- Errors are typed per module (plain enums with hand-written `Display`) and carry one class used for decisions: `Transient` (retry with
   backoff), `Rejected` (tell the caller), `InDoubt` (fence, never retry), `Fatal` (stop the task).
 - Release builds keep `panic = "unwind"` so a bug in one task is caught at its supervisor (2.2) instead of
   ending every session; a panic is logged with its location and counted in health.
 
 ## 10. Workspace, dependencies, lints, tests, CI
 
-### 10.1 Layout
+### 10.1 Layout: two crates
 
-| Crate | Contents | Depends on |
+Owner decision 13 asks for the lightest structure with one implementation per concern. A crate boundary is
+kept only where it buys something concrete; everything else is a module of one crate, separated by module
+privacy (`pub(crate)` at most) rather than by packages.
+
+| Crate | Contents | Why it is its own crate |
 | --- | --- | --- |
-| `cataly` (bin) | `main`, CLI parsing and output, `hub` start-up wiring | all below |
-| `cataly-proto` | Control-socket and bridge message types, versions | serde |
-| `cataly-sys` | Paths, permissions, atomic file writes, peer credentials, memory/cgroup/load/disk readers, signals to own children, sd_notify, stall detector | rustix, sysctl (macOS) |
-| `cataly-store` | Schema, migrations, writer thread, typed queries | rusqlite |
-| `cataly-omp` | rpc-ui client (framing, v2 chunks, correlation), launch builder, probe, overlay, session-file reader, usage and lease parsers | tokio |
-| `cataly-host` | `Runtime` trait, headless and tern runtimes, session actors, dialogs, receipts, deliveries, inboxes | omp, store |
-| `cataly-relay` | Relay trait, shared pipeline, HTTP policy, Discord (Gateway, REST, forms, threads), Telegram, Slack, text splitting and table rendering | host, store |
-| `cataly-voice` (feature `voice`) | Discord voice, DAVE, Opus, realtime session, ledger | relay |
-| `cataly-jobs` | Scheduler, event stream and routing, all job kinds of 6.1 except oversight and planner | host, relay |
-| `cataly-lanes` | Lane lifecycle, reports and evidence, done checks, oversight, planner, backlog, slots, questions, grants, review and merge gate, profile | host, jobs |
-| `extension/cataly.ts` | The bridge, under 600 lines, with its own tests | OMP extension API only |
-| `testkit` (dev only) | Fake Discord, Telegram, Slack and model-provider servers, OMP launcher for the contract suite | — |
+| `cataly` (one package, `lib` + `bin` targets) | Modules: `cli`, `hub` (start-up, supervision, socket, dispatcher), `proto` (control and bridge messages), `sys` (paths, modes, atomic writes, locks, peer credentials, host readers, signals, sd_notify, stall detector), `log`, `store`, `omp` (rpc-ui client, launch, overlay, probe, session-file reader, usage and lease parsers), `host` (`Runtime` trait, headless, tern, session actors, deliveries, inboxes), `relay` (trait, pipeline, `http`, `text`, `discord`, `telegram`, `slack`), `jobs` (scheduler, events, routing, job kinds), `lanes` (lifecycle, reports, evidence, done checks, oversight, planner, slots, questions, grants, review gate, profile) | The product. The `lib` target exists only so integration tests and the contract suite can call modules directly. |
+| `cataly-voice` (optional dependency behind the `voice` feature) | Discord voice connection, DAVE, Opus, resampling and pacing, realtime model over WebSocket and WebRTC, usage ledger, reply playback queue | (1) **Dependency kept out:** libopus (C), the DAVE/MLS stack and the WebRTC stack compile and link only in voice builds. (2) **Feature gate:** a build without voice contains none of it. (3) **Test seam:** the crate defines a small `VoiceHost` trait (lead delivery with receipt, status read, note post, Gateway voice events in); `cataly` implements it, and voice tests run against a fake host and a fake realtime server. Cargo forbids a dependency cycle, so the narrow trait is enforced by construction. |
+| `extension/cataly.ts` | The bridge, under 600 lines, with its own tests | Not Rust; OMP loads TypeScript. |
+
+Removed boundaries, and why nothing is lost: `proto`, `sys`, `store`, `omp`, `host`, `relay`, `jobs` and `lanes`
+had no feature gate, no dependency that only they use, and no consumer outside the hub, so as crates they
+bought only compile-time parallelism. `testkit` becomes `tests/support/` (fakes use dev-dependencies, which
+never enter the product). If the incremental debug build of `cataly` exceeds 30 s on the CI runner, the module
+with the largest share is split out then, along a module line that already exists; not before.
+
+**One implementation per concern.** Shared modules and their users, so nothing is written twice:
+
+| Concern | One module | Used by |
+| --- | --- | --- |
+| rpc-ui framing, correlation, v2 chunks | `omp::rpc` | probe, headless runtime, health check, contract suite |
+| Session-file reading (incremental, bounded, file identity checks) | `omp::transcript` | delivery confirmation, answer capture, in-doubt search, spend totals, model watch, reopen header checks |
+| HTTP policy (deadlines, caps, retries, 429, outcome classes) | `relay::http` | all relays, voice signalling, GitHub release check, web done checks |
+| Text splitting, table rendering, width and cuts | `relay::text` | all relays, board, CLI output |
+| Delivery into a session (inbox, batching, in doubt, receipts) | `host::inbox` | relay hand-off, job events, oversight, lead-to-lane messages, voice pass-to-lead |
+| Transition memory and once-per-change emission | `jobs::memory` | every job kind, pressure notices, oversight |
+| Bounded subprocess (argv, timeout, cap, TERM then KILL) | `sys::command` | `omp --version`, usage, lease, `gh`, `git`, job and event commands, done checks |
+| Atomic owner-only file write | `sys::fs` | overlay, spill files, config setup, install |
+| Secret-shape masking | `sys::secrets` | backup scan, outbound posts, recall store, profile check |
 
 No `build.rs` beyond embedding the version and migrations. The extension's version constant is generated from
 the Cargo manifest at release time (IR requirement 6).
@@ -545,31 +591,45 @@ the Cargo manifest at release time (IR requirement 6).
 Policy: few, well-known crates; each recorded in `docs/third-party.md` with licence and source (cleanroom rule
 4); `cargo deny` allows only MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0 and
 public domain (SQLite); no copyleft in the binary. Default features off; each enabled feature is justified.
+A crate stays only if writing its job in-house would be large or risky; each row says what it saves. Licences
+checked on crates.io on 2026-11-25.
 
-| Crate | Licence | Why |
+| Crate (core) | Licence | What it saves |
 | --- | --- | --- |
-| tokio (rt-multi-thread, net, process, time, signal, sync, io-util, fs) | MIT | Runtime, child processes, Unix sockets, peer credentials |
-| serde, serde_json | MIT / Apache-2.0 | All wire formats |
-| rusqlite (bundled) | MIT (SQLite: public domain) | Store |
-| reqwest (rustls, json, no default features) | MIT / Apache-2.0 | HTTP for relays, GitHub release check, realtime model |
-| rustls, webpki-roots | Apache-2.0 / ISC / MIT; CDLA-Permissive-2.0 | TLS without OpenSSL, same roots on both targets |
-| tokio-tungstenite (rustls) | MIT | Discord Gateway, Slack Socket Mode, realtime model |
-| toml | MIT / Apache-2.0 | Config |
-| lexopt | MIT | CLI parsing with exact "next word verbatim" behaviour (COORD-53); far lighter than clap |
-| tracing, tracing-subscriber | MIT | Structured logs |
-| thiserror | MIT / Apache-2.0 | Error types |
-| jiff | MIT / Unlicense | Time zones, DST rules for cron (WS req. 52), digest time zone |
-| regex | MIT / Apache-2.0 | Shell rules, stream filters, secret patterns |
-| sha2, getrandom, base64 | MIT / Apache-2.0 | Hashes, tokens and nonces, rpc chunks |
-| unicode-width, unicode-segmentation | MIT / Apache-2.0 | Display width and grapheme-safe cuts (DISC-OUT req. 43, COORD req. 64) |
-| ed25519-dalek (verify only) | BSD-3-Clause | Release signature check (11.4) |
-| rustix (fs, process), sysctl (macOS only) | Apache-2.0 / MIT; MIT | statvfs, getrusage, signals to own children; macOS memory level |
-| voice feature: songbird or a smaller voice client, davey (DAVE), audiopus (libopus) | ISC; MIT; MIT + BSD-3 | To be confirmed in milestone 5 against Discord's current DAVE requirement |
-| dev only: proptest, tempfile | MIT / Apache-2.0 | Property tests (splitter, tables, cron), temp dirs |
+| tokio (rt-multi-thread, net, process, time, signal, sync, io-util, fs) | MIT | An async runtime, child-process pipes, Unix sockets, signal handling and peer credentials (`UnixStream::peer_cred`, `getpeereid` on macOS) |
+| serde, serde_json | MIT OR Apache-2.0 | Correct JSON for every wire format and the store's JSON columns |
+| rusqlite (bundled) | MIT; SQLite public domain | A crash-safe transactional store (section 7) |
+| reqwest (`rustls-no-provider`, `json`, no defaults) | MIT OR Apache-2.0 | Connection pooling, TLS wiring, redirect and timeout policy. Kept on measurement terms: if replacing it with `hyper-util` directly saves over 1 MiB of binary or resident memory in milestone 1, `relay::http` is rewritten on hyper. |
+| ring (as the rustls crypto provider, also used directly) | Apache-2.0 AND ISC | Already in the tree for TLS, so it also supplies SHA-256, secure random tokens and nonces, ed25519 release-signature verification and AES-GCM for Discord voice transport. Replaces sha2, getrandom and ed25519-dalek. |
+| tokio-tungstenite (rustls) | MIT | WebSocket framing for the Discord Gateway, Slack Socket Mode and the realtime model |
+| toml | MIT OR Apache-2.0 | A full TOML parser for the owner-edited config |
+| jiff | Unlicense OR MIT | IANA time zones, DST gaps and repeats (WS req. 52), ISO instants |
+| regex | MIT OR Apache-2.0 | A linear-time engine for owner-supplied patterns: shell rules, stream filters, secret patterns, spend phrases |
+| unicode-width, unicode-segmentation | MIT OR Apache-2.0 | Unicode tables for display width and grapheme-safe cuts (DISC-OUT req. 43, COORD req. 64) |
+| rustix (fs, process) | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Safe `statvfs`, `getrusage` and `kill(SIGTERM)` to own children without `unsafe` |
+| base64 | MIT OR Apache-2.0 | Strict decoding for rpc v2 chunks and avatar data URIs; adds no weight because reqwest already depends on it. If reqwest goes, a 60-line in-house decoder replaces it. |
 
-Cron parsing, the HTML form reader (DISC-OUT req. 60: a strict allowlist parser that refuses anything unusual is
-smaller than a general HTML parser) and sd_notify are written in-house because the specs define them precisely
-and a general crate would bring more than it saves.
+| Crate (`cataly-voice` only) | Licence | What it saves |
+| --- | --- | --- |
+| davey | MIT | Discord's DAVE end-to-end encryption (MLS); brings openmls and RustCrypto, voice builds only |
+| audiopus (bundled libopus) | ISC; libopus BSD-3-Clause | The Opus codec |
+| str0m (`rust-crypto` backend, no default features) | MIT OR Apache-2.0 | Sans-I/O WebRTC (ICE, DTLS, SRTP) for the realtime model's WebRTC transport, with no C crypto |
+
+| Crate (dev only) | Licence | What it saves |
+| --- | --- | --- |
+| proptest | MIT OR Apache-2.0 | Property tests with shrinking for the splitter, tables, cron and owner gate |
+| hyper (server feature) | MIT | Fake relay and model servers; already in the tree as reqwest's client |
+
+Removed from the first draft and written in-house instead: **lexopt** (the CLI grammar is "verb, then flags
+whose value is the next word verbatim", COORD-53, about 150 lines), **tracing / tracing-subscriber** (a `log`
+module writing JSON lines with level and key-values to stderr or a file; the hub has no span tree to justify
+them), **thiserror** (hand-written `Display` for a few error enums), **sha2 / getrandom / ed25519-dalek**
+(supplied by ring), **sysctl** (macOS memory level read with a bounded `sysctl -n kern.memorystatus_level`
+subprocess), **tempfile** (a test helper making unique directories under the target folder), **songbird**
+(too large; the Discord voice protocol pieces are written in
+`cataly-voice` on tokio, ring, davey and audiopus). The hub lock uses `std::fs::File::try_lock` (stable since
+Rust 1.89.0). Cron parsing, the HTML form reader (DISC-OUT req. 60) and sd_notify (`std` Unix datagram) are
+in-house because the specs define them exactly.
 
 ### 10.3 Lints and style
 
@@ -582,12 +642,13 @@ OMP version under test, `biome` for lint and format.
 
 | Level | What | Where |
 | --- | --- | --- |
-| Unit | Pure rules: status precedence, splitting, table rendering, cron, owner gate, transition memory, done checks, shell rules | each crate; property tests where the spec states an invariant ("applying twice changes nothing", "parts joined equal the input") |
-| Store | Migrations forward from every released schema; crash injection between write and commit | `cataly-store` |
-| Fake servers | Discord Gateway + REST (resume, op 7/9, close codes, 429 buckets, nonces), Telegram long poll (409, 429, offsets), Slack Socket Mode and Web API, OpenAI-compatible model with scripted replies, GitHub via a fake `gh` | `testkit`, loopback only (DISC-OUT-27) |
+| Unit | Pure rules: status precedence, splitting, table rendering, cron, owner gate, transition memory, done checks, shell rules | next to each module; property tests where the spec states an invariant ("applying twice changes nothing", "parts joined equal the input") |
+| Store | Migrations forward from every released schema; crash injection between write and commit | `store` module |
+| Fake servers | Discord Gateway + REST (resume, op 7/9, close codes, 429 buckets, nonces), Telegram long poll (409, 429, offsets), Slack Socket Mode and Web API, OpenAI-compatible model with scripted replies, realtime model (WebSocket and WebRTC signalling), GitHub via a fake `gh` | `tests/support/`, loopback only (DISC-OUT-27) |
 | Contract suite | Stock OMP in an isolated agent directory (`PI_CODING_AGENT_DIR`) with the loopback model in `models.yml`: probe; ready and negotiation; prompt, follow-up, steer, abort; `prompt_result` and `session_settled`; dialogs of each method; goals; resume and identity checks; lease; bridge load, hello, inert behaviour in ordinary sessions; delivery confirmation from the session file; PATCH-01 rules through real session changes | `tests/contract`, 30 s per case, 10 min total (PATCH-12) |
 | End to end | Hub + fake relays + stock OMP: request to answer posted; lane open to close; job delivery; restart recovery | `tests/e2e` |
 | Benchmarks | Section 2.3 measures | `tests/bench`, results kept as CI artefacts |
+| Live voice | Both transports against the real realtime API: connect, one spoken exchange from recorded audio, pass-to-lead with receipt, cap stop | `tests/live_voice`, ignored by default; runs only with the owner's key in the environment and an explicit spending limit the owner approved; never in CI |
 
 ### 10.5 CI matrix
 
@@ -610,6 +671,21 @@ fingerprints and background-job completion facts from the live branch; hooks tha
 (shell veto, subagent-spawn veto, system-prompt append, model barrier, stop gate, tern form interception);
 session marker and resumed-transcript ownership; tern control commands. It holds no records, no credentials,
 no files and no child processes.
+
+### 10.7 Vetted imports
+
+Owner decision 14 allows Rust the owner wrote in the earlier tree, after the coordinator's per-file check
+(`docs/cleanroom.md`, "Vetted imports"). Such files arrive under `import/`. Rules for build agents:
+
+- Before writing a module that `docs/plan.md` marks as an import candidate, look in `import/` and in
+  `docs/cleanroom-log.md` for a vetted file covering it. Never look anywhere else for it.
+- An import is adapted, never adopted: it is renamed to this glossary, placed in the module named here, made to
+  implement this design's traits (`Runtime`, `Relay`, `VoiceHost`, the `omp::rpc` client interface) and to use
+  the `store` module for anything durable. Its own persistence, locking, logging or HTTP layers are removed in
+  favour of `store`, `log`, `sys` and `relay::http` (decision 13: no second implementation).
+- An import that needs a second trait shape, another storage scheme or a dependency outside 10.2 is written
+  from the spec instead (reason noted in the clean-room log). Imported modules meet sections 9 and 10.3 and get
+  the same tests as any other module.
 
 ## 11. Install and update
 
@@ -662,18 +738,40 @@ together; running OMP sessions keep the extension they loaded and the hello catc
 - From then on every update is verified by the running, already-trusted binary, so only the very first download
   rests on HTTPS alone.
 
-## 12. Resolved conflicts and assumptions
+## 12. Owner decisions, resolved conflicts and open assumptions
+
+### 12.1 Decided by the owner
+
+From `docs/decisions.md` (2026-11-25). These are no longer assumptions.
+
+| Decision | Topic | What this design does | Replaces row |
+| --- | --- | --- | --- |
+| 1 | Licence | No upstream code, structure, names or prose; every name in section 1 is designed here; imports only under 10.7 | — |
+| 2 | Name | The product, binary, bridge, socket and paths are all `cataly` | — |
+| 3 | Relays, voice, tern | Discord, Telegram, Slack (5.1), voice (5.2) and the tern runtime (4.3) are all built | — |
+| 4 | Windows | No Windows build or CI; Telegram on Windows dropped | A5 |
+| 5 | Lane goals | Lanes use OMP goals over rpc `goal` (verified present in 19.1.1, against HOST req. 65) | C2 |
+| 6 | Helper session | The lead is the only standing session; no `duty` role | C5, part of A26 |
+| 7 | Model fallback | On: overlay pins `retry.modelFallback: true` and `cooldown-expiry` revert; chains from the owner's config; resets, credits and overage refused in code; model job reports instead of repairing (4.2, 6.1, 9.2) | A1 |
+| 8 | Stuck OMP exit | End input, 15 s, SIGTERM, 5 s, SIGKILL, own children only (4.2) | A4 |
+| 9 | Hub restart | Every lane that was running is restarted on its exact session file after the lease shows it free. OMP restores a goal paused; the hub sends `goal resume` only for lanes whose goal was active when the hub stopped, and leaves lanes paused by the lead or owner paused (OPC-34) | A7 |
+| 10 | Slack senders | Allowlist, default the owner only | part of A20 |
+| 11 | Voice transport | WebSocket and WebRTC behind one `RealtimeLink` (5.2); a gated live test against the real API before release, at a cost the owner approves; CI uses a fake | A21 |
+| 12 | Updates | Notice only; `cataly update` installs; nothing installs by itself (11.3) | part of A28 |
+| 13 | Weight | Two crates, one implementation per concern, dependency list cut (10.1, 10.2) | — |
+| 14 | Earlier Rust | Vetted imports under `import/`, adapted to this design's traits and store (10.7; import candidates per milestone in `docs/plan.md`) | — |
+
+### 12.2 Resolved conflicts and open assumptions
 
 "If the owner says otherwise" names what changes. Rows marked **C** resolve a conflict between specs or between
-a spec and the installed OMP; rows marked **A** record an answer the design assumed to a spec question.
+a spec and the installed OMP; rows marked **A** record an answer the design assumed to a spec question. Row
+numbers are kept from the first draft so references stay stable; decided rows moved to 12.1.
 
 | # | Question | Default chosen | What changes if the owner says otherwise |
 | --- | --- | --- | --- |
 | C1 | Control of headless sessions: rpc or bridge (EXT Q1 vs LANE, HOST) | rpc for headless; bridge controls only tern (3.5) | Bridge-based control would add a command channel in `cataly.ts` and a second liveness rule; the `Runtime` trait would stay. |
-| C2 | Goals over rpc: HOST requirement 65 says 19.1.1 lacks them | Verified present (`goal` op, live `get`); lanes use OMP goals (HOST-19, also answers HOST Q1, EXT Q3) | Running lanes without goals would make the hub deliver each next instruction itself. |
-| C3 | Lead events through the bridge's `sendMessage` (WS-A5) vs rpc | Inbox in the hub; urgent = rpc wake, quiet waits for the next wake as part of one batch | None at the owner level; only a change of mechanism. |
+| C3 | Lead events through the bridge's `sendMessage` (WS req. 5) vs rpc | Inbox in the hub; urgent = rpc wake, quiet waits for the next wake as part of one batch | None at the owner level; only a change of mechanism. |
 | C4 | Typing indicator: DROP in DISC-OUT-26, OPC-07, MSG-10; MERGE in OJ-30 | Keep Discord typing driven by turn state (OJ requirement 57); no helper for other relays | Remove one small Discord call. |
-| C5 | Standing `duty` role (HOST-26) vs no always-on helper (COORD-03, EXT-05, OPC-92) | Lead is the only role besides lanes | Adding a duty role is a role value plus one more standing session. |
 | C6 | Quiet-lane nudges: WS-10 (15 min prompt) vs COORD-06 (10 and 20 min reminders, 40 min alert) vs WS-16 stuck | One `oversight` job: COORD timings and texts (the reminder also asks for the progress line), WS-10 gating conditions, WS-16 stuck verdict and WS-18 ceilings beside them | Different timings are configuration only. |
 | C7 | Report relay to threads: at once (EVR-19) vs after 20 quiet minutes (WS-11) | Stuck, waiting-on-owner, stopped and finished post at once; progress posts by the quiet rule, at most one per 20 minutes | Policy lists in config. |
 | C8 | Owed replies: OPC-14/15 (60 s reminder, any reply closes) vs DISC-OUT-09 (linked reply + read mark, stop gate) | DISC-OUT req. 33 settle rule; both reminders (60 s wake and stop gate) share one cap of 3 and the 30-minute window | Looser settling is one predicate. |
@@ -687,38 +785,35 @@ a spec and the installed OMP; rows marked **A** record an answer the design assu
 | C16 | Request log: lead adds (EVR req. 44) vs hub opens on admission (OPC-80) | Hub opens an entry per admitted request; lead keeps next step and closes | None. |
 | C17 | Thread status: lead-set check-mark prefix (DISC-OUT-12) vs hub-set status words from lane state, no emoji (OPC-25, OPC-03) | Hub sets `[working]`, `[waiting]`, `[done]` from lane state and archives on close; the lead may set the same words by hand; `done` refused while a lane is open | A different prefix style is configuration. |
 | C18 | Board post per destination (EVR-30) vs one status line per work thread (OPC-06, OPC-25) | One `board` job with two renderers (all lanes, one lane) and one create/edit rule (EVR req. 53) | None. |
-| C19 | Extension loading: `-e <path>` (HOST-19) vs global link (IR-23, EXT-01) | Global link only; a missing link fails health and start | Passing `-e` with `--no-extensions` would disable the owner's other extensions. |
+| C19 | Extension loading: `-e <path>` (HOST req. 19) vs global link (IR-23, EXT-01) | Global link only; a missing link fails health and start | Passing `-e` with `--no-extensions` would disable the owner's other extensions. |
 | C20 | TELE-15 merges into a "recall spec" that does not exist | Telegram turns feed the earlier-conversation store of DISC-IN-18 | None. |
-| C21 | Voice spends money; never-spend rule | Never-spend covers OMP quotas, credits, resets and provider switches; voice is a separate owner-capped budget | Dropping voice removes one crate. |
-| A1 | Model fallback (OJ Q1) | Off for every session; outage-only allowed by config | Leaving it as configured would let OMP change provider on exhausted quota. |
+| C21 | Voice spends money; the spend rules of decision 7 | Those rules cover OMP resets, credits and overage; voice is a separate owner-capped budget (VOICE-19) | — |
+| C22 | Hub-driven return to the requested model (OJ-11, OJ req. 30-31) vs OMP's own `cooldown-expiry` revert | OMP's revert only; the hub reports (6.1), so one implementation per concern (decision 13) | A hub return path would be a second mechanism that can race OMP's. |
 | A2 | Personal-account Discord features (OJ Q2) | Dropped | — (DROP verdicts) |
 | A3 | Quota gate scope and level (OJ Q3) | Also holds planner and queued starts; level 85 % | Config. |
-| A4 | SIGTERM/SIGKILL for stuck OMP exits (HOST Q2) | Yes, 15 s then TERM, 5 s then KILL | Leaving children stuck needs a manual kill. |
-| A5 | Windows (HOST Q3, IR Q6) | No Windows build or CI | A Windows port needs named pipes and a different service model. |
 | A6 | Lead resume after an unclean stop (HOST Q4) | Resume when the lease shows the transcript free and it exists; else fresh, saying why | Always fresh after a crash. |
-| A7 | Lanes after a hub restart (LANE Q1) | Restart each previously running headless lane on its exact session file; OMP restores its goal paused; the lane shows "paused: hub restart" and the lead decides (OPC-82) | Leaving them lost until reopened saves memory at start. |
 | A8 | Tern lifecycle (LANE Q2) | Full lifecycle except remote dialog answers | Restricting tern to open/observe/close shrinks the tern runtime. |
 | A9 | Per-lane shell rules (LANE Q3) | Kept, fail closed | Relying on OMP approvals alone removes the shell veto round trip. |
 | A10 | Queued launches (LANE Q4), auto close after 5 min (LANE Q7) | Kept; 5-minute window kept | Config. |
-| A11 | systemd scopes per lane (LANE Q5) | Not in the first release | Linux-only addition in `cataly-sys`. |
+| A11 | systemd scopes per lane (LANE Q5) | Not in the first release | Linux-only addition in the `sys` module. |
 | A12 | Worktrees without a list (LANE Q6) | No migration exists (IR-43), so unrecorded worktrees are always kept | — |
 | A13 | Approval mode for headless sessions (HOST-05) | `always-ask` fixed; approvals go to the lead (LANE-31) and, if enabled, to the owner as buttons | `write` would auto-approve workspace writes and make lanes much less chatty. |
-| A14 | OMP's automatic rotation between the owner's own logged-in accounts | Not controlled by Cataly (no documented switch); the owner keeps one login per provider if rotation counts as "switching account" | If a pinning setting is found, the overlay sets it. |
+| A14 | OMP's automatic rotation between the owner's own logged-in accounts | Not controlled by Cataly (no documented switch); allowed like a configured fallback | If the owner counts it as "switching account", keep one login per provider. |
 | A15 | Discord: all-channels mode, lookup, auto resend, busy lead, rejected intents (DISC-IN Q1-5) | Dropped; lookup opt-in and off; auto resend when the file is final; follow-up while busy; intake stays down | Each is a small switch except REST polling, which stays out. |
 | A16 | Hub posts final answers (DISC-OUT Q1) | Yes, lead and lanes | Model-driven replies need the stop-gate machinery as the main path. |
 | A17 | Form timing (DISC-OUT Q2) | 3 minutes for a single recommended choice; no timeout otherwise | Config. |
 | A18 | Remote approvals by button (DISC-OUT Q3) | Built, off by default, fail closed | Removing it deletes one card type. |
 | A19 | Owner language, table rendering (DISC-OUT Q4, Q5) | One configured language; tables always rendered | Config. |
-| A20 | Slack member mode, sender list, Telegram send scope (TSV Q1, Q2, Q4) | Member via the app's user token; allowlist (default the owner); Telegram sends limited to the owner's DM and configured group/topic | Config. |
-| A21 | WebRTC voice (TSV Q3) | Dropped; WebSocket with idle close and wake | — |
+| A20 | Slack member mode, Telegram send scope (TSV Q1, Q4) | Member via the app's user token; Telegram sends limited to the owner's DM and configured group/topic | Config. |
 | A22 | Voice-note transcription (TSV Q5) | On request; automatic is a config switch | Automatic transcription adds a call per voice note. |
-| A23 | Ceilings hold the lane (WS Q1) | Yes, plus `--max-cost` as OMP-side backstop | Advisory only. |
+| A23 | Ceilings hold the lane (WS Q1) | Yes, plus `--max-cost` as OMP-side backstop; also bounds metered fallback spend | Advisory only. |
 | A24 | Auto report posting, PR events to threads, limit alerts, broken-off cron (WS Q2, Q4-6) | As C7; PR events to the lead only; quota job alerts on bands; broken-off jobs stay held until acknowledged | Config. |
 | A25 | Personal watch scripts (WS Q3) | Covered by the job kinds of 6.1 plus `probe` and `stream` | A new kind if a script needs carried state. |
-| A26 | Coordination questions (COORD Q1-5) | Helper session dropped; usage counts built but off and with no default collector; event commands kept; planner defaults kept; profile kept | Usage counts can be removed entirely. |
+| A26 | Coordination questions (COORD Q2-5) | Usage counts built but off and with no default collector; event commands kept; planner defaults kept; profile kept | Usage counts can be removed entirely. |
 | A27 | Evidence questions (EVR Q1-5) | Published files kept; progress reports do not wake; PR policy check kept; caps as specified; request log kept | Each is one feature flag or one constant. |
-| A28 | Release questions (IR Q1-5, Q7, Q8) | Signed checksum list; notice-only updates; `--restart` never stops busy sessions; static musl; XDG paths on macOS; no OMP skill file (guidance comes from the hub); no notarisation | Unsigned releases drop 11.4's signature step; notarisation adds a macOS signing job. |
+| A28 | Release questions (IR Q1, Q3-5, Q7, Q8) | Signed checksum list; `--restart` never stops busy sessions; static musl; XDG paths on macOS; no OMP skill file (guidance comes from the hub); no notarisation | Unsigned releases drop 11.4's signature step; notarisation adds a macOS signing job. |
 | A29 | Operating contract (OPC Q1-5) | Short neutral voice; the hub only wakes the lead after 60 s, never posts a holding line itself; lead may settle routine reversible choices; onboarding reads titles and metadata unless allowed more; profile distillation kept, simplified | Each changes guidance text or one rule. |
 | A30 | OMP patch questions (PATCH Q1-3) | Detect and report misdelivery in tern; file the four upstream reports; minimum 19.1.1, newer majors allowed with an "untested" warning | Refusing untested majors adds an upper bound to the probe. |
-| A31 | EXT Q2, Q4, Q5 | Form mirroring kept for tern; restricted second lead dropped; lane model pinned for its life | Config. |
+| A31 | EXT Q2, Q4, Q5 | Form mirroring kept for tern; restricted second lead dropped; lane model pinned for its life, OMP-announced fallbacks excepted (6.1) | Config. |
 | A32 | Who may call the hub's owner verbs from a shell | CLI = owner unless the peer descends from a hub-spawned session; lanes' shell calls to `cataly` are vetoed except read-only verbs (8) | A stricter scheme would need a second OS user for sessions. |
+| A33 | Provider standby for voice (rest of VOICE-12) | Not built; idle close plus wake on speech | A standby link adds one idle connection per call window. |

@@ -3,19 +3,32 @@
 Ordered milestones. Each is a vertical slice: it ends in something the owner can run, ships with tests on
 linux-x64 and darwin-arm64, and records the measures named in it against `DESIGN.md` section 2.3. A milestone
 is done only when its acceptance checks pass in CI, including the contract suite against stock OMP 19.1.1 and
-the newest OMP release.
+the newest OMP release. Owner decisions in `docs/decisions.md` override anything here.
 
 Capability IDs are the spec IDs. Each KEEP, SIMPLIFY or MERGE capability is listed under exactly one milestone,
 the one that first delivers it; a later milestone that extends it says so in its text. MERGE capabilities are
-built as part of the capability they merge into, in the same milestone. Crate names are those of
-`DESIGN.md` section 10.1.
+built as part of the capability they merge into, in the same milestone. The product is two crates,
+`cataly` and `cataly-voice` (`DESIGN.md` section 10.1); "modules touched" names modules of `cataly` unless
+stated.
+
+**Import candidates** (owner decision 14, `DESIGN.md` section 10.7). Each milestone lists the modules for which
+the owner may supply his own earlier Rust. Before writing such a module from the spec, the build agent checks
+`import/` and `docs/cleanroom-log.md` for a vetted file covering it; if there is one, it adapts that file to
+this design's names, traits (`Runtime`, `Relay`, `VoiceHost`, the `omp::rpc` interface) and `store`, and
+removes any layer the design already has once. If there is none, or the file would need a second trait shape
+or storage scheme, the module is written from the spec. Nothing about an import's shape is assumed in advance;
+the three the owner named as likely are marked **likely**. The same check applies to any other module if a
+vetted file for it appears in `import/`.
 
 Rules for every milestone:
 
 - Memory and latency benchmarks run in CI and are compared with `main`; a rise over 10 % blocks the merge.
 - `docs/third-party.md` lists every new dependency with licence and source before it lands.
 - No capability is shipped behind a switch that is off and untested; anything configurable is tested both ways.
-- `docs/cleanroom-log.md` gets one line per milestone: who built it and what they were allowed to read.
+- `docs/cleanroom-log.md` gets one line per milestone: who built it, what they were allowed to read, and which
+  vetted imports (if any) it adapted.
+- No module duplicates one listed in `DESIGN.md` 10.1 "One implementation per concern"; review rejects a second
+  HTTP client, session-file reader, subprocess runner, inbox or transition memory.
 
 ## Milestone 1: hub skeleton, job engine, owner jobs
 
@@ -41,8 +54,11 @@ reads events with `cataly events`, and receives job posts in a Discord channel. 
   DISC-OUT-27; shared send model and HTTP policy MSG-05, MSG-06.
 - Contract suite skeleton and CI: PATCH-12 (probe cases), IR-36, IR-38 (pinned and nightly OMP), IR-39.
 
-**Crates touched:** `cataly`, `cataly-proto`, `cataly-sys`, `cataly-store`, `cataly-omp` (probe, usage and
-lease parsers only), `cataly-jobs`, `cataly-relay` (Discord REST client only), `testkit`.
+**Modules touched:** `cli`, `hub`, `proto`, `sys`, `log`, `store`, `omp` (`rpc` for the probe, usage and lease
+parsers), `jobs`, `relay` (`http`, `text`, Discord REST only); `tests/support/` (fake `gh`, fake Discord REST).
+
+**Import candidates:** `omp::rpc` (framing, v2 chunks, correlation) **likely**; `relay::discord` REST client
+and `relay::http` **likely**.
 
 **Acceptance checks**
 
@@ -70,7 +86,9 @@ lease parsers only), `cataly-jobs`, `cataly-relay` (Discord REST client only), `
     fake `omp` printing 19.0.0 no session start is possible and health names both versions.
 
 **Measured:** hub idle RSS with all owner jobs (target ≤ 30 MiB total, jobs < 5 MiB); hub start to socket
-(≤ 150 ms); `cataly status` round trip (≤ 20 ms); CPU time per hour with all jobs idle.
+(≤ 150 ms); `cataly status` round trip (≤ 20 ms); CPU time per hour with all jobs idle; release binary size;
+the reqwest-versus-hyper comparison of `DESIGN.md` 10.2 (binary size and RSS; reqwest is replaced if hyper
+saves over 1 MiB); incremental debug build time of `cataly` (split trigger at 30 s, `DESIGN.md` 10.1).
 
 ## Milestone 2: Discord text end to end with one headless lead
 
@@ -93,7 +111,8 @@ unanswered-message watch run.
 - Discord outbound: DISC-OUT-02, DISC-OUT-04, DISC-OUT-07, DISC-OUT-08, DISC-OUT-09, DISC-OUT-10,
   DISC-OUT-15, DISC-OUT-16, DISC-OUT-17, DISC-OUT-18, DISC-OUT-20, DISC-OUT-21, DISC-OUT-22, DISC-OUT-28.
 - Owner jobs that need sessions or intake: OJ-10, OJ-11, OJ-12, OJ-13, OJ-20, OJ-21, OJ-22, OJ-25, OJ-27,
-  OJ-29, OJ-30, OJ-31. Quota gate now holds the lead's start.
+  OJ-29, OJ-30, OJ-31. Quota gate now holds the lead's start. Model fallback is on (decision 7): OJ-11 is
+  delivered as the overlay's pinned `cooldown-expiry` revert plus reporting, not as a hub return path.
 - Lead records: EVR-22, EVR-23, EVR-24, EVR-25, EVR-28, EVR-35, EVR-36.
 - Operating contract, lead part (guidance text plus the code rules): OPC-01, OPC-02, OPC-03, OPC-04,
   OPC-05, OPC-08, OPC-09, OPC-10, OPC-11, OPC-12, OPC-13, OPC-14, OPC-15, OPC-16, OPC-29, OPC-30, OPC-36,
@@ -102,9 +121,12 @@ unanswered-message watch run.
 - Contract suite: rpc cases of PATCH-12 (prompt, follow-up, steer, abort, `prompt_result`,
   `session_settled`, dialogs, resume identity, lease) and bridge load and inert behaviour.
 
-**Crates touched:** `cataly-omp` (rpc client, launch builder, overlay, session-file reader), `cataly-host`,
-`cataly-relay` (Gateway, intake pipeline, forms, buttons), `cataly-jobs`, `cataly-store`,
-`extension/cataly.ts`, `testkit` (fake Gateway, fake model provider).
+**Modules touched:** `omp` (`rpc`, launch, overlay, `transcript`), `host` (headless runtime, actors, `inbox`,
+receipts, dialogs), `relay` (pipeline, Discord Gateway, intake, forms, buttons), `jobs` (model, spend, digest,
+unanswered), `store`; `extension/cataly.ts`; `tests/support/` (fake Gateway, fake model provider).
+
+**Import candidates:** `host` headless session runtime **likely**; `relay::discord` Gateway client **likely**;
+`omp::rpc` if not already adapted in milestone 1; `omp::transcript`.
 
 **Acceptance checks**
 
@@ -125,8 +147,10 @@ unanswered-message watch run.
    Discord answer race correctly.
 8. A spend-offer dialog (fake model triggering a `select` with "redeem") is cancelled within 1 s and reported;
    three in 10 minutes fence the session.
-9. A `retry_fallback_applied` event produces one off-model event; recovery waits for an idle lead and returns it
-   to the requested model only, with readback.
+9. With a fallback chain configured, a usage-limit error from the fake provider moves the lead to the chain's
+   next model: one quiet fallback event, the overlay shows `retry.modelFallback: true`, no reset is redeemed and
+   no saved-reset command runs; when OMP restores the primary, one recovery note; with no chain configured the
+   turn ends quota-blocked and the lead is told once. A `usageLimit` with `extraUsage` fences the session.
 10. Owner return after 3 hours produces a digest delivered to the lead as one urgent event.
 11. Bridge in an ordinary OMP session registers only start/switch handlers and opens no connection.
 12. Restart: the lead resumes its last cleanly closed session (same ID and file); after an unclean stop with a
@@ -163,9 +187,12 @@ each releasable.
   OPC-42, OPC-43, OPC-44, OPC-45, OPC-46, OPC-47, OPC-48, OPC-49, OPC-54, OPC-56, OPC-57, OPC-60, OPC-61,
   OPC-62, OPC-82, OPC-93.
 
-**Crates touched:** `cataly-lanes` (new), `cataly-host` (goals, lane roles, look-only tool sets),
-`cataly-jobs` (oversight, board), `cataly-relay` (threads, journal), `extension/cataly.ts` (lane tool,
-shell veto, subagent veto, model barrier, fingerprints).
+**Modules touched:** `lanes` (new module), `host` (goals, lane roles, look-only tool sets), `jobs`
+(oversight, board), `relay` (threads, journal); `extension/cataly.ts` (lane tool, shell veto, subagent veto,
+model barrier with fallback exception, fingerprints).
+
+**Import candidates:** none named by the owner; check `import/` for lane or git worktree code before writing
+`lanes`.
 
 **Acceptance checks**
 
@@ -185,8 +212,9 @@ shell veto, subagent veto, model barrier, fingerprints).
    only with a complete sample; reaching a cost ceiling pauses the lane and `--max-cost` is on its command line.
 9. A lane's thread receives stuck/finished reports at once and progress reports by the quiet rule; paths are
    cleaned; each report posts at most once.
-10. Hub restart with two running lanes: both are restarted on their exact files with goals paused and
-    "paused: hub restart"; the lead receives the recap.
+10. Hub restart with three running lanes, two with active goals and one paused by the lead (decision 9): all
+    three are restarted on their exact files once the lease is free; the two get `goal resume` and read back
+    active; the paused one stays paused; the lead receives the recap.
 
 **Measured:** lane start time (spawn to kickoff confirmed); RSS added per lane; oversight CPU per hour with 8
 lanes; incremental spend reading cost per 10 MiB of session file.
@@ -203,7 +231,9 @@ lanes; incremental spend reading cost per 10 MiB of session file.
 - Event commands: COORD-41. Admission command and slots view: WS-37.
 - Published files, learned rules, board posts: EVR-17, EVR-19, EVR-27, EVR-30.
 
-**Crates touched:** `cataly-lanes`, `cataly-jobs` (planner job, board posts), `cataly` (slot CLI).
+**Modules touched:** `lanes`, `jobs` (planner job, board posts), `cli` (slot command).
+
+**Import candidates:** none named; check `import/` before writing `lanes` slots and planner.
 
 **Acceptance checks**
 
@@ -236,8 +266,10 @@ answers in place, job and board destinations on both.
 - Channel facts and earlier-conversation lookup for all relays: DISC-IN-17, DISC-IN-18.
 - Setup guidance: OPC-88.
 
-**Crates touched:** `cataly-relay` (telegram, slack modules), `cataly-jobs` (destinations), `testkit` (fake
-Telegram and Slack servers).
+**Modules touched:** `relay` (`telegram`, `slack`), `jobs` (destinations); `tests/support/` (fake Telegram and
+Slack servers).
+
+**Import candidates:** `relay::telegram` and `relay::slack` clients, only if the owner's earlier Rust has them.
 
 **Acceptance checks**
 
@@ -259,11 +291,16 @@ The owner joins a Discord voice channel, talks to a realtime model that can read
 and pass work to the lead, and hears the lead's replies, within configured spending caps.
 
 **Scope:** VOICE-01, VOICE-02, VOICE-03, VOICE-04, VOICE-05, VOICE-06, VOICE-07, VOICE-08, VOICE-09,
-VOICE-10, VOICE-11, VOICE-13, VOICE-14, VOICE-15, VOICE-16, VOICE-17, VOICE-18, VOICE-19, VOICE-20,
-VOICE-21, VOICE-22, VOICE-24, OJ-32.
+VOICE-10, VOICE-11, VOICE-12 (WebRTC transport only, decision 11; provider standby stays out), VOICE-13,
+VOICE-14, VOICE-15, VOICE-16, VOICE-17, VOICE-18, VOICE-19, VOICE-20, VOICE-21, VOICE-22, VOICE-24, OJ-32.
 
-**Crates touched:** `cataly-voice` (new, feature `voice`), `cataly-relay` (voice-state intent on the shared
-Gateway), `cataly-host` (lead delivery with receipt proof), `testkit` (recorded audio, fake realtime server).
+**Modules touched:** crate `cataly-voice` (new, feature `voice`: Discord voice, DAVE, Opus, `RealtimeLink`
+with WebSocket and WebRTC); in `cataly`: `relay::discord` (voice-state intent on the shared Gateway), `host`
+(`VoiceHost` implementation: lead delivery with receipt proof); `tests/support/` (recorded audio, fake
+realtime server for both transports).
+
+**Import candidates:** Discord voice connection, Opus and realtime-session code, only if the owner's earlier
+Rust has them; they must fit `VoiceHost` and `RealtimeLink`.
 
 **Acceptance checks**
 
@@ -277,9 +314,18 @@ Gateway), `cataly-host` (lead delivery with receipt proof), `testkit` (recorded 
    same generation.
 6. Any provider failure holds voice until an explicit restart, with no paid retry; the summary post goes out.
 7. `cataly transcribe <file|url>` runs the owner's command with the 25 MiB cap and container check.
+8. Both transports pass checks 3 to 6 against the fake realtime server in CI; switching the transport in config
+   changes nothing else in behaviour, ledger or receipts.
+9. **Live test, owner-gated (decision 11).** `tests/live_voice` runs against the real realtime API over WebSocket
+   and over WebRTC: connect, one exchange from recorded audio, one pass-to-lead with receipt, and a stop at a
+   deliberately low spending cap. It is ignored by default and never runs in CI. It runs only when the owner
+   puts the API key in the environment and sets an approved spending limit (for example
+   `CATALY_LIVE_VOICE_MAX_USD`); the test checks its own ledger against that limit before each call and
+   reports the cost it used. It must pass before the first release that contains voice, and again before any
+   release that changes `cataly-voice`.
 
-**Measured:** RSS during a call (≤ 25 MiB added); CPU during a call; speech end to first audio out; build
-size with and without the `voice` feature.
+**Measured:** RSS during a call (≤ 25 MiB added) for each transport; CPU during a call; speech end to first
+audio out for each transport; binary size with and without the `voice` feature.
 
 ## Milestone 6: terminal runtime
 
@@ -289,8 +335,10 @@ control from Discord.
 **Scope:** HOST-30, HOST-31; EXT-20, EXT-21, EXT-25, EXT-26, EXT-30; COORD-14; the tern rules of PATCH-01
 (6, 7, 12, 13, 14).
 
-**Crates touched:** `cataly-host` (tern runtime), `extension/cataly.ts` (control commands, switch guard, form
-interception), `testkit` (Tern stand-in that runs the command line in a pty).
+**Modules touched:** `host` (tern runtime), `extension/cataly.ts` (control commands, switch guard, form
+interception); `tests/support/` (Tern stand-in that runs the command line in a pty).
+
+**Import candidates:** none named; check `import/` for a tern runtime before writing it.
 
 **Acceptance checks**
 
@@ -322,10 +370,13 @@ onboarding on first contact.
 - Usage counts (off by default, no default collector): COORD-50.
 - Onboarding and first run: OPC-66, OPC-67, OPC-68, OPC-69, OPC-70, OPC-72, OPC-73.
 - Not code: file the upstream reports for PATCH-02, PATCH-04, PATCH-05 and the expected-session option of
-  PATCH-01 with OMP's maintainers, if the owner agrees (DESIGN section 12, row A30).
+  PATCH-01 with OMP's maintainers, if the owner agrees (DESIGN section 12.2, row A30).
 
-**Crates touched:** `cataly` (install commands), `cataly-sys` (links, locks, service files), `cataly-jobs`
-(update job), release workflow files, `install.sh`.
+**Modules touched:** `cli` (install commands), `sys` (links, locks, service files), `jobs` (update job),
+release workflow files, `install.sh`.
+
+**Import candidates:** install, link-switch and update code, only if the owner's earlier Rust has it and it fits
+`DESIGN.md` section 11 (two files, one link rename).
 
 **Acceptance checks**
 
@@ -351,4 +402,5 @@ closed to new hub answering).
 
 None. Every KEEP, SIMPLIFY and MERGE capability of the 13 specs is listed above, as are the REPLACE-PUBLIC
 and MOVE-OUT items of `spec/omp-patch.md`. The UPSTREAM items (PATCH-02, PATCH-04, PATCH-05) carry no code
-and appear in milestone 7 as reports to file. DROP capabilities are not built.
+and appear in milestone 7 as reports to file. DROP capabilities are not built, with one owner exception:
+VOICE-12 (DROP in the spec) is built in milestone 5 for its WebRTC transport only, by decision 11.
