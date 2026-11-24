@@ -233,7 +233,7 @@ async fn exchange(
     })
     .await
     .unwrap_or_else(|_| Err("the rpc exchange took longer than 20 s".into()));
-    let exit = child.close(CLOSE_WAIT, KILL_GRACE).await;
+    let (exit, _) = child.close(CLOSE_WAIT, KILL_GRACE).await;
     if result.is_ok() && exit != command::Exit::Code(0) {
         return Err(format!(
             "OMP did not exit cleanly after end of input ({exit:?})"

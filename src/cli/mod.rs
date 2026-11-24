@@ -2,6 +2,7 @@
 
 mod args;
 mod client;
+mod lead;
 pub(crate) mod out;
 mod setup;
 
@@ -32,6 +33,8 @@ pub(crate) mod exit {
     pub(crate) const NO_HUB: u8 = 3;
     /// A hub already runs.
     pub(crate) const ALREADY_RUNNING: u8 = 4;
+    /// A message may or may not have arrived: never send it again (COORD req. 25).
+    pub(crate) const IN_DOUBT: u8 = 5;
     /// Internal failure: supervision gave up, the store writer failed, or the main loop stalled.
     pub(crate) const INTERNAL: u8 = 70;
 }
@@ -411,8 +414,11 @@ fn print_gate(g: &GateView) {
     out::line(&format!("quota    {line}"));
 }
 
-/// `health`, `limits`, `quota` and `pr` verbs; `None` for anything else.
+/// `health`, `limits`, `quota`, `pr` and `lead` verbs; `None` for anything else.
 fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(), Failure>> {
+    if let Some(done) = lead::verbs(p, hub, as_json) {
+        return Some(done);
+    }
     let target = p.args.first().cloned();
     let result = match p.spec.path {
         ["health"] => health(hub, as_json),

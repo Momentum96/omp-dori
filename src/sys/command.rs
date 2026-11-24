@@ -236,6 +236,17 @@ pub(crate) fn attach(
     })
 }
 
+/// Which step ended an attached child (DESIGN 4.2: end of input, then TERM, then KILL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// It exited within the wait after its input closed.
+    Input,
+    /// It needed TERM.
+    Term,
+    /// It needed KILL, or could not be reaped.
+    Kill,
+}
+
 impl Attached {
     pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.stdin.take()
@@ -245,19 +256,24 @@ impl Attached {
         self.stdout.take()
     }
 
+    /// The child's PID while it has not been reaped.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     /// Closes stdin (the child's signal to finish), waits up to `wait`, then sends TERM and KILL after
     /// `grace` (DESIGN 4.2). The caller keeps reading stdout meanwhile, so a full pipe cannot block
     /// the exit.
-    pub(crate) async fn close(mut self, wait: Duration, grace: Duration) -> Exit {
+    pub(crate) async fn close(mut self, wait: Duration, grace: Duration) -> (Exit, Step) {
         drop(self.stdin.take());
         drop(self.stdout.take());
-        let status = match timeout(wait, self.child.wait()).await {
-            Ok(Ok(status)) => Some(status),
+        let (status, step) = match timeout(wait, self.child.wait()).await {
+            Ok(Ok(status)) => (Some(status), Step::Input),
             _ => terminate(&mut self.child, grace).await,
         };
         let mut held = false;
         let _ = join_sink(&mut self.stderr, Instant::now() + PIPE_DRAIN, &mut held).await;
-        status.map_or(Exit::Unknown, exit_of)
+        (status.map_or(Exit::Unknown, exit_of), step)
     }
 }
 
@@ -282,12 +298,12 @@ impl Running {
         let (status, timed_out, was_cancelled) = match ended {
             Ended::Exited(status) => (status, false, false),
             Ended::TimedOut => (
-                terminate(&mut self.child, self.kill_grace).await,
+                terminate(&mut self.child, self.kill_grace).await.0,
                 true,
                 false,
             ),
             Ended::Cancelled => (
-                terminate(&mut self.child, self.kill_grace).await,
+                terminate(&mut self.child, self.kill_grace).await.0,
                 false,
                 true,
             ),
@@ -331,7 +347,7 @@ async fn cancelled(cancel: Option<watch::Receiver<bool>>) {
     }
 }
 
-async fn terminate(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
+async fn terminate(child: &mut Child, grace: Duration) -> (Option<ExitStatus>, Step) {
     // `id()` is `None` once the child was reaped, so a reused PID is never signalled.
     if let Some(pid) = child
         .id()
@@ -341,10 +357,13 @@ async fn terminate(child: &mut Child, grace: Duration) -> Option<ExitStatus> {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
     }
     if let Ok(Ok(status)) = timeout(grace, child.wait()).await {
-        return Some(status);
+        return (Some(status), Step::Term);
     }
     let _ = child.start_kill();
-    timeout(grace, child.wait()).await.ok().and_then(Result::ok)
+    (
+        timeout(grace, child.wait()).await.ok().and_then(Result::ok),
+        Step::Kill,
+    )
 }
 
 fn exit_of(status: ExitStatus) -> Exit {

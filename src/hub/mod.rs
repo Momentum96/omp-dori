@@ -18,6 +18,8 @@ use tokio::sync::watch;
 
 use crate::cli::exit;
 use crate::config::{self, Config};
+use crate::host::headless::Headless;
+use crate::host::lead::{Env as LeadEnv, Lead};
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::jobs::{Ctx, Files, Jobs};
 use crate::log;
@@ -54,6 +56,8 @@ pub(crate) struct Hub {
     dedupe: Dedupe,
     shutdown: watch::Receiver<bool>,
     supervisor: Supervisor,
+    lead: Arc<Lead<Headless>>,
+    agent_start: Latency,
 }
 
 impl Hub {
@@ -99,6 +103,9 @@ impl Hub {
             state_disk: host::disk(&self.paths.state_dir).ok().map(Into::into),
             control_latency: self.control_latency.summary().map(Into::into),
             store_commit_latency: self.store.commit_latency().summary().map(Into::into),
+            wake_latency: self.lead.wake_latency.summary().map(Into::into),
+            confirm_latency: self.lead.confirm_latency.summary().map(Into::into),
+            agent_start_latency: self.agent_start.summary().map(Into::into),
         }
     }
 
@@ -280,6 +287,12 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             return exit::FAILED;
         }
     };
+    let agent_start = Latency::default();
+    let lead = lead(paths, &jobs, &omp, &config_rx, &store, &agent_start);
+    {
+        let (lead, stop) = (Arc::clone(&lead), shutdown_rx.clone());
+        supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
+    }
     let hub = Arc::new(Hub {
         paths: paths.clone(),
         started_ms: now_ms(),
@@ -291,6 +304,8 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         dedupe: Dedupe::new(),
         shutdown: shutdown_rx.clone(),
         supervisor: supervisor.clone(),
+        lead: Arc::clone(&lead),
+        agent_start,
     });
     {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
@@ -315,10 +330,56 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     notifier.stopping();
     log::info("hub stopping", &[("status", &code)]);
     let _ = shutdown_tx.send(true);
+    // The lead closes cleanly so the next start resumes the same session (check 12).
+    lead.shutdown().await;
     // Running job children get TERM, then KILL after the grace; their real end is recorded.
     jobs.drain(KILL_GRACE * 2 + Duration::from_secs(2)).await;
     let _ = std::fs::remove_file(&paths.socket);
     code
+}
+
+/// The standing lead with its headless runtime (DESIGN 4.2), started by its supervised task.
+fn lead(
+    paths: &Paths,
+    jobs: &Jobs,
+    omp: &Arc<Omp>,
+    config: &watch::Receiver<Arc<Config>>,
+    store: &Store,
+    agent_start: &Latency,
+) -> Arc<Lead<Headless>> {
+    let gate = jobs.clone();
+    let events = jobs.clone();
+    let (state, socket, logs) = (
+        paths.state_dir.clone(),
+        paths.socket.clone(),
+        paths.logs_dir.join("sessions"),
+    );
+    let agent_start = agent_start.clone();
+    Lead::new(LeadEnv {
+        config: config.clone(),
+        omp: Arc::clone(omp),
+        gate_held: Arc::new(move || gate.gate().held),
+        events: Arc::new(move |emit: Emit| {
+            let jobs = events.clone();
+            tokio::spawn(async move {
+                if let Err(e) = jobs.hub_event(emit).await {
+                    log::warn("session event not recorded", &[("error", &e)]);
+                }
+            });
+        }),
+        store: store.clone(),
+        state_dir: paths.state_dir.clone(),
+        make: Box::new(move |config: &Config, exe: &Path| Headless {
+            exe: exe.to_path_buf(),
+            overlay: state.join("omp-overlay.yml"),
+            socket: socket.clone(),
+            logs: logs.clone(),
+            credentials: config.sessions.credentials.clone(),
+            extra_flags: config.sessions.extra_flags.clone(),
+            spend_phrases: config.sessions.spend_phrases.clone(),
+            agent_start: agent_start.clone(),
+        }),
+    })
 }
 
 /// The OMP probe, the heartbeat and store maintenance; returns the heartbeat the stall detector reads.

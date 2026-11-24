@@ -14,10 +14,16 @@ struct Migration {
     additive: bool,
 }
 
-const MIGRATIONS: [Migration; 1] = [Migration {
-    sql: include_str!("migrations/0001_init.sql"),
-    additive: false,
-}];
+const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        sql: include_str!("migrations/0001_init.sql"),
+        additive: false,
+    },
+    Migration {
+        sql: include_str!("migrations/0002_sessions.sql"),
+        additive: true,
+    },
+];
 
 /// The newest schema this binary knows.
 pub(crate) fn latest() -> i64 {
@@ -119,7 +125,10 @@ mod tests {
         .unwrap();
         let err = migrate(&mut conn, &dir.join("backup")).unwrap_err();
         assert!(matches!(err, StoreError::TooNew { found: 9, .. }));
-        assert!(err.to_string().contains("cataly-v1.db"));
+        assert!(
+            err.to_string()
+                .contains(&format!("cataly-v{}.db", latest()))
+        );
         // A newer store whose changes were additive stays readable.
         conn.execute_batch("UPDATE meta SET value = '1' WHERE key = 'min_reader';")
             .unwrap();

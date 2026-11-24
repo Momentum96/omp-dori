@@ -115,6 +115,20 @@ pub(crate) struct Pressure {
     pub(crate) max_sessions: u32,
 }
 
+impl Pressure {
+    /// The memory rule session starts use when no pressure job is configured (HOST req. 90).
+    pub(crate) fn admission_default() -> Self {
+        Self {
+            alert_load: 150,
+            ready_load: 80,
+            min_free_memory: 20,
+            min_free_disk_gb: 0,
+            disk_path: None,
+            max_sessions: 0,
+        }
+    }
+}
+
 /// Kind names, default cadence, minimum cadence, default per-tick deadline.
 const KINDS: [(&str, Duration, Duration, Duration); 7] = [
     (

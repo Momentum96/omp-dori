@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 pub mod discord;
+pub mod model;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 

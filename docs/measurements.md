@@ -94,3 +94,20 @@ kill -TERM $P; wait $P
 # incremental debug build
 cargo build; touch src/jobs/owner/quota.rs; time cargo build
 ```
+
+# Milestone 2 slice 2a (Linux x64, debug hub binary, stock OMP 19.1.1, loopback fake model)
+
+From `tests/contract_session.rs::lead_end_to_end_and_resume` (`CATALY_CONTRACT_OMP=1`), 5 owner messages
+through `cataly lead send`, figures from `cataly stats --json`:
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Hub RSS with the lead attached (OMP excluded), debug build | 18.4-18.8 MiB | ≤ 30 MiB idle + ≤ 1 MiB per session |
+| Wake, hub part: internal `deliver` call to `prompt` line written | p50 22.7 ms, max 27.7 ms | p50 ≤ 5 ms, p99 ≤ 25 ms |
+| Prompt written to OMP `agent_start` | p50 5.4 ms | (part of end-to-end 150 ms) |
+| Hand-off confirmation: prompt written to entry found in the session file | p50 25 ms, max 92 ms (event-driven checks; ms resolution) | none set |
+
+The wake figure misses its target: it includes two `synchronous=FULL` commits (inbox row, then the
+delivery record before the write) and one `get_state` readback. Per DESIGN 7.2 the first remedy is to
+batch the admission and delivery-record commits into one; not done in this slice. Release-build and
+macOS figures are not measured yet. Release binary: 8.6 MB.

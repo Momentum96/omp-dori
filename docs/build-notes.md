@@ -168,3 +168,50 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   unknown-message rule (the request policy, creates with nonces and the channel read are absorbed); from
   `discord_types.rs` message origin, interactions and the owner-only decision check (`Snowflake` is
   absorbed). `import/README.md` lists the same.
+
+# Milestone 2 slice 2a: session host and lead
+
+## API for slices 2b and 2c
+
+- `hub.lead: Arc<host::lead::Lead<Headless>>`. `Lead::deliver(inbox::Message { sender, text, urgent,
+  owner, identity, request_id }) -> Result<Receipt, String>`: stores the message in the lead's inbox
+  (one SQLite commit), then delivers at once when the lead can read. `Receipt.state` is `waiting`,
+  `sent` (OMP admitted, entry not yet confirmed), `delivered` (entry found in the session file),
+  `in_doubt` (never resend), `failed` or `duplicate` (once-only identity seen). `Err` is a refusal;
+  nothing was stored. Same `request_id` + same text returns the stored receipt; different text is
+  refused. `Lead::receipt(request_id)` reads it again.
+- 2b (owner messages): `owner: true, urgent: true`, `request_id` from the Discord message ID. Owner
+  messages still go to a quota-blocked lead. 2c (events): `owner: false`, `urgent` per event kind,
+  `identity` for once-only notices; quiet notes wait for the next wake and go out in one batch.
+- Dialogs: `Lead::answer(dialog_id, &Value)` with one answer field (`value`, `confirmed`,
+  `cancelled`, `answers`, `data` for forms); pending dialogs are in `Lead::view().session.dialogs`.
+- Hub events added: `lead.started`, `lead.refused`, `session.stopped`, `session.fenced`,
+  `session.spend_offer`, `session.fallback`, `session.fallback_recovered`, `session.quota_blocked`,
+  `delivery.in_doubt`, `delivery.failed` (subject `lead`).
+
+## Choices and deviations
+
+- Delivery confirmation (PATCH-01 rule 8) for headless sessions: every batch starts with the marker
+  `[cataly:<id>]`; it is delivered when a user `message` entry with the marker is in the session file
+  (last 8 MiB, 2 s). The marker line also keeps text from starting with `/`. Contract test proves OMP
+  writes the entry.
+- In doubt: written but not answered (transport fault, session faulted) or no entry within 30 s with
+  the same process alive. Resend once only when the process that held the batch is gone and the new
+  process bound the same session ID (check 4); otherwise in doubt or failed. The lead's mailbox is not
+  fenced; in-doubt rows are skipped and the lead is told once (COORD-13); fencing a Discord room is 2b.
+- The session state sits behind a short `std::sync::Mutex` per session (never held across an await)
+  shared by the event task and the one in-flight operation; reads go through a watch channel.
+- Overlay (`<state>/omp-overlay.yml`, JSON is YAML) is written once per hub run. OMP 19.1.1 has one
+  saved-reset key, `codexResets.autoRedeem` (set `no`); the five keys in DESIGN 4.2 are not in its
+  schema. `goal.continuationModes` is `["interactive", "rpc"]`. `[fallback]` changes need a hub restart.
+- `-e <bridge>` and the role instructions text come with 2c; `--append-system-prompt` takes `[lead]
+  instructions` when set. `set_event_filter` is not sent yet (all events are read).
+- The child environment is the runner's pass-through list (adds USER, LOGNAME, LC_ALL, TZ to DESIGN
+  4.2's list) plus listed credentials, `PI_*` profile overrides, `CATALY_SOCKET`, `CATALY_LAUNCH`.
+- The lead is not restarted automatically after its child exits by itself (event `session.stopped`);
+  `cataly lead start` resumes it. Goals (HOST-19), the transcript page (HOST req. 79) and view-token
+  checks on calls are not built in this slice; the view token is in the snapshot.
+- Memory admission applies only the memory part of the pressure rule (disk and session count are
+  not start checks; the cap is). Usage-limit errors are recognised from `prompt_result.error` code or
+  message text (OMP documents no code for it).
+- Store schema v2 (additive): `sessions`, `inbox`, `deliveries`, `receipts`, `once_ids`.

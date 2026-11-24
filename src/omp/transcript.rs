@@ -1,24 +1,76 @@
-//! OMP session-file reader: whether a saved session file may be resumed exactly, and the model OMP will restore
-//! from it.
+//! OMP session-file reader (DESIGN 3.3, 7.1; PATCH-01 rules 8-10, HOST req. 9-10): whether a saved
+//! session file may be resumed exactly and which model OMP will restore from it, and the bounded search
+//! for a delivery marker in a user entry. Session files belong to OMP; the hub only reads them, with
+//! no symlink followed, no FIFO opened, a 64 KiB header (1 MiB for a reopen check), the last 8 MiB and
+//! 2 s for a search, and nothing over 64 MiB. Every read here blocks; callers use the async wrappers,
+//! which run on the blocking pool.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
 use serde_json::Value;
 
-const HEADER_BYTES: u64 = 32 * 1024;
-const LINE_LIMIT: u64 = 64 * 1024 * 1024;
+/// Header search window for a delivery check.
+const HEADER_BYTES: u64 = 64 * 1024;
+/// Header search window when a transcript is reopened.
+const REOPEN_HEADER_BYTES: u64 = 1024 * 1024;
+/// Largest session file read at all.
+const FILE_LIMIT: u64 = 64 * 1024 * 1024;
+/// A delivery search reads at most this much from the end of the file.
+const SEARCH_TAIL: u64 = 8 * 1024 * 1024;
+/// And takes at most this long.
+const SEARCH_BUDGET: Duration = Duration::from_secs(2);
 
-pub(super) struct Transcript {
-    pub(super) model: Option<String>,
+/// A session file could not be read safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TranscriptError {
+    Io(String),
+    /// Over the size limit, or a line over it.
+    TooLarge,
+    /// Not valid JSON lines.
+    Malformed,
+}
+
+impl fmt::Display for TranscriptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "session file: {e}"),
+            Self::TooLarge => f.write_str("session file exceeds 64 MiB"),
+            Self::Malformed => f.write_str("session file is not valid JSON lines"),
+        }
+    }
+}
+
+impl std::error::Error for TranscriptError {}
+
+impl From<std::io::Error> for TranscriptError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e.to_string())
+    }
+}
+
+impl From<rustix::io::Errno> for TranscriptError {
+    fn from(e: rustix::io::Errno) -> Self {
+        Self::Io(e.to_string())
+    }
+}
+
+type Result<T, E = TranscriptError> = std::result::Result<T, E>;
+
+/// What a verified saved session file says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Transcript {
+    /// The model OMP restores on resume (`provider/id`), when the file names one.
+    pub(crate) model: Option<String>,
 }
 
 /// The session ID in an OMP session file name `<stamp>Z_<uuid>.jsonl`.
-pub(super) fn session_file_id(name: &str) -> Option<&str> {
+pub(crate) fn session_file_id(name: &str) -> Option<&str> {
     let stem = name.strip_suffix(".jsonl")?;
     let (stamp, id) = stem.split_once("Z_")?;
     let valid_id = id.len() == 36
@@ -38,12 +90,12 @@ pub(super) fn session_file_id(name: &str) -> Option<&str> {
     }
     let iso = format!(
         "{}:{}:{}.{}Z",
-        &stamp[..13],
-        &stamp[14..16],
-        &stamp[17..19],
-        &stamp[20..23]
+        stamp.get(..13)?,
+        stamp.get(14..16)?,
+        stamp.get(17..19)?,
+        stamp.get(20..23)?
     );
-    parse_iso(&iso).map(|_| id)
+    iso.parse::<jiff::Timestamp>().ok().map(|_| id)
 }
 
 struct BranchEntry {
@@ -59,9 +111,15 @@ fn branch_entry(entry: &Value) -> Option<BranchEntry> {
         _ => return None,
     };
     if entry.get("type").and_then(Value::as_str) == Some("model_change")
-        && let Some(model) = entry.get("model").and_then(Value::as_str).filter(|m| !m.is_empty())
+        && let Some(model) = entry
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
     {
-        let role = entry.get("role").and_then(Value::as_str).unwrap_or("default");
+        let role = entry
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
         return Some(BranchEntry {
             parent,
             model: Some((role.to_owned(), model.to_owned())),
@@ -71,7 +129,10 @@ fn branch_entry(entry: &Value) -> Option<BranchEntry> {
     if entry.get("type").and_then(Value::as_str) == Some("message")
         && let Some(message) = entry.get("message").filter(|m| m.is_object())
         && message.get("role").and_then(Value::as_str) == Some("assistant")
-        && let (Some(provider), Some(model)) = (message.get("provider").and_then(Value::as_str), message.get("model").and_then(Value::as_str))
+        && let (Some(provider), Some(model)) = (
+            message.get("provider").and_then(Value::as_str),
+            message.get("model").and_then(Value::as_str),
+        )
         && model != "<synthetic>"
     {
         return Some(BranchEntry {
@@ -88,7 +149,7 @@ fn branch_entry(entry: &Value) -> Option<BranchEntry> {
 }
 
 /// `provider/id`, neither part empty, no whitespace or control characters.
-fn model_selector(selector: &str) -> bool {
+pub(crate) fn model_selector(selector: &str) -> bool {
     let Some((provider, id)) = selector.split_once('/') else {
         return false;
     };
@@ -139,22 +200,23 @@ fn read_only(path: &Path) -> Result<File> {
     Ok(File::from(fd))
 }
 
-/// The first `session` entry, skipping only leading `title` entries in the first 32 kibibytes.
-fn header(file: &mut File) -> Result<Option<Value>> {
+/// The first `session` entry, skipping only leading `title` entries in the first `limit` bytes.
+fn header(file: &mut File, limit: u64) -> Result<Option<Value>> {
     let mut head = Vec::new();
-    file.by_ref().take(HEADER_BYTES).read_to_end(&mut head)?;
-    let mut start = 0;
-    while start < head.len() {
-        let Some(end) = head[start..].iter().position(|b| *b == b'\n') else {
+    file.by_ref().take(limit).read_to_end(&mut head)?;
+    let mut rest = head.as_slice();
+    while !rest.is_empty() {
+        let Some(end) = rest.iter().position(|b| *b == b'\n') else {
             return Ok(None);
         };
-        let entry: Value = serde_json::from_slice(&head[start..start + end])?;
+        let (line, tail) = rest.split_at(end);
+        let entry: Value = serde_json::from_slice(line).map_err(|_| TranscriptError::Malformed)?;
         if !entry.is_object() {
             return Ok(None);
         }
         match entry.get("type").and_then(Value::as_str) {
             Some("session") => return Ok(Some(entry)),
-            Some("title") => start += end + 1,
+            Some("title") => rest = tail.get(1..).unwrap_or_default(),
             _ => return Ok(None),
         }
     }
@@ -173,24 +235,26 @@ fn strictly_inside(root: &Path, file: &Path) -> bool {
     })
 }
 
-/// Verifies a saved session file for an exact resume. `Ok(None)` is "not verified".
-pub(super) fn exact(
-    path: &str,
+/// Verifies a saved session file for an exact resume (HOST req. 9-10). `Ok(None)` is "not verified".
+pub(crate) fn exact(
+    path: &Path,
     root: &Path,
     session: &str,
     cwd: &Path,
 ) -> Result<Option<Transcript>> {
-    let given = Path::new(path);
-    let name = given
+    let name = path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or_default();
-    if !given.is_absolute() || path.chars().any(char::is_control) || session_file_id(name) != Some(session) {
+    if !path.is_absolute()
+        || path.to_string_lossy().chars().any(char::is_control)
+        || session_file_id(name) != Some(session)
+    {
         return Ok(None);
     }
-    let file = real(given)?;
+    let file = real(path)?;
     let root = real(root)?;
-    if file != given || !strictly_inside(&root, &file) {
+    if file != path || !strictly_inside(&root, &file) {
         return Ok(None);
     }
     let uid = rustix::process::getuid().as_raw();
@@ -218,7 +282,10 @@ pub(super) fn exact(
     if !info.is_file() || info.uid() != uid || info.nlink() != 1 || info.mode() & write_mask != 0 {
         return Ok(None);
     }
-    let Some(head) = header(&mut handle)? else {
+    if info.len() > FILE_LIMIT {
+        return Err(TranscriptError::TooLarge);
+    }
+    let Some(head) = header(&mut handle, REOPEN_HEADER_BYTES)? else {
         return Ok(None);
     };
     let header_cwd = head.get("cwd").and_then(Value::as_str).map(Path::new);
@@ -244,8 +311,9 @@ pub(super) fn exact(
         if !entry.is_file() || entry.uid() != uid || entry.mode() & write_mask != 0 {
             return Ok(None);
         }
-        match header(&mut other)? {
-            Some(candidate) if candidate.get("continuationOf").and_then(Value::as_str) != Some(session) => {}
+        match header(&mut other, HEADER_BYTES)? {
+            Some(candidate)
+                if candidate.get("continuationOf").and_then(Value::as_str) != Some(session) => {}
             _ => return Ok(None),
         }
     }
@@ -264,21 +332,16 @@ fn read_branch(handle: File) -> Result<Option<Transcript>> {
         line.clear();
         let read = reader
             .by_ref()
-            .take(LINE_LIMIT + 1)
+            .take(FILE_LIMIT + 1)
             .read_until(b'\n', &mut line)?;
         if read == 0 {
             break;
         }
-        if u64::try_from(line.len()).unwrap_or(u64::MAX) > LINE_LIMIT {
-            bail!("transcript line exceeds its limit");
+        if u64::try_from(line.len()).unwrap_or(u64::MAX) > FILE_LIMIT {
+            return Err(TranscriptError::TooLarge);
         }
-        if line.last() == Some(&b'\n') {
-            line.pop();
-        }
-        if line.last() == Some(&b'\r') {
-            line.pop();
-        }
-        let entry: Value = serde_json::from_slice(&line)?;
+        trim_newline(&mut line);
+        let entry: Value = serde_json::from_slice(&line).map_err(|_| TranscriptError::Malformed)?;
         if !entry.is_object() {
             return Ok(None);
         }
@@ -317,6 +380,125 @@ fn read_branch(handle: File) -> Result<Option<Transcript>> {
     Ok(Some(Transcript {
         model: saved_model(&entries, start),
     }))
+}
+
+fn trim_newline(line: &mut Vec<u8>) {
+    if line.last() == Some(&b'\n') {
+        line.pop();
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+}
+
+/// What a delivery search found (PATCH-01 rule 10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Found {
+    /// A user message entry carries the marker.
+    Yes,
+    /// The searched part of the file has no such entry.
+    No,
+    /// The file does not exist (yet).
+    Missing,
+    /// The search ran out of its 2 s budget.
+    OutOfTime,
+}
+
+/// Looks for `marker` in the text of a user `message` entry within the last 8 MiB of `path`. A marker
+/// quoted by the assistant or a tool does not count.
+pub(crate) fn find_marker(path: &Path, marker: &str) -> Result<Found> {
+    let started = Instant::now();
+    let mut file = match read_only(path) {
+        Ok(f) => f,
+        Err(TranscriptError::Io(_)) if !path.exists() => return Ok(Found::Missing),
+        Err(e) => return Err(e),
+    };
+    let info = file.metadata()?;
+    if !info.is_file() {
+        return Err(TranscriptError::Io("not a regular file".into()));
+    }
+    if info.len() > FILE_LIMIT {
+        return Err(TranscriptError::TooLarge);
+    }
+    let start = info.len().saturating_sub(SEARCH_TAIL);
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut first = start > 0;
+    loop {
+        if started.elapsed() > SEARCH_BUDGET {
+            return Ok(Found::OutOfTime);
+        }
+        line.clear();
+        if reader
+            .by_ref()
+            .take(SEARCH_TAIL + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
+            return Ok(Found::No);
+        }
+        // A tail that starts mid-file begins inside a line; that partial line is skipped.
+        if std::mem::take(&mut first) {
+            continue;
+        }
+        if !contains(&line, marker.as_bytes()) {
+            continue;
+        }
+        trim_newline(&mut line);
+        let Ok(entry) = serde_json::from_slice::<Value>(&line) else {
+            // The last line may still be being written.
+            continue;
+        };
+        if user_text_has(&entry, marker) {
+            return Ok(Found::Yes);
+        }
+    }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn user_text_has(entry: &Value, marker: &str) -> bool {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return false;
+    }
+    let Some(message) = entry.get("message") else {
+        return false;
+    };
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    match message.get("content") {
+        Some(Value::String(text)) => text.contains(marker),
+        Some(Value::Array(parts)) => parts.iter().any(|p| {
+            p.get("type").and_then(Value::as_str) == Some("text")
+                && p.get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.contains(marker))
+        }),
+        _ => false,
+    }
+}
+
+/// [`find_marker`] on the blocking pool.
+pub(crate) async fn search(path: PathBuf, marker: String) -> Result<Found> {
+    tokio::task::spawn_blocking(move || find_marker(&path, &marker))
+        .await
+        .map_err(|e| TranscriptError::Io(format!("search task: {e}")))?
+}
+
+/// [`exact`] on the blocking pool.
+pub(crate) async fn verify(
+    path: PathBuf,
+    root: PathBuf,
+    session: String,
+    cwd: PathBuf,
+) -> Result<Option<Transcript>> {
+    tokio::task::spawn_blocking(move || exact(&path, &root, &session, &cwd))
+        .await
+        .map_err(|e| TranscriptError::Io(format!("verify task: {e}")))?
 }
 
 #[cfg(test)]
@@ -360,5 +542,30 @@ mod tests {
         assert_eq!(saved_model(&entries, Some("b")).as_deref(), Some("p/one"));
         assert_eq!(saved_model(&entries, Some("x")), None);
         assert!(!model_selector("a b/c") && model_selector("a/b/c"));
+    }
+
+    #[test]
+    fn markers_count_only_in_user_entries() {
+        let dir = crate::sys::fs::tests::scratch("transcript");
+        let path = dir.join("s.jsonl");
+        let user = |text: &str| {
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+                .to_string()
+        };
+        let assistant = serde_json::json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "[cataly:bbb] echoed"}]}});
+        assert_eq!(find_marker(&path, "[cataly:aaa]").unwrap(), Found::Missing);
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session\",\"id\":\"x\"}}\n{}\n{assistant}\n{{\"type\":\"message\",\"mess",
+                user("[cataly:aaa] owner\nhello")
+            ),
+        )
+        .unwrap();
+        assert_eq!(find_marker(&path, "[cataly:aaa]").unwrap(), Found::Yes);
+        assert_eq!(find_marker(&path, "[cataly:bbb]").unwrap(), Found::No);
+        let string_content = serde_json::json!({"type": "message", "message": {"role": "user", "content": "[cataly:ccc] x"}});
+        fs::write(&path, format!("{string_content}\n")).unwrap();
+        assert_eq!(find_marker(&path, "[cataly:ccc]").unwrap(), Found::Yes);
     }
 }

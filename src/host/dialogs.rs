@@ -1,10 +1,9 @@
-//! Pure parsers over OMP rpc-ui frames: goals, models, `get_state`, dialogs (`extension_ui_request`),
-//! output entries, `extension_ui_response` answers, and the session status precedence.
+//! Pure parsers over OMP rpc-ui frames (HOST-12 to HOST-14, HOST-18): goal and model readback,
+//! `get_state`, dialogs (`extension_ui_request`), output-ring entries, `extension_ui_response` answers,
+//! the status precedence, and the spend-offer test of DESIGN 9.2.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
-
-use super::events::Events;
 
 fn object(value: Option<&Value>) -> Option<&Map<String, Value>> {
     value.and_then(Value::as_object)
@@ -16,7 +15,7 @@ fn string(value: Option<&Value>) -> Option<&str> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum GoalStatus {
+pub(crate) enum GoalStatus {
     None,
     Active,
     Paused,
@@ -26,14 +25,14 @@ pub(super) enum GoalStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct Goal {
-    pub(super) status: GoalStatus,
+pub(crate) struct Goal {
+    pub(crate) status: GoalStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) objective: Option<String>,
+    pub(crate) objective: Option<String>,
 }
 
 /// OMP's goal readback: `Some(&Value::Null)` is "no goal"; an absent value is unreadable.
-pub(super) fn goal_of(value: Option<&Value>) -> Option<Goal> {
+pub(crate) fn goal_of(value: Option<&Value>) -> Option<Goal> {
     if value.is_some_and(Value::is_null) {
         return Some(Goal {
             status: GoalStatus::None,
@@ -54,7 +53,7 @@ pub(super) fn goal_of(value: Option<&Value>) -> Option<Goal> {
 }
 
 /// `provider/id` from OMP's model object; a provider containing `/` is ambiguous and unreadable.
-pub(super) fn model_of(value: Option<&Value>) -> Option<String> {
+pub(crate) fn model_of(value: Option<&Value>) -> Option<String> {
     let model = object(value)?;
     let provider = string(model.get("provider"))?;
     let id = string(model.get("id"))?;
@@ -62,37 +61,69 @@ pub(super) fn model_of(value: Option<&Value>) -> Option<String> {
         .then(|| format!("{provider}/{id}"))
 }
 
-/// The identity, goal, settlement and model read back from `get_state`.
+/// Provider exact, model ID case-insensitive (HOST req. 27).
+pub(crate) fn same_model(a: &str, b: &str) -> bool {
+    match (a.split_once('/'), b.split_once('/')) {
+        (Some((pa, ia)), Some((pb, ib))) => pa == pb && ia.eq_ignore_ascii_case(ib),
+        _ => false,
+    }
+}
+
+/// The identity, goal, settlement, model and limit state read back from `get_state`.
+// Independent facts OMP reports; none implies another.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct NativeState {
-    pub(super) session_id: String,
-    pub(super) session_file: String,
-    pub(super) goal: Goal,
-    pub(super) settled: bool,
-    pub(super) foreground: bool,
-    pub(super) model: Option<String>,
+pub(crate) struct ReadState {
+    pub(crate) session_id: String,
+    pub(crate) session_file: String,
+    pub(crate) goal: Goal,
+    pub(crate) settled: bool,
+    /// Streaming or compacting.
+    pub(crate) foreground: bool,
+    pub(crate) streaming: bool,
+    pub(crate) queued: u64,
+    pub(crate) model: Option<String>,
+    pub(crate) thinking: Option<String>,
+    /// `usageLimit` says the next request would bill extra usage (DESIGN 9.2).
+    pub(crate) extra_usage: bool,
+}
+
+impl ReadState {
+    /// Idle means no streaming, no compaction, nothing queued and settled (HOST req. 37).
+    pub(crate) fn idle(&self) -> bool {
+        self.settled && !self.foreground && self.queued == 0
+    }
 }
 
 /// Reads a `get_state` reply's data.
-pub(super) fn native_state_of(data: Option<&Value>) -> Option<NativeState> {
+pub(crate) fn read_state(data: Option<&Value>) -> Option<ReadState> {
     let data = object(data)?;
     let session_id = string(data.get("sessionId")).filter(|id| !id.is_empty())?;
     let session_file = string(data.get("sessionFile")).filter(|file| !file.is_empty())?;
     let goal = goal_of(data.get("goal"))?;
     let settled = data.get("isSettled")?.as_bool()?;
     let flag = |key: &str| data.get(key) == Some(&Value::Bool(true));
-    Some(NativeState {
+    let extra_usage = object(data.get("usageLimit"))
+        .is_some_and(|limit| limit.get("extraUsage") == Some(&Value::Bool(true)));
+    Some(ReadState {
         session_id: session_id.to_owned(),
         session_file: session_file.to_owned(),
         goal,
         settled,
         foreground: flag("isStreaming") || flag("isCompacting"),
+        streaming: flag("isStreaming"),
+        queued: data
+            .get("queuedMessageCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         model: model_of(data.get("model")),
+        thinking: string(data.get("thinkingLevel")).map(str::to_owned),
+        extra_usage,
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct Question {
+pub(crate) struct Question {
     id: String,
     #[serde(rename = "question")]
     text: String,
@@ -102,31 +133,36 @@ pub(super) struct Question {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum DialogKind {
+pub(crate) enum DialogKind {
     Approval,
     Confirm,
     Select,
     Input,
     Editor,
     Ask,
+    /// An HTML form (the `ask` tool); answered with `data` or cancelled.
+    Form,
     Unsupported,
 }
 
 /// A pending dialog; no kind carries both `options` and `secret`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct Dialog {
-    pub(super) id: String,
+pub(crate) struct Dialog {
+    pub(crate) id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
+    pub(crate) title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-    pub(super) kind: DialogKind,
+    pub(crate) message: Option<String>,
+    pub(crate) kind: DialogKind,
     #[serde(skip_serializing_if = "Option::is_none")]
-    options: Option<Vec<String>>,
+    pub(crate) options: Option<Vec<String>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
-    secret: bool,
+    pub(crate) secret: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    questions: Option<Vec<Question>>,
+    pub(crate) questions: Option<Vec<Question>>,
+    /// The form's HTML, for the relay that renders it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) html: Option<String>,
 }
 
 impl Dialog {
@@ -139,8 +175,59 @@ impl Dialog {
             options: None,
             secret: false,
             questions: None,
+            html: None,
         }
     }
+
+    /// Every visible word of the dialog, lower-cased, for the spend-offer test.
+    fn text(&self) -> String {
+        let mut all = String::new();
+        for part in [&self.title, &self.message, &self.html]
+            .into_iter()
+            .flatten()
+        {
+            all.push_str(part);
+            all.push('\n');
+        }
+        for option in self.options.iter().flatten() {
+            all.push_str(option);
+            all.push('\n');
+        }
+        for q in self.questions.iter().flatten() {
+            all.push_str(&q.text);
+            all.push('\n');
+            for o in &q.options {
+                all.push_str(o);
+                all.push('\n');
+            }
+        }
+        all.to_lowercase()
+    }
+}
+
+/// Phrases that mark an offer to spend: redeem a saved reset, buy credits, enable overage (DESIGN 9.2).
+const SPEND_PHRASES: [&str; 12] = [
+    "redeem",
+    "saved reset",
+    "usage reset",
+    "reset now",
+    "buy credits",
+    "purchase credits",
+    "add credits",
+    "extra usage",
+    "overage",
+    "pay as you go",
+    "top up",
+    "upgrade your plan",
+];
+
+/// Whether a dialog offers to spend money or a saved reset.
+pub(crate) fn spend_offer(dialog: &Dialog, owner_phrases: &[String]) -> bool {
+    let text = dialog.text();
+    SPEND_PHRASES.iter().any(|p| text.contains(p))
+        || owner_phrases
+            .iter()
+            .any(|p| !p.is_empty() && text.contains(p.as_str()))
 }
 
 fn question_of(item: &Value) -> Option<Question> {
@@ -162,9 +249,39 @@ fn question_of(item: &Value) -> Option<Question> {
     })
 }
 
-/// Classifies an `extension_ui_request` frame. Unknown methods (including `open_url`) are `unsupported`: they may
-/// be gated, but their content is not exposed and they cannot be answered.
-pub(super) fn dialog_of(frame: &Value) -> Option<Dialog> {
+/// What one `extension_ui_request` frame means for the pending dialogs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UiFrame {
+    Open(Dialog),
+    /// OMP closed the dialog with this ID.
+    Cancel(String),
+    /// A notice for the output ring.
+    Notice(String),
+    /// Presentation only.
+    Ignore,
+}
+
+/// Classifies an `extension_ui_request` frame (HOST req. 42). Unknown methods (including `open_url`) are
+/// `unsupported`: they block the session, but their content is not exposed and they cannot be answered.
+pub(crate) fn ui_frame(frame: &Value) -> UiFrame {
+    match string(frame.get("method")) {
+        Some("cancel") => {
+            return string(frame.get("targetId"))
+                .or_else(|| string(frame.get("id")))
+                .map_or(UiFrame::Ignore, |id| UiFrame::Cancel(id.to_owned()));
+        }
+        Some("notify") => {
+            return string(frame.get("message"))
+                .map_or(UiFrame::Ignore, |m| UiFrame::Notice(m.to_owned()));
+        }
+        Some("setStatus" | "setWidget" | "setTitle" | "set_editor_text") => return UiFrame::Ignore,
+        _ => {}
+    }
+    dialog_of(frame).map_or(UiFrame::Ignore, UiFrame::Open)
+}
+
+/// Builds the dialog of an `extension_ui_request` frame; `None` for non-dialog methods.
+pub(crate) fn dialog_of(frame: &Value) -> Option<Dialog> {
     let id = string(frame.get("id"))
         .filter(|id| !id.is_empty())?
         .to_owned();
@@ -218,6 +335,13 @@ pub(super) fn dialog_of(frame: &Value) -> Option<Dialog> {
                 }
             })
         }
+        Some("form") => Some(match string(frame.get("html")) {
+            Some(html) => Dialog {
+                html: Some(html.to_owned()),
+                ..summary(DialogKind::Form)
+            },
+            None => Dialog::bare(id, DialogKind::Unsupported),
+        }),
         Some("cancel" | "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text") => {
             None
         }
@@ -227,48 +351,64 @@ pub(super) fn dialog_of(frame: &Value) -> Option<Dialog> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum EntryKind {
+pub(crate) enum EntryKind {
     Assistant,
     Output,
     Notice,
 }
 
+/// One output-ring entry (HOST req. 40).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct Entry {
-    kind: EntryKind,
-    text: String,
+pub(crate) struct Entry {
+    pub(crate) kind: EntryKind,
+    pub(crate) text: String,
 }
 
 const ENTRY_UNITS: usize = 2_000;
 
 /// The last `limit` UTF-16 code units of `text`, never splitting a character.
-fn last_units(text: &str, limit: usize) -> &str {
+pub(crate) fn last_units(text: &str, limit: usize) -> &str {
     let mut units = 0;
     for (at, c) in text.char_indices().rev() {
         units += c.len_utf16();
         if units > limit {
-            return &text[at + c.len_utf8()..];
+            return text.get(at + c.len_utf8()..).unwrap_or_default();
         }
     }
     text
 }
 
-/// The read-only output ring's view of an assistant message, command output or notice.
-pub(super) fn entry_of(frame: &Value) -> Option<Entry> {
-    let message = object(frame.get("message"));
+/// Control characters other than newline and tab removed.
+pub(crate) fn clean(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// The text parts of a message's content.
+pub(crate) fn message_text(message: &Value) -> Option<String> {
+    match message.get("content") {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Array(content)) => Some(
+            content
+                .iter()
+                .filter(|part| string(part.get("type")) == Some("text"))
+                .filter_map(|part| string(part.get("text")))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The output ring's view of an assistant message, command output or notice.
+pub(crate) fn entry_of(frame: &Value) -> Option<Entry> {
+    let message = frame.get("message");
     let kind_of = string(frame.get("type"));
     let (kind, text) = if kind_of == Some("message_end")
         && message.is_some_and(|m| string(m.get("role")) == Some("assistant"))
-        && let Some(content) = message
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array)
+        && message.is_some_and(|m| m.get("content").is_some_and(Value::is_array))
     {
-        let text: String = content
-            .iter()
-            .filter(|part| string(part.get("type")) == Some("text"))
-            .filter_map(|part| string(part.get("text")))
-            .collect();
-        (EntryKind::Assistant, Some(text))
+        (EntryKind::Assistant, message.and_then(message_text))
     } else if kind_of == Some("command_output") {
         (
             EntryKind::Output,
@@ -285,19 +425,15 @@ pub(super) fn entry_of(frame: &Value) -> Option<Entry> {
         return None;
     };
     let text = text.filter(|text| !text.trim().is_empty())?;
-    let clean: String = text
-        .chars()
-        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
-        .collect();
     Some(Entry {
         kind,
-        text: last_units(&clean, ENTRY_UNITS).to_owned(),
+        text: last_units(&clean(&text), ENTRY_UNITS).to_owned(),
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct AnswerItem {
+pub(crate) struct AnswerItem {
     id: String,
     selected_options: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -306,21 +442,40 @@ pub(super) struct AnswerItem {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum AnswerResponse {
+pub(crate) enum AnswerResponse {
     Cancelled(bool),
     Confirmed(bool),
     Value(String),
     Answers(Vec<AnswerItem>),
+    Data(Map<String, Value>),
 }
 
 /// An `extension_ui_response` frame: `{type,id,<one response field>}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(super) struct AnswerFrame {
+pub(crate) struct AnswerFrame {
     #[serde(rename = "type")]
     kind: &'static str,
     id: String,
     #[serde(flatten)]
     response: AnswerResponse,
+}
+
+impl AnswerFrame {
+    /// The cancel answer, which every supported dialog accepts.
+    pub(crate) fn cancel(id: &str) -> Self {
+        Self {
+            kind: "extension_ui_response",
+            id: id.to_owned(),
+            response: AnswerResponse::Cancelled(true),
+        }
+    }
+
+    pub(crate) fn to_map(&self) -> Map<String, Value> {
+        match serde_json::to_value(self) {
+            Ok(Value::Object(map)) => map,
+            _ => Map::new(),
+        }
+    }
 }
 
 fn answer_item(question: &Question, answer: &Value) -> Option<AnswerItem> {
@@ -338,19 +493,22 @@ fn answer_item(question: &Question, answer: &Value) -> Option<AnswerItem> {
                 .map(str::to_owned)
         })
         .collect::<Option<_>>()?;
-    if selected
-        .iter()
-        .enumerate()
-        .any(|(at, option)| selected[..at].contains(option))
-    {
-        return None;
+    for (at, option) in selected.iter().enumerate() {
+        if selected
+            .get(..at)
+            .is_some_and(|before| before.contains(option))
+        {
+            return None;
+        }
     }
     let custom = match answer.get("customInput") {
         None => None,
         Some(Value::String(custom)) => Some(custom.clone()),
         Some(_) => return None,
     };
-    let filled = custom.as_deref().is_some_and(|custom| !custom.trim().is_empty());
+    let filled = custom
+        .as_deref()
+        .is_some_and(|custom| !custom.trim().is_empty());
     if (!question.multi && selected.len() + usize::from(filled) > 1)
         || (selected.is_empty() && !filled)
     {
@@ -363,10 +521,18 @@ fn answer_item(question: &Question, answer: &Value) -> Option<AnswerItem> {
     })
 }
 
-/// Exactly one recognized answer field for the dialog's kind. Unrecognized fields (notably `timedOut`,
-/// which may submit recommended answers) are never forwarded, secrets are never answered, and approvals grant one call
-/// only: no session or global grants.
-pub(super) fn answer_frame(dialog: &Dialog, answer: &Value) -> Option<AnswerFrame> {
+fn form_value(value: &Value) -> bool {
+    match value {
+        Value::String(_) | Value::Number(_) => true,
+        Value::Array(items) => items.iter().all(Value::is_string),
+        _ => false,
+    }
+}
+
+/// Exactly one recognized answer field for the dialog's kind (HOST req. 45-47). Unrecognized fields
+/// (notably `timedOut`, which may submit recommended answers) are never forwarded, secrets are never
+/// answered, and approvals grant one call only: no session or global grants.
+pub(crate) fn answer_frame(dialog: &Dialog, answer: &Value) -> Option<AnswerFrame> {
     let response = answer.as_object().filter(|response| response.len() == 1)?;
     let frame = |response| {
         Some(AnswerFrame {
@@ -387,6 +553,14 @@ pub(super) fn answer_frame(dialog: &Dialog, answer: &Value) -> Option<AnswerFram
         && let Some(Value::Bool(confirmed)) = response.get("confirmed")
     {
         return frame(AnswerResponse::Confirmed(*confirmed));
+    }
+    if dialog.kind == DialogKind::Form {
+        let data = response.get("data")?.as_object()?;
+        return data
+            .values()
+            .all(form_value)
+            .then(|| AnswerResponse::Data(data.clone()))
+            .and_then(frame);
     }
     let value = string(response.get("value"));
     match dialog.kind {
@@ -424,10 +598,10 @@ pub(super) fn answer_frame(dialog: &Dialog, answer: &Value) -> Option<AnswerFram
     frame(AnswerResponse::Answers(valid))
 }
 
-/// The `AgentStatus` values a native host reports.
+/// A session's status (HOST req. 36).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum AgentStatus {
+pub(crate) enum Status {
     Idle,
     Working,
     Blocked,
@@ -435,208 +609,44 @@ pub(super) enum AgentStatus {
     Unknown,
 }
 
-/// A session observation.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Observation {
-    updated_at: String,
-    status: AgentStatus,
-    held: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    goal: Option<Goal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    active_since: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<String>,
-    dialogs: Vec<Dialog>,
-    recent: Vec<Entry>,
+/// What the status is computed from.
+// Independent facts the status is computed from.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Facts<'a> {
+    /// The identity is bound.
+    pub(crate) bound: bool,
+    /// The last readback, when it is fresh.
+    pub(crate) state: Option<&'a ReadState>,
+    pub(crate) fault: bool,
+    /// Held: model mismatch or another reason the owner must clear.
+    pub(crate) held: bool,
+    pub(crate) stopping: bool,
+    pub(crate) dialogs: bool,
 }
 
-/// The session state an observation is computed from.
-pub(super) struct Snapshot<'a> {
-    /// The OMP child's pid, never the host's.
-    pub(super) pid: Option<u32>,
-    /// The proven identity.
-    pub(super) bound: Option<&'a NativeState>,
-    /// The readback this observation answers for (`None` while held or unread).
-    pub(super) state: Option<&'a NativeState>,
-    /// The last successful readback, which supplies goal and model.
-    pub(super) latest: Option<&'a NativeState>,
-    pub(super) fault: bool,
-    pub(super) stopping: bool,
-    pub(super) detail: Option<&'a str>,
-    pub(super) events: &'a Events,
-}
-
-/// Status precedence is error, blocked, unknown, idle, working; identity fields appear only for a
-/// proven, unfaulted session with a readback.
-pub(super) fn snapshot(input: &Snapshot<'_>) -> Observation {
-    let dialogs = input.events.has_dialogs();
-    let held =
-        dialogs || input.fault || input.stopping || input.state.is_none() || input.bound.is_none();
-    let status = if input.fault {
-        AgentStatus::Error
-    } else if dialogs
-        || input
-            .state
-            .is_some_and(|state| state.goal.status == GoalStatus::Blocked)
+/// Status precedence is error, blocked, unknown, idle, working (HOST req. 36); input is blocked on a
+/// dialog, fault, stopping, hold, no binding or no fresh readback (HOST req. 38).
+pub(crate) fn status(f: &Facts<'_>) -> (Status, bool) {
+    let blocked_input =
+        f.dialogs || f.fault || f.stopping || f.held || !f.bound || f.state.is_none();
+    let status = if f.fault {
+        Status::Error
+    } else if f.dialogs
+        || f.state
+            .is_some_and(|s| s.goal.status == GoalStatus::Blocked)
     {
-        AgentStatus::Blocked
-    } else if input.bound.is_none() || input.stopping {
-        AgentStatus::Unknown
+        Status::Blocked
+    } else if !f.bound || f.stopping {
+        Status::Unknown
     } else {
-        match input.state {
-            None => AgentStatus::Unknown,
-            Some(state) if state.settled => AgentStatus::Idle,
-            Some(_) => AgentStatus::Working,
+        match f.state {
+            None => Status::Unknown,
+            Some(state) if state.idle() => Status::Idle,
+            Some(_) => Status::Working,
         }
     };
-    let identity = input.bound.zip(input.latest).filter(|_| !input.fault);
-    Observation {
-        updated_at: util::iso(util::now_ms()),
-        status,
-        held,
-        pid: input.pid,
-        session_id: identity.map(|(bound, _)| bound.session_id.clone()),
-        session_file: identity.map(|(bound, _)| bound.session_file.clone()),
-        goal: identity.map(|(_, latest)| latest.goal.clone()),
-        model: identity.and_then(|(_, latest)| latest.model.clone()),
-        active_since: input.events.active_since(),
-        detail: input.detail.map(str::to_owned),
-        dialogs: input.events.dialogs().to_vec(),
-        recent: input.events.recent().cloned().collect(),
-    }
-}
-
-/// An optional expected session ID.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Expected {
-    /// Absent: any bound session.
-    Unconstrained,
-    Session(String),
-    /// Present but not a string (including `null`): never the bound session.
-    Never,
-}
-
-impl Expected {
-    fn of(value: Option<&Value>) -> Self {
-        match value {
-            None => Self::Unconstrained,
-            Some(Value::String(session)) => Self::Session(session.clone()),
-            Some(_) => Self::Never,
-        }
-    }
-
-    pub(super) fn admits(&self, bound: &str) -> bool {
-        match self {
-            Self::Unconstrained => true,
-            Self::Session(session) => session == bound,
-            Self::Never => false,
-        }
-    }
-}
-
-/// When a local delivery is admitted.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DeliverWhen {
-    Idle,
-    Working,
-    Any,
-    /// Any other value, which no delivery status equals.
-    Other,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct DeliverOptions {
-    pub(super) expected_session_id: Expected,
-    pub(super) when: DeliverWhen,
-}
-
-impl DeliverOptions {
-    /// Whether the delivery status (idle, working or blocked) admits this delivery.
-    pub(super) fn when_admits(&self, status: AgentStatus) -> bool {
-        match self.when {
-            DeliverWhen::Any => true,
-            DeliverWhen::Idle => status == AgentStatus::Idle,
-            DeliverWhen::Working => status == AgentStatus::Working,
-            DeliverWhen::Other => false,
-        }
-    }
-}
-
-/// A goal change target. Any value but `Paused` requests `resume`, and only `Paused`/`Active` can be reached.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GoalTarget {
-    Paused,
-    Active,
-    Other,
-}
-
-impl GoalTarget {
-    /// The `goal` RPC `op` for this target.
-    pub(super) const fn op(self) -> &'static str {
-        match self {
-            Self::Paused => "pause",
-            Self::Active | Self::Other => "resume",
-        }
-    }
-
-    /// Whether `status` is this target.
-    pub(super) fn reached(self, status: GoalStatus) -> bool {
-        match self {
-            Self::Paused => status == GoalStatus::Paused,
-            Self::Active => status == GoalStatus::Active,
-            Self::Other => false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Delivery {
-    Prompt,
-    Steer,
-}
-
-impl Delivery {
-    /// The wire spelling, also the digest prefix `${delivery}\0`.
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Prompt => "prompt",
-            Self::Steer => "steer",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RemoteInput {
-    pub(super) id: String,
-    pub(super) text: String,
-    pub(super) delivery: Delivery,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ModelSelector {
-    pub(super) model: String,
-    pub(super) provider: String,
-    pub(super) model_id: String,
-}
-
-/// A remote command after the session check; `Err` carries the refusal reason.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum RemoteCommand {
-    Send(Result<RemoteInput, &'static str>),
-    Receipt(Result<String, &'static str>),
-    Interrupt,
-    Model(Result<ModelSelector, &'static str>),
-    Close(Result<bool, &'static str>),
+    (status, blocked_input)
 }
 
 #[cfg(test)]
@@ -827,6 +837,24 @@ mod tests {
         assert_eq!(dialog_of(&json!({ "method": "confirm" })), None);
         assert_eq!(dialog_of(&json!({ "id": "", "method": "confirm" })), None);
         assert_eq!(dialog_of(&json!({ "id": 1, "method": "confirm" })), None);
+        assert_eq!(
+            ui_frame(&json!({ "id": "x", "method": "cancel", "targetId": "d1" })),
+            UiFrame::Cancel("d1".into())
+        );
+    }
+
+    #[test]
+    fn forms_take_only_plain_data() {
+        let form = dialog(&json!({ "id": "f", "method": "form", "html": "<form></form>" }));
+        assert_eq!(form.kind, DialogKind::Form);
+        assert!(sent(&form, &json!({ "data": { "a": "x", "b": ["y"], "n": 2 } })).is_some());
+        assert_eq!(sent(&form, &json!({ "data": { "a": { "x": 1 } } })), None);
+        assert_eq!(sent(&form, &json!({ "data": "x" })), None);
+        assert!(sent(&form, &json!({ "cancelled": true })).is_some());
+        assert_eq!(
+            dialog(&json!({ "id": "f", "method": "form" })).kind,
+            DialogKind::Unsupported
+        );
     }
 
     #[test]
@@ -876,13 +904,6 @@ mod tests {
             one(json!({ "id": "single", "selectedOptions": ["A"], "customInput": "C" })),
             None
         );
-        assert_eq!(
-            one(json!({ "id": "single", "selectedOptions": ["A"], "customInput": "  " }))
-                .as_deref(),
-            Some(
-                r#"{"type":"extension_ui_response","id":"question-1","answers":[{"id":"single","selectedOptions":["A"],"customInput":"  "}]}"#
-            )
-        );
         assert!(
             one(json!({ "id": "single", "selectedOptions": [], "customInput": "C" })).is_some()
         );
@@ -895,16 +916,7 @@ mod tests {
             one(json!({ "id": "other", "selectedOptions": ["A"] })),
             None
         );
-        assert_eq!(one(json!({ "selectedOptions": ["A"] })), None);
-        assert_eq!(one(json!({ "id": "single", "selectedOptions": "A" })), None);
-        assert_eq!(one(json!({ "id": "single", "selectedOptions": [1] })), None);
-        assert_eq!(one(json!("single")), None);
         assert_eq!(sent(&question, &json!({ "answers": [] })), None);
-        let answer = json!({ "id": "single", "selectedOptions": ["A"] });
-        assert_eq!(
-            sent(&question, &json!({ "answers": [answer.clone(), answer] })),
-            None
-        );
         let multi = dialog(&json!({
             "id": "m", "method": "ask",
             "questions": [{ "id": "q", "question": "?", "options": [{ "label": "A" }, { "label": "B" }], "multi": true }],
@@ -948,32 +960,21 @@ mod tests {
         .unwrap();
         assert_eq!(notice.kind, EntryKind::Notice);
         assert_eq!(
-            entry_of(
-                &json!({ "type": "extension_ui_request", "method": "confirm", "message": "hi" })
-            ),
-            None
-        );
-        assert_eq!(
             entry_of(&json!({ "type": "command_output", "text": " \n" })),
             None
         );
-        assert_eq!(
-            entry_of(&json!({ "type": "command_output", "text": 1 })),
-            None
-        );
         assert_eq!(entry_of(&json!({ "type": "agent_start" })), None);
+        assert_eq!(last_units("abcdef", 3), "def");
     }
 
     #[test]
     fn goals_and_models_read_like_omp_reports_them() {
-        let none = Goal {
-            status: GoalStatus::None,
-            objective: None,
-        };
-        assert_eq!(goal_of(Some(&Value::Null)), Some(none));
+        assert_eq!(
+            goal_of(Some(&Value::Null)).map(|g| g.status),
+            Some(GoalStatus::None)
+        );
         assert_eq!(goal_of(None), None);
         assert_eq!(goal_of(Some(&json!({}))), None);
-        assert_eq!(goal_of(Some(&json!({ "goal": null }))), None);
         assert_eq!(
             goal_of(Some(&json!({ "goal": { "status": "waiting" } }))),
             None
@@ -986,17 +987,6 @@ mod tests {
             serde_json::to_string(&blocked).unwrap(),
             r#"{"status":"blocked","objective":"o"}"#
         );
-        let active = goal_of(Some(
-            &json!({ "goal": { "status": "active", "objective": 1 } }),
-        ))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_string(&active).unwrap(),
-            r#"{"status":"active"}"#
-        );
-        for status in ["paused", "complete", "dropped"] {
-            assert!(goal_of(Some(&json!({ "goal": { "status": status } }))).is_some());
-        }
         assert_eq!(
             model_of(Some(&json!({ "provider": "fixture", "id": "initial" }))).as_deref(),
             Some("fixture/initial")
@@ -1005,132 +995,105 @@ mod tests {
             model_of(Some(&json!({ "provider": "a/b", "id": "c" }))),
             None
         );
-        assert_eq!(model_of(Some(&json!({ "provider": "", "id": "c" }))), None);
-        assert_eq!(model_of(Some(&json!({ "provider": "a", "id": "" }))), None);
-        assert_eq!(model_of(Some(&json!("a/b"))), None);
+        assert!(same_model("p/Model-A", "p/model-a"));
+        assert!(!same_model("P/model-a", "p/model-a"));
     }
 
     fn fixture_state(settled: bool) -> Value {
         json!({
             "sessionId": "fixture-session", "sessionFile": "/fixture/session.jsonl", "isSettled": settled,
-            "isStreaming": !settled, "goal": { "goal": { "status": "active", "objective": "o" } },
-            "model": { "provider": "fixture", "id": "initial" },
+            "isStreaming": !settled, "goal": null, "queuedMessageCount": 0,
+            "model": { "provider": "fixture", "id": "initial" }, "thinkingLevel": "low",
         })
     }
 
     #[test]
-    fn native_state_requires_identity_goal_and_settlement() {
-        let state = native_state_of(Some(&fixture_state(false))).unwrap();
+    fn read_state_requires_identity_goal_and_settlement() {
+        let state = read_state(Some(&fixture_state(false))).unwrap();
         assert_eq!(state.session_id, "fixture-session");
-        assert!(state.foreground && !state.settled);
+        assert!(state.foreground && !state.settled && !state.idle());
         assert_eq!(state.model.as_deref(), Some("fixture/initial"));
+        assert_eq!(state.thinking.as_deref(), Some("low"));
         let mut data = fixture_state(true);
-        data["goal"] = Value::Null;
-        data["isCompacting"] = json!(true);
-        data["model"] = json!({ "provider": "a/b", "id": "c" });
-        let state = native_state_of(Some(&data)).unwrap();
-        assert_eq!(
-            (state.goal.status, state.foreground, state.model),
-            (GoalStatus::None, true, None)
-        );
+        data["usageLimit"] = json!({ "stage": "wrap_up", "extraUsage": true });
+        assert!(read_state(Some(&data)).unwrap().extra_usage);
         for key in ["sessionId", "sessionFile", "goal", "isSettled"] {
             let mut data = fixture_state(true);
             data.as_object_mut().unwrap().remove(key);
-            assert_eq!(native_state_of(Some(&data)), None, "{key}");
-        }
-        let mut data = fixture_state(true);
-        data["isSettled"] = json!(1);
-        assert_eq!(native_state_of(Some(&data)), None);
-        data["isSettled"] = json!(true);
-        data["sessionId"] = json!("");
-        assert_eq!(native_state_of(Some(&data)), None);
-        assert_eq!(native_state_of(None), None);
-    }
-
-    fn base<'a>(events: &'a Events, state: Option<&'a NativeState>) -> Snapshot<'a> {
-        Snapshot {
-            pid: Some(123),
-            bound: state,
-            state,
-            latest: state,
-            fault: false,
-            stopping: false,
-            detail: None,
-            events,
+            assert_eq!(read_state(Some(&data)), None, "{key}");
         }
     }
 
     #[test]
-    fn observation_status_and_hold_precedence() {
-        let mut events = Events::default();
-        let idle = native_state_of(Some(&fixture_state(true))).unwrap();
-        let mut blocked = idle.clone();
-        blocked.goal.status = GoalStatus::Blocked;
-        let observe = |input: &Snapshot<'_>| {
-            let observation = snapshot(input);
-            (
-                observation.status,
-                observation.held,
-                observation.session_id.is_some(),
-            )
+    fn status_precedence() {
+        let idle = read_state(Some(&fixture_state(true))).unwrap();
+        let busy = read_state(Some(&fixture_state(false))).unwrap();
+        let mut budget = idle.clone();
+        budget.goal.status = GoalStatus::Blocked;
+        let base = Facts {
+            bound: true,
+            state: Some(&idle),
+            fault: false,
+            held: false,
+            stopping: false,
+            dialogs: false,
         };
+        assert_eq!(status(&base), (Status::Idle, false));
         assert_eq!(
-            observe(&base(&events, Some(&idle))),
-            (AgentStatus::Idle, false, true)
+            status(&Facts {
+                state: Some(&busy),
+                ..base
+            }),
+            (Status::Working, false)
         );
         assert_eq!(
-            observe(&base(&events, Some(&blocked))),
-            (AgentStatus::Blocked, false, true)
+            status(&Facts {
+                state: Some(&budget),
+                ..base
+            }),
+            (Status::Blocked, false)
         );
-        let faulted = Snapshot {
-            fault: true,
-            ..base(&events, Some(&blocked))
-        };
-        assert_eq!(observe(&faulted), (AgentStatus::Error, true, false));
-        let stopping = Snapshot {
-            stopping: true,
-            ..base(&events, Some(&idle))
-        };
-        assert_eq!(observe(&stopping), (AgentStatus::Unknown, true, true));
-        let stopping_blocked = Snapshot {
-            stopping: true,
-            ..base(&events, Some(&blocked))
-        };
         assert_eq!(
-            observe(&stopping_blocked),
-            (AgentStatus::Blocked, true, true)
+            status(&Facts {
+                dialogs: true,
+                fault: true,
+                ..base
+            }),
+            (Status::Error, true)
         );
-        let unread = Snapshot {
-            state: None,
-            ..base(&events, Some(&idle))
-        };
-        assert_eq!(observe(&unread), (AgentStatus::Unknown, true, true));
-        let unproven = Snapshot {
-            bound: None,
-            ..base(&events, Some(&idle))
-        };
-        assert_eq!(observe(&unproven), (AgentStatus::Unknown, true, false));
-        let never_read = Snapshot {
-            latest: None,
-            state: None,
-            ..base(&events, Some(&idle))
-        };
-        assert_eq!(observe(&never_read), (AgentStatus::Unknown, true, false));
-        events.record(&fixture_approval());
-        let held = Snapshot {
-            state: None,
-            ..base(&events, Some(&idle))
-        };
-        assert_eq!(observe(&held), (AgentStatus::Blocked, true, true));
-        let faulted_with_dialog = Snapshot {
-            fault: true,
-            ..base(&events, Some(&idle))
-        };
         assert_eq!(
-            observe(&faulted_with_dialog),
-            (AgentStatus::Error, true, false)
+            status(&Facts {
+                dialogs: true,
+                ..base
+            }),
+            (Status::Blocked, true)
         );
-        let observation = snapshot(&base(&events, Some(&idle)));
-        assert_eq!(observation.dialogs.len(), 1);
+        assert_eq!(
+            status(&Facts {
+                stopping: true,
+                ..base
+            }),
+            (Status::Unknown, true)
+        );
+        assert_eq!(
+            status(&Facts {
+                state: None,
+                ..base
+            }),
+            (Status::Unknown, true)
+        );
+        assert_eq!(status(&Facts { held: true, ..base }), (Status::Idle, true));
+    }
+
+    #[test]
+    fn spend_offers_are_recognised() {
+        let offer = dialog(&json!({
+            "id": "s", "method": "select", "title": "Usage limit reached",
+            "options": ["Redeem a saved reset", "Wait"],
+        }));
+        assert!(spend_offer(&offer, &[]));
+        let plain = dialog(&fixture_approval());
+        assert!(!spend_offer(&plain, &[]));
+        assert!(spend_offer(&plain, &["fake write".to_string()]));
     }
 }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -322,6 +322,8 @@ pub(crate) struct Reply {
     pub(crate) success: bool,
     pub(crate) data: Option<Value>,
     pub(crate) error: Option<String>,
+    /// The command name OMP echoed.
+    pub(crate) command: Option<String>,
 }
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Reply, RpcError>>>>>;
@@ -428,20 +430,34 @@ impl Rpc {
     /// Sends one command (an object with its `type`) and waits for the response with its ID.
     pub(crate) async fn call(
         &self,
-        mut command: Map<String, Value>,
+        command: Map<String, Value>,
         within: Duration,
     ) -> Result<Reply, RpcError> {
+        self.call_at(command, within).await.0
+    }
+
+    /// Like [`Rpc::call`], and also returns when the command line was completely written, which is
+    /// `None` when nothing reached OMP's stdin. A reply whose echoed command differs from the one
+    /// sent ends in a protocol error (HOST req. 30).
+    pub(crate) async fn call_at(
+        &self,
+        mut command: Map<String, Value>,
+        within: Duration,
+    ) -> (Result<Reply, RpcError>, Option<Instant>) {
         let id = format!(
             "cataly-{}",
             self.next_id.fetch_add(1, Ordering::Relaxed) + 1
         );
+        let kind = command
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         command.insert("id".into(), Value::String(id.clone()));
-        let mut line =
-            serde_json::to_vec(&command).map_err(|e| RpcError::Protocol(e.to_string()))?;
-        line.push(b'\n');
-        if line.len() > self.physical {
-            return Err(RpcError::TooLarge);
-        }
+        let line = match encode_line(&command, self.physical) {
+            Ok(line) => line,
+            Err(e) => return (Err(e), None),
+        };
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
@@ -455,20 +471,39 @@ impl Rpc {
         };
         if self.reader.is_finished() {
             forget();
-            return Err(RpcError::Closed);
+            return (Err(RpcError::Closed), None);
         }
         if let Err(e) = self.write(&line).await {
             forget();
-            return Err(e);
+            return (Err(e), None);
         }
-        match timeout(within, rx).await {
+        let written = Instant::now();
+        let result = match timeout(within, rx).await {
+            Ok(Ok(Ok(reply))) if reply.command.as_deref() != Some(kind.as_str()) => Err(protocol(
+                "a response echoed a different command than the one sent",
+            )),
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::Closed),
             Err(_) => {
                 forget();
                 Err(RpcError::Timeout("response"))
             }
+        };
+        (result, Some(written))
+    }
+
+    /// Writes one frame that has no response, such as an `extension_ui_response`.
+    pub(crate) async fn send(&self, frame: &Map<String, Value>) -> Result<(), RpcError> {
+        if self.reader.is_finished() {
+            return Err(RpcError::Closed);
         }
+        let line = encode_line(frame, self.physical)?;
+        self.write(&line).await
+    }
+
+    /// Whether OMP's output ended (the reader task stopped).
+    pub(crate) fn closed(&self) -> bool {
+        self.reader.is_finished()
     }
 
     async fn write(&self, line: &[u8]) -> Result<(), RpcError> {
@@ -537,6 +572,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         .get("error")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    command: command.map(str::to_string),
                 };
                 let waiter = pending
                     .lock()
@@ -565,6 +601,16 @@ async fn read_loop<R: AsyncRead + Unpin>(
     for (_, waiter) in waiters {
         let _ = waiter.send(Err(failure.clone()));
     }
+}
+
+/// One command line: JSON plus newline, within the physical frame limit.
+fn encode_line(frame: &Map<String, Value>, physical: usize) -> Result<Vec<u8>, RpcError> {
+    let mut line = serde_json::to_vec(frame).map_err(|e| RpcError::Protocol(e.to_string()))?;
+    line.push(b'\n');
+    if line.len() > physical {
+        return Err(RpcError::TooLarge);
+    }
+    Ok(line)
 }
 
 /// Builds a command object from its type and fields.

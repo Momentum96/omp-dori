@@ -45,6 +45,7 @@ pub(crate) enum Request {
     DiscardDry(String, Reply<()>),
     Recover(i64, Reply<Recovery>),
     Maintain(i64, Reply<Vec<String>>),
+    Host(Box<super::host::HostWrite>, Reply<super::host::HostDone>),
 }
 
 type Finisher = Box<dyn FnOnce(Option<&StoreError>) + Send>;
@@ -92,6 +93,9 @@ fn run(
 fn execute(tx: &Transaction<'_>, req: Request) -> Finisher {
     match req {
         Request::AppendEvents(events, r) => step(tx, r, |t| append_events(t, events)),
+        Request::Host(write, r) => step(tx, r, |t| {
+            super::host::write(t, &write, crate::sys::now_ms())
+        }),
         Request::RegisterJob(reg, r) => step(tx, r, |t| register_job(t, &reg)),
         Request::PatchJob(name, patch, r) => step(tx, r, |t| patch_job(t, &name, &patch)),
         Request::RunStarted(start, r) => step(tx, r, |t| run_started(t, &start)),
@@ -368,6 +372,7 @@ fn recover(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Recovery> {
 }
 
 fn maintain(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<Vec<String>> {
+    super::host::maintain(tx, now)?;
     tx.execute(
         "DELETE FROM events WHERE at_ms < ?1 AND id <= (SELECT COALESCE(MAX(id), 0) FROM events) - ?2",
         params![now - EVENT_KEEP_MS, EVENT_KEEP_MIN],

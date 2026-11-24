@@ -36,6 +36,19 @@ pub(crate) mod method {
     pub(crate) const PR_FOLLOW: &str = "pr.follow";
     pub(crate) const PR_UNFOLLOW: &str = "pr.unfollow";
     pub(crate) const PR_LIST: &str = "pr.list";
+    pub(crate) const LEAD_START: &str = "lead.start";
+    pub(crate) const LEAD_STOP: &str = "lead.stop";
+    pub(crate) const LEAD_STATUS: &str = "lead.status";
+    pub(crate) const LEAD_SEND: &str = "lead.send";
+    pub(crate) const LEAD_RECEIPT: &str = "lead.receipt";
+    pub(crate) const LEAD_INBOX: &str = "lead.inbox";
+    pub(crate) const LEAD_CONFIRM: &str = "lead.confirm";
+    pub(crate) const LEAD_RELEASE: &str = "lead.release";
+    pub(crate) const LEAD_INTERRUPT: &str = "lead.interrupt";
+    pub(crate) const LEAD_MODEL: &str = "lead.model";
+    pub(crate) const LEAD_ACCEPT_MODEL: &str = "lead.accept_model";
+    pub(crate) const LEAD_ANSWER: &str = "lead.answer";
+    pub(crate) const LEAD_EVENTS: &str = "lead.events";
 }
 
 /// Error codes besides the decision classes.
@@ -199,6 +212,33 @@ pub(crate) struct Stats {
     pub(crate) state_disk: Option<HostDisk>,
     pub(crate) control_latency: Option<LatencySummary>,
     pub(crate) store_commit_latency: Option<LatencySummary>,
+    /// Internal `deliver` call to the prompt line written to OMP (wake, hub part).
+    #[serde(default)]
+    pub(crate) wake_latency: Option<LatencySummary>,
+    /// Prompt line written to its entry found in the session file.
+    #[serde(default)]
+    pub(crate) confirm_latency: Option<LatencySummary>,
+    /// Prompt line written to OMP's `agent_start`.
+    #[serde(default)]
+    pub(crate) agent_start_latency: Option<LatencySummary>,
+}
+
+/// Parameters of the `lead.*` methods; each method reads the fields it needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct LeadParams {
+    pub(crate) fresh: bool,
+    pub(crate) force: bool,
+    pub(crate) text: Option<String>,
+    /// The receipt key of `lead.send` (HOST req. 56).
+    pub(crate) request_id: Option<String>,
+    /// A quiet note: it waits for the next wake.
+    pub(crate) quiet: bool,
+    pub(crate) index: Option<usize>,
+    pub(crate) model: Option<String>,
+    pub(crate) dialog: Option<String>,
+    pub(crate) answer: Option<Value>,
+    pub(crate) after: Option<u64>,
 }
 
 /// Wire copies of the host figures (kept apart so the readers stay internal types).

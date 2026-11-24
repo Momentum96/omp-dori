@@ -67,6 +67,16 @@ pub(crate) enum EventKind {
     PressureClear,
     PressureReady,
     PressureBusy,
+    LeadStarted,
+    LeadNotStarted,
+    SessionStopped,
+    SessionFenced,
+    SpendOffer,
+    ModelFallback,
+    ModelRestored,
+    QuotaBlocked,
+    DeliveryInDoubt,
+    DeliveryFailed,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -77,7 +87,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 35] = [
+const KINDS: [KindRow; 45] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -298,6 +308,66 @@ const KINDS: [KindRow; 35] = [
         "pressure.busy",
         &["load"],
         "host busy again (load {load}%)",
+    ),
+    (
+        EventKind::LeadStarted,
+        "lead.started",
+        &["session", "model", "how"],
+        "lead started ({how}) on {model}, session {session}",
+    ),
+    (
+        EventKind::LeadNotStarted,
+        "lead.refused",
+        &["reason"],
+        "lead not started: {reason}",
+    ),
+    (
+        EventKind::SessionStopped,
+        "session.stopped",
+        &["role", "how", "detail"],
+        "{role} session stopped by itself ({how} {detail})",
+    ),
+    (
+        EventKind::SessionFenced,
+        "session.fenced",
+        &["role", "reason"],
+        "{role} session fenced, nothing more is delivered: {reason}",
+    ),
+    (
+        EventKind::SpendOffer,
+        "session.spend_offer",
+        &["role", "dialog", "count"],
+        "{role} session: spend offer cancelled ({count} in 10 minutes): {dialog}",
+    ),
+    (
+        EventKind::ModelFallback,
+        "session.fallback",
+        &["role", "from", "to", "reason"],
+        "{role} session fell back from {from} to {to} ({reason})",
+    ),
+    (
+        EventKind::ModelRestored,
+        "session.fallback_recovered",
+        &["role", "model"],
+        "{role} session is back on {model}",
+    ),
+    (
+        EventKind::QuotaBlocked,
+        "session.quota_blocked",
+        &["role", "message"],
+        "{role} session is quota-blocked, no fallback left: {message}",
+    ),
+    (
+        EventKind::DeliveryInDoubt,
+        "delivery.in_doubt",
+        &["target", "count", "reason"],
+        "{count} message(s) for {target} in doubt, not resent: {reason}",
+    ),
+    (
+        EventKind::DeliveryFailed,
+        "delivery.failed",
+        &["target", "count", "reason"],
+        "{count} message(s) for {target} not delivered: {reason}",
     ),
 ];
 

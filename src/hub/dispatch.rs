@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 15] = [
+const METHODS: [Method; 28] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -103,6 +103,73 @@ const METHODS: [Method; 15] = [
     },
     Method {
         name: method::PR_LIST,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::LEAD_START,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_STOP,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_STATUS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    // Its `request_id` is the receipt key with its own digest rule (HOST req. 57), not the
+    // dispatcher's reply dedupe.
+    Method {
+        name: method::LEAD_SEND,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::LEAD_RECEIPT,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::LEAD_INBOX,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::LEAD_CONFIRM,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_RELEASE,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_INTERRUPT,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_MODEL,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_ACCEPT_MODEL,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_ANSWER,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::LEAD_EVENTS,
         needs: Authority::Owner,
         mutating: false,
     },
@@ -303,6 +370,78 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         method::PR_LIST => ok(&PrList {
             prs: hub.jobs.pr_list().await?,
         }),
+        lead if lead.starts_with("lead.") => lead_method(hub, lead, raw).await,
+        _ => Err(Failure {
+            code: code::UNKNOWN_METHOD,
+            message: format!("unknown method '{name}'"),
+        }),
+    }
+}
+
+fn refused(message: String) -> Failure {
+    let code = if message.starts_with("busy") {
+        code::BUSY
+    } else {
+        code::REFUSED
+    };
+    Failure { code, message }
+}
+
+/// The `lead.*` methods (COORD-01, COORD-13, COORD-18, HOST-14, HOST-17, HOST-18).
+async fn lead_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
+    let p: proto::LeadParams = params(raw)?;
+    let lead = &hub.lead;
+    let done = || Ok(Value::Object(serde_json::Map::new()));
+    match name {
+        method::LEAD_START => ok(&lead.start(p.fresh).await.map_err(refused)?),
+        method::LEAD_STOP => ok(&lead.stop(p.force).await.map_err(refused)?),
+        method::LEAD_STATUS => ok(&lead.view().await),
+        method::LEAD_SEND => {
+            let request = crate::host::inbox::Message {
+                sender: "owner".into(),
+                text: p.text.unwrap_or_default(),
+                urgent: !p.quiet,
+                owner: true,
+                identity: None,
+                request_id: p.request_id,
+            };
+            ok(&lead.deliver(request).await.map_err(refused)?)
+        }
+        method::LEAD_RECEIPT => {
+            let rid = p.request_id.unwrap_or_default();
+            match lead.receipt(&rid).await.map_err(refused)? {
+                Some(receipt) => ok(&receipt),
+                None => Err(Failure {
+                    code: code::NOT_FOUND,
+                    message: format!("no receipt for request ID '{rid}'"),
+                }),
+            }
+        }
+        method::LEAD_INBOX => ok(&lead.inbox().await.map_err(refused)?),
+        method::LEAD_CONFIRM | method::LEAD_RELEASE => {
+            let index = p.index.unwrap_or(0);
+            lead.settle(index, name == method::LEAD_CONFIRM)
+                .await
+                .map_err(refused)?;
+            done()
+        }
+        method::LEAD_INTERRUPT => ok(&lead.interrupt().await.map_err(refused)?),
+        method::LEAD_MODEL => ok(&lead
+            .set_model(p.model.as_deref().unwrap_or_default())
+            .await
+            .map_err(refused)?),
+        method::LEAD_ACCEPT_MODEL => {
+            lead.accept_model().map_err(refused)?;
+            done()
+        }
+        method::LEAD_ANSWER => {
+            let answer = p.answer.unwrap_or(Value::Null);
+            lead.answer(p.dialog.as_deref().unwrap_or_default(), &answer)
+                .await
+                .map_err(refused)?;
+            done()
+        }
+        method::LEAD_EVENTS => ok(&lead.events(p.after.unwrap_or(0)).map_err(refused)?),
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),

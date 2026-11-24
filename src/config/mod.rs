@@ -4,6 +4,7 @@
 //! file is never applied.
 
 pub(crate) mod owner;
+pub(crate) mod session;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -43,6 +44,9 @@ pub(crate) struct Config {
     pub(crate) outgoing: Checks,
     pub(crate) limits: LimitsSettings,
     pub(crate) health: HealthSettings,
+    pub(crate) sessions: session::SessionSettings,
+    pub(crate) lead: Option<session::LeadSettings>,
+    pub(crate) fallback: session::FallbackSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
 }
@@ -62,6 +66,9 @@ impl Default for Config {
                 warn_percent: None,
             },
             health: HealthSettings::default(),
+            sessions: session::SessionSettings::default(),
+            lead: None,
+            fallback: session::FallbackSettings::default(),
             destinations: BTreeMap::new(),
             jobs: BTreeMap::new(),
         }
@@ -443,6 +450,13 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         config.health.ignore = h.strings(errors, "ignore").unwrap_or_default();
         h.finish(errors);
     }
+    session::parse(
+        errors,
+        root,
+        &mut config.sessions,
+        &mut config.lead,
+        &mut config.fallback,
+    );
 }
 
 fn job(

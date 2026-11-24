@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 18] = [
+pub(crate) const COMMANDS: [Spec; 30] = [
     Spec {
         path: &["hub"],
         args: &[],
@@ -141,6 +141,90 @@ pub(crate) const COMMANDS: [Spec; 18] = [
         flags: &["--json"],
         values: &[],
         summary: "list the pull requests followed",
+    },
+    Spec {
+        path: &["lead", "start"],
+        args: &[],
+        flags: &["--json", "--fresh"],
+        values: &[],
+        summary: "start the lead (resumes its last session; --fresh starts a new one)",
+    },
+    Spec {
+        path: &["lead", "stop"],
+        args: &[],
+        flags: &["--json", "--force"],
+        values: &[],
+        summary: "stop the lead (--force interrupts a running turn first)",
+    },
+    Spec {
+        path: &["lead", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show the lead session and its inbox",
+    },
+    Spec {
+        path: &["lead", "send"],
+        args: &["text"],
+        flags: &["--json", "--quiet"],
+        values: &["--request-id"],
+        summary: "give the lead a message; exit 5 when it is in doubt (never send it again)",
+    },
+    Spec {
+        path: &["lead", "inbox"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "list the lead's waiting, sent and in-doubt messages",
+    },
+    Spec {
+        path: &["lead", "confirm"],
+        args: &["index"],
+        flags: &["--json"],
+        values: &[],
+        summary: "an in-doubt message arrived: record it as delivered",
+    },
+    Spec {
+        path: &["lead", "release"],
+        args: &["index"],
+        flags: &["--json"],
+        values: &[],
+        summary: "an in-doubt message did not arrive: deliver it again",
+    },
+    Spec {
+        path: &["lead", "interrupt"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "interrupt the lead's running turn",
+    },
+    Spec {
+        path: &["lead", "model"],
+        args: &["model"],
+        flags: &["--json"],
+        values: &[],
+        summary: "change the idle lead's model (provider/id) with readback",
+    },
+    Spec {
+        path: &["lead", "accept-model"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "accept the model OMP reports after a model mismatch hold",
+    },
+    Spec {
+        path: &["lead", "answer"],
+        args: &["dialog", "answer"],
+        flags: &["--json"],
+        values: &[],
+        summary: "answer a lead dialog with JSON such as '{\"value\":\"Deny\"}'",
+    },
+    Spec {
+        path: &["lead", "events"],
+        args: &[],
+        flags: &["--json"],
+        values: &["--after"],
+        summary: "show the lead session's recent events after a sequence number",
     },
 ];
 

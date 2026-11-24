@@ -2,8 +2,10 @@
 //! usage and lease readers. This milestone starts no session; the probe result is cached here, shown
 //! by health and `status`, and re-taken when the configured executable changes on disk.
 
+pub(crate) mod launch;
 pub(crate) mod probe;
 pub(crate) mod rpc;
+pub(crate) mod transcript;
 pub(crate) mod usage;
 
 use std::fmt;
@@ -103,6 +105,11 @@ impl Omp {
     /// The latest probe report, if a probe finished.
     pub(crate) fn report(&self) -> Option<Arc<probe::Report>> {
         self.report.borrow().clone()
+    }
+
+    /// Wakes when a probe finishes.
+    pub(crate) fn report_changes(&self) -> watch::Receiver<Option<Arc<probe::Report>>> {
+        self.report.subscribe()
     }
 
     /// The executable resolved at the last check.

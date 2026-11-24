@@ -2,6 +2,7 @@
 //! single writer thread that takes typed requests and batches them into one transaction, and a small
 //! pool of read-only connections.
 
+pub(crate) mod host;
 mod read;
 mod schema;
 mod writer;
@@ -396,6 +397,11 @@ impl Store {
         })
         .await
         .map_err(|e| StoreError::Io(format!("read task: {e}")))?
+    }
+
+    /// One session-host mutation (sessions, inbox, deliveries, receipts).
+    pub(crate) async fn host(&self, write: host::HostWrite) -> Result<host::HostDone, StoreError> {
+        self.call(|r| Request::Host(Box::new(write), r)).await
     }
 }
 

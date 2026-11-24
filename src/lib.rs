@@ -6,6 +6,7 @@
 
 mod cli;
 mod config;
+mod host;
 mod hub;
 mod jobs;
 mod log;
