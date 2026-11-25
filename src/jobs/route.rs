@@ -142,7 +142,7 @@ async fn deliver_waiting(ctx: &Arc<Ctx>) -> Result<(), JobsError> {
     }
     let config = ctx.config();
     for (event_id, destination) in waiting {
-        let Some(dest) = config.destinations.get(&destination).cloned() else {
+        let Some(dest) = config.destination(&destination) else {
             let detail = Some("destination no longer configured".to_string());
             ctx.store
                 .delivery(event_id, destination, Delivery::Failed, detail)

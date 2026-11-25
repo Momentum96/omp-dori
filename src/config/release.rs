@@ -4,8 +4,23 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{ConfigError, Section};
+use super::{ConfigError, LOG_DESTINATION, Section};
+use crate::jobs::event::{EventKind, Template};
 use crate::relay::http::Base;
+
+/// The default notice in Korean; `{current}`, `{latest}` and `{url}` are filled in.
+const KOREAN: &str = "새로운 버전이 나왔습니다! 보스. 콘솔 창에 `cataly update` 명령어를 입력해주세요.\n\
+                      {current} -> {latest} {url}";
+/// The default notice in English.
+const ENGLISH: &str = "A new version is out, boss. Run `cataly update` in a terminal.\n\
+                       {current} -> {latest} {url}";
+
+/// The language of the owner's fixed notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Language {
+    Korean,
+    English,
+}
 
 /// `[update]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +31,12 @@ pub(crate) struct UpdateSettings {
     pub(crate) api_base: Option<Base>,
     /// The first check after the hub starts (IR req. 36: 10 minutes).
     pub(crate) first_after: Duration,
+    /// The language of the default notice.
+    pub(crate) language: Language,
+    /// The owner's notice wording, checked at load; `None` is the default for `language`.
+    pub(crate) template: Option<String>,
+    /// Named destinations; `None` posts to the owner's home room.
+    pub(crate) destinations: Option<Vec<String>>,
 }
 
 impl Default for UpdateSettings {
@@ -24,6 +45,9 @@ impl Default for UpdateSettings {
             check: true,
             api_base: None,
             first_after: Duration::from_mins(10),
+            language: Language::Korean,
+            template: None,
+            destinations: None,
         }
     }
 }
@@ -35,6 +59,15 @@ impl UpdateSettings {
             Some(b) => Ok(b.clone()),
             None => Base::parse(crate::sys::release::GITHUB_API),
         }
+    }
+
+    /// The notice wording: the owner's, else the default in the owner's language.
+    pub(crate) fn template(&self) -> Result<Template, String> {
+        let text = self.template.as_deref().unwrap_or(match self.language {
+            Language::Korean => KOREAN,
+            Language::English => ENGLISH,
+        });
+        Template::parse(text, EventKind::UpdateAvailable)
     }
 }
 
@@ -72,6 +105,23 @@ pub(super) fn parse(
             Duration::from_hours(24),
         ) {
             update.first_after = d;
+        }
+        match u.string(errors, "language") {
+            None => {}
+            Some("ko") => update.language = Language::Korean,
+            Some("en") => update.language = Language::English,
+            Some(_) => errors.push(u.error("language", "expected \"ko\" or \"en\"")),
+        }
+        if let Some(text) = u.string(errors, "template") {
+            match Template::parse(text, EventKind::UpdateAvailable) {
+                Ok(_) => update.template = Some(text.to_string()),
+                Err(e) => errors.push(u.error("template", &e)),
+            }
+        }
+        if let Some(names) = u.strings(errors, "destinations") {
+            // Names are checked against `[destinations]` once that table is read.
+            update.destinations =
+                Some(names.into_iter().filter(|n| n != LOG_DESTINATION).collect());
         }
         u.finish(errors);
     }

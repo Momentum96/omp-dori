@@ -2,7 +2,8 @@
 //! GitHub's latest stable release and tells the owner, once per version, when it is newer than this
 //! binary. It never downloads, installs or restarts anything; `cataly update` does that when the
 //! owner runs it. A version the owner rolled back from is never announced again. With the check off
-//! no request is made.
+//! no request is made. The notice goes to `[update] destinations`, else to the owner's home room
+//! through the normal outgoing path; it is never work for the lead.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,12 +12,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
 use super::Jobs;
-use super::event::{Emit, EventKind, Severity};
+use super::event::{self, Emit, EventKind, Severity, TEXT_MAX, one_line};
 use super::memory::Memory;
+use crate::config::{Config, HOME_DESTINATION};
 use crate::log;
-use crate::store::Apply;
+use crate::store::{Apply, NewEvent};
 use crate::sys::now_ms;
-use crate::sys::release::{self, Version};
+use crate::sys::release::{self, Release, Version};
 
 /// The memory this task keeps (survives a restart, IR req. 39).
 const JOB: &str = "update";
@@ -61,16 +63,20 @@ pub(crate) async fn run(
             r = release::fetch_release(&api, None) => r,
             _ = stop.changed() => return Ok(()),
         };
-        let emit = match fetched {
-            Ok(Some(latest)) => notice(&mut memory, &latest.version, silenced(&root).as_ref()),
+        let notice = match fetched {
+            Ok(Some(latest)) => notice(&mut memory, &latest, silenced(&root).as_ref(), &config),
             Ok(None) => None,
             Err(e) => {
                 log::warn("release check failed", &[("error", &e)]);
                 None
             }
         };
-        if let Some(emit) = emit {
-            jobs.hub_event(emit).await.map_err(|e| e.to_string())?;
+        if let Some(notice) = notice {
+            jobs.ctx()
+                .stream
+                .append(vec![notice])
+                .await
+                .map_err(|e| e.to_string())?;
         }
         jobs.ctx()
             .store
@@ -100,45 +106,166 @@ fn silenced(root: &Path) -> Option<Version> {
 }
 
 /// The notice for `latest`, once per version, never for a silenced one or an older one (IR req. 37).
-fn notice(memory: &mut Memory, latest: &Version, silenced: Option<&Version>) -> Option<Emit> {
+fn notice(
+    memory: &mut Memory,
+    latest: &Release,
+    silenced: Option<&Version>,
+    config: &Config,
+) -> Option<NewEvent> {
     let installed = Version::parse(release::VERSION)?;
-    if !latest.stable() || *latest <= installed || silenced == Some(latest) {
+    let version = &latest.version;
+    if !version.stable() || *version <= installed || silenced == Some(version) {
         return None;
     }
-    if !memory.transition(SUBJECT, "announced", &latest.to_string()) {
+    let template = config
+        .update
+        .template()
+        .map_err(|e| log::warn("update notice template", &[("error", &e)]))
+        .ok()?;
+    if !memory.transition(SUBJECT, "announced", &version.to_string()) {
         return None;
     }
-    Some(
-        Emit::new(
-            EventKind::UpdateAvailable,
-            Severity::Attention,
-            false,
-            "hub",
-        )
-        .with("version", latest.to_string())
-        .with("installed", installed.to_string()),
+    let emit = Emit::new(
+        EventKind::UpdateAvailable,
+        Severity::Attention,
+        false,
+        "hub",
     )
+    .with("current", installed)
+    .with("latest", version)
+    .with(
+        "url",
+        format!(
+            "https://github.com/{}/releases/tag/{}",
+            release::REPOSITORY,
+            latest.tag
+        ),
+    );
+    let text = template.render(&emit.values);
+    let destinations = config.update.destinations.clone().unwrap_or_else(|| {
+        config
+            .destination(HOME_DESTINATION)
+            .map_or_else(Vec::new, |_| vec![HOME_DESTINATION.to_string()])
+    });
+    let mut event = event::build("hub", emit, &[], false, &destinations, now_ms());
+    // The wording keeps its line breaks; each line is cleaned and bounded like any event text.
+    event.text = text
+        .lines()
+        .map(|line| one_line(line, TEXT_MAX))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(event)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{self, Destination};
+    use crate::relay::discord::ChannelRef;
+
+    fn release(tag: &str) -> Release {
+        Release {
+            tag: tag.into(),
+            version: Version::parse(tag).unwrap(),
+            assets: Vec::new(),
+        }
+    }
+
+    const DISCORD: &str =
+        "[discord]\nowner = \"100000000000000001\"\nchannels = [\"100000000000000010\"]\n";
 
     #[test]
     fn announces_once_and_never_a_silenced_version() {
+        let config = config::parse("").unwrap();
         let mut memory = Memory::new(JOB, false, Vec::new());
-        let v = |t: &str| Version::parse(t).unwrap();
-        assert!(notice(&mut memory, &v("0.0.1"), None).is_none(), "older");
-        assert!(
-            notice(&mut memory, &v("99.0.0-rc.1"), None).is_none(),
-            "prerelease"
+        let mut n = |t: &str, s: Option<&str>| {
+            let s = s.map(|s| Version::parse(s).unwrap());
+            notice(&mut memory, &release(t), s.as_ref(), &config)
+        };
+        assert!(n("v0.0.1", None).is_none(), "older");
+        assert!(n("v99.0.0-rc.1", None).is_none(), "prerelease");
+        assert!(n("v99.0.0", Some("99.0.0")).is_none(), "silenced");
+        let first = n("v99.0.0", None).unwrap();
+        assert!(first.destinations.is_empty(), "no relay, log only");
+        assert!(n("v99.0.0", None).is_none(), "once");
+        assert!(n("v99.1.0", None).is_some());
+    }
+
+    #[test]
+    fn newer_release_goes_once_to_the_home_room_in_korean() {
+        let config = config::parse(DISCORD).unwrap();
+        let mut memory = Memory::new(JOB, false, Vec::new());
+        let event = notice(&mut memory, &release("v99.0.0"), None, &config).unwrap();
+        assert_eq!(event.destinations, [HOME_DESTINATION]);
+        assert_eq!(
+            config.destination(HOME_DESTINATION),
+            Some(Destination::Discord {
+                channel: ChannelRef::parse("100000000000000010").unwrap()
+            })
         );
-        assert!(
-            notice(&mut memory, &v("99.0.0"), Some(&v("99.0.0"))).is_none(),
-            "silenced"
+        assert_eq!(
+            event.text,
+            format!(
+                "새로운 버전이 나왔습니다! 보스. 콘솔 창에 `cataly update` 명령어를 입력해주세요.\n\
+                 {} -> 99.0.0 https://github.com/{}/releases/tag/v99.0.0",
+                release::VERSION,
+                release::REPOSITORY
+            )
         );
-        assert!(notice(&mut memory, &v("99.0.0"), None).is_some());
-        assert!(notice(&mut memory, &v("99.0.0"), None).is_none(), "once");
-        assert!(notice(&mut memory, &v("99.1.0"), None).is_some());
+        assert!(!event.urgent);
+        assert!(notice(&mut memory, &release("v99.0.0"), None, &config).is_none());
+    }
+
+    #[test]
+    fn template_language_and_destinations_override() {
+        let text = format!(
+            "{DISCORD}[destinations.phone]\nkind = \"command\"\nargv = [\"true\"]\n\
+             [update]\nlanguage = \"en\"\ntemplate = \"new {{latest}} (was {{current}}): {{url}}\"\n\
+             destinations = [\"phone\", \"log\"]\n"
+        );
+        let config = config::parse(&text).unwrap();
+        let mut memory = Memory::new(JOB, false, Vec::new());
+        let event = notice(&mut memory, &release("v99.0.0"), None, &config).unwrap();
+        assert_eq!(event.destinations, ["phone"]);
+        assert!(
+            event
+                .text
+                .starts_with(&format!("new 99.0.0 (was {}): https://", release::VERSION)),
+            "{}",
+            event.text
+        );
+        let config = config::parse("[update]\nlanguage = \"en\"\n").unwrap();
+        let event = notice(&mut memory, &release("v99.2.0"), None, &config).unwrap();
+        assert!(
+            event
+                .text
+                .starts_with("A new version is out, boss. Run `cataly update` in a terminal.\n")
+        );
+        for bad in [
+            "[update]\ntemplate = \"{version}\"\n",
+            "[update]\nlanguage = \"fr\"\n",
+            "[update]\ndestinations = [\"nowhere\"]\n",
+        ] {
+            assert!(config::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// With the check off, no request reaches the release API.
+    #[tokio::test]
+    async fn switched_off_makes_no_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cfg = format!(
+            "{DISCORD}[update]\ncheck = false\nfirst_after = \"1s\"\napi_base = \"http://127.0.0.1:{port}\"\n"
+        );
+        let (ctx, _stop, dir) = crate::jobs::tests::ctx_with(&cfg, "update-off");
+        let jobs = Jobs { ctx };
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let root = dir.join("root");
+        let task = tokio::spawn(run(jobs, root, stop_rx));
+        let accepted = tokio::time::timeout(Duration::from_millis(2500), listener.accept()).await;
+        assert!(accepted.is_err(), "a request was made");
+        stop_tx.send(true).unwrap();
+        task.await.unwrap().unwrap();
     }
 }

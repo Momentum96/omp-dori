@@ -543,18 +543,40 @@ ignore = ["bridge"]
 
 ## `[update]` and `[usage]`
 
+Each newer stable release is announced once, never one you rolled back from. The notice only
+tells you; `cataly update` installs. It goes out like any job post (no mentions) and is not sent
+to the lead as work. Without `destinations` it goes to your home room: the `[discord]` home
+channel, else the `[telegram]` group (and topic) or your DM. With neither, it stays in the event
+log; for Slack, name a destination.
+
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `update.check` | boolean | `true` | | Daily check for a newer stable release; off means no request is ever made. |
 | `update.first_after` | duration | `"10m"` | 1s–24h | First check after the hub starts. |
 | `update.api_base` | string | GitHub's API | localhost only | Test override. |
+| `update.language` | string | `"ko"` | `ko`, `en` | Language of the default notice. |
+| `update.template` | string | see below | fields `{current}`, `{latest}`, `{url}`; `{{`/`}}` for braces | The notice wording; line breaks are kept. |
+| `update.destinations` | list of strings | your home room | names from `[destinations]`, `log` | Where the notice goes instead. |
 | `usage.enabled` | boolean | `false` | needs `endpoint` | Sends usage counts. There is no default collector. |
 | `usage.endpoint` | string | none | URL | OTLP/HTTP logs endpoint, such as `https://collector.example/v1/logs`. |
 | `usage.key_file` | string | none | absolute path | Owner-only file with the collector's key, sent as a bearer token. |
 
+Default notice (`ko`, then `en`):
+
+```text
+새로운 버전이 나왔습니다! 보스. 콘솔 창에 `cataly update` 명령어를 입력해주세요.
+{current} -> {latest} {url}
+
+A new version is out, boss. Run `cataly update` in a terminal.
+{current} -> {latest} {url}
+```
+
 ```toml
 [update]
 check = true
+language = "ko"
+# template = "Cataly {latest} is out (you have {current}): {url}"
+# destinations = ["phone"]
 ```
 
 ---
