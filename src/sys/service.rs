@@ -311,9 +311,7 @@ async fn install(
             path.display()
         ));
     }
-    let dir = path.parent().ok_or("the service file has no folder")?;
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    super::fs::write_atomic(path, definition(unit).as_bytes()).map_err(|e| e.to_string())?;
+    write_definition(path, unit)?;
     super::fs::write_atomic(marker, path.display().to_string().as_bytes())
         .map_err(|e| e.to_string())?;
     if cfg!(target_os = "macos") {
@@ -323,6 +321,44 @@ async fn install(
         manager.user(&["daemon-reload"]).await?;
         manager.user(&["enable", "--now", UNIT]).await
     }
+}
+
+fn write_definition(path: &Path, unit: &Unit<'_>) -> Result<(), String> {
+    let dir = path.parent().ok_or("the service file has no folder")?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    super::fs::write_atomic(path, definition(unit).as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Rewrites the service Cataly created with `unit` and has the manager read it again, so the next
+/// start runs this version's definition (update and rollback). `None` when Cataly created none.
+pub(crate) async fn refresh(layout: &Layout, unit: &Unit<'_>) -> Result<Option<PathBuf>, String> {
+    let path = file()?;
+    let marker = layout.service_marker();
+    let done = rewrite(&path, &marker, unit, &Manager::of_session()).await?;
+    Ok(done.then_some(path))
+}
+
+/// [`refresh`] at an explicit file, marker and manager; `false` when there is no marker.
+async fn rewrite(
+    path: &Path,
+    marker: &Path,
+    unit: &Unit<'_>,
+    manager: &Manager,
+) -> Result<bool, String> {
+    if !marker.exists() {
+        return Ok(false);
+    }
+    write_definition(path, unit)?;
+    if cfg!(target_os = "macos") {
+        // launchd reads a plist only when it is bootstrapped; the hub is stopped at this point.
+        let target = format!("{}/{LABEL}", gui_domain());
+        let _ = manager.user(&["bootout", &target]).await;
+        let plist = path.display().to_string();
+        manager.user(&["bootstrap", &gui_domain(), &plist]).await?;
+    } else {
+        manager.user(&["daemon-reload"]).await?;
+    }
+    Ok(true)
 }
 
 /// Stops, disables and removes the service Cataly created; anything else is left alone.
@@ -349,7 +385,10 @@ pub(crate) async fn disable(layout: &Layout) -> Result<Option<PathBuf>, String> 
 
 /// Starts the hub through the service Cataly created (used by the restart option).
 pub(crate) async fn start() -> Result<(), String> {
-    let manager = Manager::of_session();
+    start_with(&Manager::of_session()).await
+}
+
+async fn start_with(manager: &Manager) -> Result<(), String> {
     if cfg!(target_os = "macos") {
         let target = format!("{}/{LABEL}", gui_domain());
         manager.user(&["kickstart", &target]).await
@@ -552,6 +591,60 @@ mod tests {
         assert!(err.contains("Failed to connect to bus"), "{err}");
         if !cfg!(target_os = "macos") {
             assert!(err.contains("XDG_RUNTIME_DIR is not set"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rewrites_and_reloads_before_start_only_with_the_marker() {
+        let dir = scratch("service-refresh");
+        let log = dir.join("calls");
+        let fake = dir.join("fake-manager");
+        std::fs::write(
+            &fake,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        make_executable(&fake);
+        let manager = Manager::new(&fake.display().to_string(), |_| None);
+        let file = dir.join("units/cataly.service");
+        let marker = dir.join("marker");
+        let env_file = dir.join("service.env");
+        let line = path_line([Path::new("/h/.bun/bin")]);
+
+        // No marker: nothing is written and the manager is not called.
+        assert!(
+            !rewrite(&file, &marker, &unit(&line, &env_file), &manager)
+                .await
+                .unwrap()
+        );
+        assert!(!file.exists());
+        assert!(!log.exists());
+
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "old text").unwrap();
+        std::fs::write(&marker, file.display().to_string()).unwrap();
+        assert!(
+            rewrite(&file, &marker, &unit(&line, &env_file), &manager)
+                .await
+                .unwrap()
+        );
+        start_with(&manager).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            definition(&unit(&line, &env_file))
+        );
+        let calls = std::fs::read_to_string(&log).unwrap();
+        if cfg!(target_os = "macos") {
+            let domain = format!("gui/{}", super::super::own_uid());
+            assert_eq!(
+                calls,
+                format!(
+                    "bootout {domain}/{LABEL}\nbootstrap {domain} {}\nkickstart {domain}/{LABEL}\n",
+                    file.display()
+                )
+            );
+        } else {
+            assert_eq!(calls, "--user daemon-reload\n--user start cataly.service\n");
         }
     }
 }

@@ -14,6 +14,7 @@ use super::client::{Client, ClientError};
 use super::{Failure, exit, out};
 use crate::config::{Config, Language};
 use crate::proto::{Status, method};
+use crate::sys::command::{KILL_GRACE, Output, Spec};
 use crate::sys::install::{self as layout_ops, Layout, Staged};
 use crate::sys::lock::{self, HubLock, LockOutcome};
 use crate::sys::paths::Paths;
@@ -74,6 +75,7 @@ pub(crate) fn run(p: &Parsed, paths: &Paths) -> Option<Result<(), Failure>> {
         ["rollback"] => block_on(rollback(p, paths)),
         ["uninstall"] => block_on(uninstall(p, paths)),
         ["service", verb @ ("enable" | "disable")] => block_on(service(*verb == "enable", paths)),
+        ["service", "refresh"] => block_on(refresh_service(paths)),
         _ => return None,
     };
     Some(outcome.into())
@@ -482,6 +484,7 @@ fn busy_held(language: Language, busy: &str) -> String {
 /// Starts the hub through the user service Cataly created, else detached, and waits for it.
 async fn start_and_wait(l: &Layout, paths: &Paths, version: &str) -> Result<(), String> {
     if l.service_marker().exists() {
+        rewrite_service(l, version).await?;
         crate::sys::service::start().await?;
     } else {
         use std::os::unix::process::CommandExt;
@@ -502,6 +505,58 @@ async fn start_and_wait(l: &Layout, paths: &Paths, version: &str) -> Result<(), 
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     Err(format!("no hub reported {version} within 30 s"))
+}
+
+/// How long `version`'s binary may take to rewrite the service definition.
+const REFRESH_WAIT: Duration = Duration::from_secs(60);
+/// What that binary needs to find this user's files and service manager, besides the variables
+/// every child gets.
+const REFRESH_ENV: [&str; 6] = [
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "PI_CODING_AGENT_DIR",
+];
+
+/// Has `version`'s own binary rewrite the service definition and the manager reload it, so the
+/// hub starts with the definition that version writes. A binary from before `service refresh`
+/// keeps the definition as it is.
+async fn rewrite_service(l: &Layout, version: &str) -> Result<(), String> {
+    let binary = l.version_dir(version).join(layout_ops::BINARY);
+    if !release::candidate_report(&binary).await?.service_refresh {
+        return Ok(());
+    }
+    let argv = [
+        binary.display().to_string(),
+        "service".into(),
+        "refresh".into(),
+    ];
+    let values: Vec<(&str, String)> = REFRESH_ENV
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (*k, v)))
+        .collect();
+    let env: Vec<(&str, &str)> = values.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let done = crate::sys::command::run(&Spec {
+        argv: &argv,
+        cwd: None,
+        env: &env,
+        timeout: REFRESH_WAIT,
+        kill_grace: KILL_GRACE,
+        output_cap: 64 * 1024,
+        output: Output::Capture,
+    })
+    .await
+    .map_err(|e| format!("the service of {version} was not rewritten: {e}"))?;
+    if done.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&done.stderr);
+    Err(format!(
+        "the service of {version} was not rewritten: {}",
+        said.lines().next().unwrap_or("no message")
+    ))
 }
 
 /// `cataly update [--from <folder> | --tag <tag>] [--no-restart]`.
@@ -720,20 +775,56 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
     }
 }
 
-/// Writes and starts the user service that runs the installed hub (the caller checked it is
-/// installed) with `config`. Returns the service file and notes on its PATH and provider keys.
-pub(super) async fn enable_service(
-    l: &Layout,
+/// `cataly service refresh`: rewrites the service Cataly created with this version's definition
+/// and has the manager read it again, without starting it.
+async fn refresh_service(paths: &Paths) -> Outcome {
+    let l = match Layout::of_running() {
+        Ok(l) => l,
+        Err(e) => return Outcome::Held(e),
+    };
+    if !l.service_marker().exists() {
+        return Outcome::Done("no service created by Cataly; nothing changed".into());
+    }
+    let config = match crate::config::load(&paths.config_file) {
+        Ok(c) => c,
+        Err(e) => {
+            return Outcome::Held(format!(
+                "{} is not a valid config ({})",
+                paths.config_file.display(),
+                crate::config::describe(&e)
+            ));
+        }
+    };
+    let done = match service_inputs(paths, &config) {
+        Ok((path_line, env_path, _)) => {
+            let unit = crate::sys::service::Unit {
+                command: &l.command,
+                path: &path_line,
+                env_file: &env_path,
+            };
+            crate::sys::service::refresh(&l, &unit).await
+        }
+        Err(e) => Err(e),
+    };
+    match done {
+        Ok(Some(file)) => Outcome::Done(format!("service rewritten at {}", file.display())),
+        Ok(None) => Outcome::Done("no service created by Cataly; nothing changed".into()),
+        Err(e) => Outcome::Held(e),
+    }
+}
+
+/// What the service definition carries for `config`: its PATH (the folders of the tools the hub
+/// runs, as found now) and the provider-key file, made if absent.
+fn service_inputs(
     paths: &Paths,
     config: &crate::config::Config,
-) -> Result<(PathBuf, Vec<String>), String> {
+) -> Result<(String, PathBuf, crate::sys::service::EnvFile), String> {
     if crate::omp::resolve(&config.omp.path).is_none() {
         return Err(format!(
             "OMP ('{}') is not an executable file or on PATH; install it or set [omp] path",
             config.omp.path
         ));
     }
-    // The folders of the tools the hub runs, as found now.
     let tools = [
         config.omp.path.as_str(),
         "bun",
@@ -751,6 +842,17 @@ pub(super) async fn enable_service(
     let keys = crate::sys::service::env_file(&env_path, &config.sessions.credentials, |k| {
         std::env::var(k).ok()
     })?;
+    Ok((path_line, env_path, keys))
+}
+
+/// Writes and starts the user service that runs the installed hub (the caller checked it is
+/// installed) with `config`. Returns the service file and notes on its PATH and provider keys.
+pub(super) async fn enable_service(
+    l: &Layout,
+    paths: &Paths,
+    config: &crate::config::Config,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let (path_line, env_path, keys) = service_inputs(paths, config)?;
     let unit = crate::sys::service::Unit {
         command: &l.command,
         path: &path_line,

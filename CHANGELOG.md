@@ -12,6 +12,11 @@
 - Voice over WebRTC no longer stops at the start of a call. Setting up a WebRTC session takes the
   provider a few seconds, and voice used to give up as soon as more than 3 s of your audio was
   waiting; it now keeps the newest 3 s until the session is up and sends them then.
+- `cataly update` and `cataly rollback` rewrite the user service Cataly created (systemd unit or
+  launchd agent) with the definition of the version they switch to, and have the service manager
+  read it again before they start the hub, so a new definition (such as the single malloc arena)
+  needs no `cataly service enable`. The new `cataly service refresh` does this; a version from
+  before it keeps the definition as it is.
 
 ## 0.1.2 (2026-11-26)
 

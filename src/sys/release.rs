@@ -60,6 +60,10 @@ pub(crate) struct Report {
     pub(crate) omp_minimum: String,
     /// The bridge protocol the extension file speaks.
     pub(crate) extension_protocol: u64,
+    /// The binary has `cataly service refresh`, which update and rollback run before they start
+    /// it through the user service. Reports from earlier versions lack it.
+    #[serde(default)]
+    pub(crate) service_refresh: bool,
 }
 
 /// This binary's report.
@@ -70,6 +74,7 @@ pub(crate) fn report() -> Report {
         target: TARGET.into(),
         omp_minimum: crate::omp::MINIMUM.to_string(),
         extension_protocol: crate::hub::bridge::PROTOCOL,
+        service_refresh: true,
     }
 }
 

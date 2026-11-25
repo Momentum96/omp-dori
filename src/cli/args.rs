@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 54] = [
+pub(crate) const COMMANDS: [Spec; 55] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -163,6 +163,13 @@ pub(crate) const COMMANDS: [Spec; 54] = [
         flags: &[],
         values: &[],
         summary: "stop and remove the user service Cataly created",
+    },
+    Spec {
+        path: &["service", "refresh"],
+        args: &[],
+        flags: &[],
+        values: &[],
+        summary: "rewrite the user service Cataly created from this version (update and rollback run it)",
     },
     Spec {
         path: &["setup"],
