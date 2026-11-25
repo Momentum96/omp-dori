@@ -28,7 +28,7 @@ use crate::relay::pipeline::{Arrival, Pipeline, Step};
 use crate::relay::text::{self, Checks, DISCORD_LIMIT};
 use crate::relay::{Facts, Inbound, PartOutcome, Relay};
 use crate::store::Store;
-use crate::store::relay::{Arrived, QueueRow, RelayDone, RelayWrite};
+use crate::store::relay::{QueueRow, RelayDone, RelayWrite};
 use crate::sys::now_ms;
 
 /// The relay's store key.
@@ -835,15 +835,18 @@ impl<T: Runtime> Intake<T> {
     }
 
     /// Queues an owner message or passes anything else (DISC-IN req. 12-14, 22, 24). `read_at` is a
-    /// live message's frame read time, `None` for one found by a catch-up read.
+    /// live message's frame read time, `None` for one found by a catch-up read. A queued message
+    /// wakes the round from the pipeline ([`Pipeline::arrive`]).
     async fn take(
         &self,
         raw: &Value,
         room: Snowflake,
         parent: Option<Snowflake>,
         read_at: Option<Instant>,
-    ) -> Option<Arrived> {
-        let (message, _) = types::ids(raw)?;
+    ) {
+        let Some((message, _)) = types::ids(raw) else {
+            return;
+        };
         let gate = types::gate(raw, self.owner);
         if self.settings.others.contains(&room) {
             self.track_others(raw, room, message, gate == Gate::Pass)
@@ -858,7 +861,6 @@ impl<T: Runtime> Intake<T> {
                         seq: message.seq(),
                     })
                     .await;
-                None
             }
             Gate::NoContent => {
                 let reason = "an owner message arrived without text: enable Message Content Intent"
@@ -871,7 +873,6 @@ impl<T: Runtime> Intake<T> {
                     })
                     .await;
                 self.alert_held(room, &reason);
-                None
             }
             Gate::Owner => {
                 let arrival = Arrival {
@@ -881,13 +882,9 @@ impl<T: Runtime> Intake<T> {
                     parent: parent.map(|p| p.to_string()),
                     raw: raw.to_string(),
                 };
-                match self.pipeline.arrive(arrival, read_at, &self.wake).await {
-                    Ok(a) => Some(a),
-                    Err(e) => {
-                        log::warn("owner message not queued", &[("error", &e)]);
-                        self.flag(true).await;
-                        None
-                    }
+                if let Err(e) = self.pipeline.arrive(arrival, read_at, &self.wake).await {
+                    log::warn("owner message not queued", &[("error", &e)]);
+                    self.flag(true).await;
                 }
             }
         }
@@ -908,15 +905,7 @@ impl<T: Runtime> Intake<T> {
                 None => return,
             },
         };
-        if let Some(arrived) = self.take(&raw, channel, parent, Some(read_at)).await {
-            // Debug builds only: the crash test of acceptance check 4 stops here, after the arrival
-            // commit and before the hand-off.
-            #[cfg(debug_assertions)]
-            if arrived == Arrived::Queued {
-                crate::sys::fault::point("relay_after_arrival");
-            }
-            self.wake.notify_one();
-        }
+        self.take(&raw, channel, parent, Some(read_at)).await;
         self.shared.set(|h| h.last_event_ms = Some(now_ms()));
     }
 

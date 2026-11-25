@@ -210,6 +210,12 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             RelayDone::Arrived(a) => a,
             _ => Arrived::Handled,
         });
+        // Debug builds only: the crash test of acceptance check 4 stops here, after the arrival
+        // commit and before the hand-off.
+        #[cfg(debug_assertions)]
+        if matches!(arrived, Ok(Arrived::Queued)) {
+            crate::sys::fault::point("relay_after_arrival");
+        }
         self.settle_live(
             key,
             arrived.as_ref().ok().copied(),
