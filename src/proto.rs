@@ -61,6 +61,9 @@ pub(crate) mod method {
     pub(crate) const SLACK_RELEASE: &str = "slack.release";
     pub(crate) const SLACK_RESET: &str = "slack.reset";
     pub(crate) const SLACK_UPLOAD: &str = "slack.upload";
+    pub(crate) const VOICE_STATUS: &str = "voice.status";
+    pub(crate) const VOICE_RESTART: &str = "voice.restart";
+    pub(crate) const VOICE_REPLY: &str = "voice.reply";
     /// A held slot request (a stream for the life of the connection).
     pub(crate) const SLOT: &str = "slot";
 }

@@ -491,6 +491,59 @@ fn lane(hub: &mut Client, p: &Parsed, as_json: bool) -> Result<(), Failure> {
     Ok(())
 }
 
+/// `voice status`, `voice restart` and `voice reply`.
+fn voice(hub: &mut Client, p: &Parsed, verb: &str, as_json: bool) -> Result<(), Failure> {
+    let (m, params) = match verb {
+        "status" => (method::VOICE_STATUS, json!({})),
+        "restart" => (method::VOICE_RESTART, json!({})),
+        _ => (
+            method::VOICE_REPLY,
+            json!({
+                "request": p.args.first(),
+                "reply": p.args.get(1),
+                "subject": p.value("--subject"),
+            }),
+        ),
+    };
+    let v = hub.call(m, params, CALL_TIMEOUT)?;
+    if as_json {
+        out::json(&v);
+        return Ok(());
+    }
+    let field = |k: &str| match v.get(k) {
+        Some(Value::String(s)) => s.clone(),
+        None | Some(Value::Null) => "-".into(),
+        Some(other) => other.to_string(),
+    };
+    match verb {
+        "status" => {
+            out::line(&format!("voice    {}", field("state")));
+            if v.get("reason").is_some_and(|r| !r.is_null()) {
+                out::line(&format!("reason   {}", field("reason")));
+            }
+            for k in ["transport", "held", "call", "present", "replies_waiting"] {
+                if v.get(k).is_some() {
+                    out::line(&format!("{k:<8} {}", field(k)));
+                }
+            }
+            if let Some(t) = v.get("today").filter(|t| t.is_object()) {
+                out::line(&format!(
+                    "today    {} s speech, {} sessions, {:.2} USD",
+                    t["speech_seconds"].as_f64().unwrap_or(0.0).round(),
+                    t["sessions"],
+                    t["spend_usd"].as_f64().unwrap_or(0.0)
+                ));
+            }
+        }
+        "restart" => out::line(&match v.get("lifted").and_then(Value::as_str) {
+            Some(r) => format!("voice hold lifted ({r}); voice starts again"),
+            None => "voice starts again".into(),
+        }),
+        _ => out::line(&format!("reply queued for {}", field("request"))),
+    }
+    Ok(())
+}
+
 /// `health`, `limits`, `quota`, `pr` and `lead` verbs; `None` for anything else.
 fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(), Failure>> {
     if let Some(done) = lead::verbs(p, hub, as_json) {
@@ -503,6 +556,7 @@ fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(),
     let result = match p.spec.path {
         ["health"] => health(hub, as_json),
         ["lane"] => lane(hub, p, as_json),
+        ["voice", verb] => voice(hub, p, verb, as_json),
         ["limits"] => limits(hub, p.flag("--refresh"), as_json),
         ["quota"] => hub
             .call(method::QUOTA, json!({}), CALL_TIMEOUT)

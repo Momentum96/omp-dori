@@ -47,7 +47,7 @@ pub struct Prices {
 }
 
 /// Validated voice settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The Discord guild (from the Discord settings).
     pub guild: u64,

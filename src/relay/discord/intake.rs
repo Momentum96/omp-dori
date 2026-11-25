@@ -14,6 +14,7 @@ use tokio::sync::{Notify, broadcast, watch};
 
 use super::gateway::{self, Gateway, Handler, WsUrl};
 use super::questions::Cards;
+use super::tap::{DISPATCHES, Seen, Tap};
 use super::types::{self, Gate};
 use super::{Rest, RestError, Snowflake, nonce};
 use crate::config::{Config, DiscordSettings};
@@ -63,6 +64,8 @@ pub(crate) struct Env<T: Runtime> {
     /// The REST client for the token the config names (shared with job posting).
     pub(crate) rest: RestFor,
     pub(crate) spill_dir: std::path::PathBuf,
+    /// Voice's tap on the Gateway connection (voice builds only).
+    pub(crate) tap: Option<Arc<Tap>>,
 }
 
 /// The Discord side of the relay trait.
@@ -265,6 +268,23 @@ pub(crate) struct Intake<T: Runtime> {
     typed: Mutex<Option<Instant>>,
     pub(super) cards: Cards,
     pub(super) events: Events,
+    /// Voice's tap and whether the config wanted it at start.
+    tap: (Option<Arc<Tap>>, bool),
+}
+
+/// A task aborted when its handle is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T: Runtime> Intake<T> {
+    fn active_tap(&self) -> Option<&Tap> {
+        self.tap.0.as_deref().filter(|_| self.tap.1)
+    }
 }
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -334,7 +354,10 @@ impl<T: Runtime> Intake<T> {
             h.buttons = buttons;
             h.reason = None;
         });
+        let voice = env.tap.as_ref().is_some_and(|t| (t.wanted)(config));
         let intake = Arc::new(Self {
+            token_intents: (token, gateway::intents(settings.follow_threads, voice)),
+            tap: (env.tap.clone(), voice),
             events: Arc::clone(&env.events),
             settings: settings.clone(),
             rest,
@@ -347,7 +370,6 @@ impl<T: Runtime> Intake<T> {
             lead: Arc::clone(&env.lead),
             shared: Arc::clone(shared),
             gateway_url,
-            token_intents: (token, gateway::intents(settings.follow_threads)),
             scope: Mutex::new(scope),
             wake: Notify::new(),
             reads: Mutex::default(),
@@ -445,16 +467,18 @@ impl<T: Runtime> Intake<T> {
             url: self.gateway_url.clone(),
             token: self.token_intents.0.clone(),
             intents: self.token_intents.1,
+            ops: self.active_tap().map(|t| Arc::clone(&t.ops)),
         };
         let (fatal_tx, mut fatal_rx) = tokio::sync::oneshot::channel();
-        {
+        // The connection ends with this run, so a restarted intake never meets an old one.
+        let _connection = {
             let me = Arc::clone(&self);
             let stop = shutdown.clone();
-            tokio::spawn(async move {
+            AbortOnDrop(tokio::spawn(async move {
                 let end = gateway.run(&me, stop).await;
                 let _ = fatal_tx.send(end);
-            });
-        }
+            }))
+        };
         self.shared.set(|h| h.state = "connecting".into());
         let mut events = self.lead.follow();
         let settings = self.settings.clone();
@@ -476,7 +500,9 @@ impl<T: Runtime> Intake<T> {
                     };
                 }
                 _ = config.changed() => {
-                    if config.borrow_and_update().discord != settings {
+                    let config = Arc::clone(&config.borrow_and_update());
+                    let voice = self.tap.0.as_ref().is_some_and(|t| (t.wanted)(&config));
+                    if config.discord != settings || voice != self.tap.1 {
                         return Stop::Again;
                     }
                 }
@@ -1170,6 +1196,9 @@ impl<T: Runtime> Handler for Arc<Intake<T>> {
             h.reason = None;
         });
         log::info("Discord Gateway ready", &[("resumed", &resumed)]);
+        if let (Some(tap), Ok(bot)) = (self.active_tap(), self.bot.to_string().parse::<u64>()) {
+            (tap.seen)(Seen::Up(bot));
+        }
         self.wake.notify_one();
     }
 
@@ -1185,12 +1214,20 @@ impl<T: Runtime> Handler for Arc<Intake<T>> {
                     tokio::spawn(async move { me.press(press).await });
                 }
             }
+            kind if DISPATCHES.contains(&kind) => {
+                if let Some(tap) = self.active_tap() {
+                    (tap.seen)(Seen::Dispatch(kind, &data));
+                }
+            }
             // Edits and deletions are never delivered (DISC-IN req. 15).
             _ => {}
         }
     }
 
     fn link(&self, down: Option<&str>) {
+        if let (Some(tap), Some(_)) = (self.active_tap(), down) {
+            (tap.seen)(Seen::Down);
+        }
         self.shared.set(|h| match down {
             Some(why) => {
                 if h.state == "connected" {

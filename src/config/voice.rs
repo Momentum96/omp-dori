@@ -27,31 +27,20 @@ pub(crate) enum VoiceConfig {
 }
 
 impl VoiceConfig {
-    /// Why voice is off although enabled, naming each field; for the hub's start-up log.
+    /// Why voice is off although enabled, naming each field. A voice build's voice task reports
+    /// this itself.
+    #[cfg(not(feature = "voice"))]
     pub(crate) fn refusal(&self) -> Option<String> {
         match self {
             Self::Refused(errors) => Some(super::describe(errors)),
             Self::Off => None,
-            #[cfg(feature = "voice")]
-            Self::On(on) => {
-                // The settings are valid, but this build's hub does not start calls yet: voice
-                // stays off (fail closed) and the log says so.
-                Some(format!(
-                    "valid {} settings (key file {}), but the hub does not start voice calls in \
-                     this build",
-                    on.settings.transport.name(),
-                    on.key_file
-                        .as_ref()
-                        .map_or_else(|| "default".to_string(), |p| p.display().to_string())
-                ))
-            }
         }
     }
 }
 
 /// Valid voice settings and where the provider key lives.
 #[cfg(feature = "voice")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VoiceOn {
     pub(crate) settings: cataly_voice::Settings,
     /// Default `<config dir>/secrets/voice-key`.

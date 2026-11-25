@@ -361,6 +361,8 @@ impl Conn {
             .create_key_package()
             .map_err(|e| ConnEvent::Fatal(format!("DAVE key package failed: {e}")))?;
         self.dave = Some(session);
+        // A fresh group is an encryption change: Discord passes media through while it forms.
+        self.receiver.group_changed(Instant::now());
         self.send_binary(26, &package)
             .await
             .map_err(ConnEvent::Down)
@@ -536,12 +538,19 @@ impl Conn {
         };
         let owner = self.join.owner;
         let now = Instant::now();
-        let audio = match self.dave.as_mut().filter(|d| d.is_ready()) {
-            Some(dave) => {
+        // While DAVE is negotiated but its group is not ready nothing decrypts, so a plaintext frame
+        // is taken only within the window after the last group change (VOICE req. 58).
+        let audio = match self.dave.as_mut() {
+            Some(dave) if dave.is_ready() => {
                 let mut decrypt =
                     |p: &[u8]| -> Option<Vec<u8>> { dave.decrypt(owner, MediaType::AUDIO, p).ok() };
                 self.receiver
                     .frame(r.ssrc, &r.frame, Some(&mut decrypt), now)
+            }
+            Some(_) => {
+                let mut pending = |_: &[u8]| -> Option<Vec<u8>> { None };
+                self.receiver
+                    .frame(r.ssrc, &r.frame, Some(&mut pending), now)
             }
             None => self.receiver.frame(r.ssrc, &r.frame, None, now),
         };

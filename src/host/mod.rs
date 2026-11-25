@@ -12,6 +12,8 @@ pub(crate) mod inbox;
 pub(crate) mod lead;
 #[cfg(test)]
 pub(crate) mod testing;
+#[cfg(feature = "voice")]
+pub(crate) mod voice;
 
 use std::path::PathBuf;
 use std::sync::Arc;
