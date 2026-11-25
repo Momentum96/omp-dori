@@ -113,6 +113,11 @@ jobs:
           echo "binary bytes (${{ matrix.target }}): $(wc -c < "$b" | tr -d ' ')"
           mkdir -p out
           cp "$b" "out/cataly-${{ needs.gate.outputs.version }}-${{ matrix.target }}"
+      # The notices list the crates linked for this target (docs/third-party.md); the script takes the
+      # Rust target triple. Each target ships its own file beside its binary.
+      - name: Third-party notices
+        shell: bash
+        run: sh scripts/third-party-notices.sh ${{ matrix.triple }} "out/THIRD-PARTY-NOTICES-${{ matrix.target }}.txt"
       - id: hash
         shell: bash
         run: |
@@ -139,7 +144,7 @@ jobs:
           pattern: binary-*
           path: assets
           merge-multiple: true
-      - name: Re-check the handed-over digests (IR req. 45), write the extension, install.sh, SHA256SUMS and its signature
+      - name: Re-check the handed-over digests (IR req. 45), write the extension, install.sh, LICENSE, SHA256SUMS and its signature
         shell: bash
         env:
           V: ${{ needs.gate.outputs.version }}
@@ -155,6 +160,7 @@ jobs:
           chmod 755 "cataly-$V-linux-x64"
           "./cataly-$V-linux-x64" extension > "cataly-$V.ts"
           sed "s/@RELEASE_KEY@/$RELEASE_KEY/" ../install.sh > install.sh
+          cp ../LICENSE LICENSE
           for f in $(ls | LC_ALL=C sort); do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done > SHA256SUMS
           umask 077
           printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/key.pem"

@@ -1239,3 +1239,56 @@ Review findings Safety 1, 3, 4, 5, 6 and Design 3, 12, 13.
   later no process naming those sandboxes and no hub of this checkout ran; the same for
   `tests/tern.rs` (two blocks, fake OMP). Every wrapper and program PID the two runs recorded (16)
   was gone. Both suites pass in full with the leak check on.
+
+# Merge of fix/spend, fix/authority, ci/voice and wip/first-run (MergeAll, 2026-11-26)
+
+## Conflicts
+
+- `omp::launch::overlay`: fix/spend pins the five saved-reset keys from `NO_REDEEM`; fix/authority
+  adds `tools.approval.eval: deny`. The overlay keeps both (both unit tests run unchanged).
+- `tests/tern.rs`: fix/spend's extra-usage refusal test and ci/voice's `lead_transcript` comment.
+- `extension/cataly.ts` merged without conflict: fix/authority's bridge (subagent veto, socket
+  folder check, OMP types) with ci/voice's command chain behind the hello answer; 599 lines.
+- Build notes and the clean-room log keep every branch's sections.
+
+## Timing bounds under load
+
+- `contract_session::bridge_in_stock_omp` (the bridge's import and factory inside stock OMP) and
+  the Bun test "an ordinary session ... (check 11)" (the inert bridge's start-up) each asserted a
+  5 ms bound on one measurement. Under host load (a parallel `cargo test`, other agents' builds)
+  one run can be descheduled for longer than the whole cost while the code is unchanged: fix/spend
+  saw `bridge_in_stock_omp` fail only under parallel load and pass alone.
+- Both now measure seven times and assert the 5 ms bound on the fastest run, and print every
+  figure. Load only adds time, so the fastest run is the closest to the code's own cost; a real
+  regression slows every run and still fails. The contract case starts stock OMP seven times
+  with the probe (each run also re-checks the inert registrations).
+- Measured on this merge (`contract_session` alone, release, stock OMP 19.1.1, host busy with
+  other agents): 5.84, 3.07, 1.62, 1.58, 1.72, 1.63, 1.34 ms; the first run alone would have
+  failed the bound. The Bun test's runs: 0.003-0.037 ms.
+- Checks: `cargo test --no-fail-fast` twice (370 passed, 5 ignored) and with `--workspace
+  --features voice` twice (426 passed, 7 ignored); each contract binary alone in release with
+  `CATALY_CONTRACT_OMP=1` (`contract` 1, `contract_session` 5, `contract_discord` 3,
+  `contract_lanes` 3, `contract_relays` 1, `contract_tern` 5); `bun test` 13 passed;
+  `bun run typecheck` clean; no process naming a `/tmp/cy-` sandbox left after any run.
+
+## The owner's local day (`profile_check_and_revert`)
+
+- `tests/coord.rs` `profile_check_and_revert` failed on every run between 00:00 and 09:00 KST: the
+  check refused today's entries as `future date`. The test takes today from `date` (local), the
+  hub from `jiff::Zoned::now()`, and jiff without its `tz-system` feature answers UTC for the
+  system zone. COORD req. 52 counts snapshots by the local day, and the away digest prints local
+  times through the same system zone, so both were in UTC on every machine.
+- `jiff` now enables `tz-system` (`TZ`, else `/etc/localtime`). It brings no crate on Linux or
+  macOS (`windows-link` on Windows only; `Cargo.lock` gains that edge, no package).
+
+## CI and release
+
+- `ci.yml` installs the bridge's locked dev dependencies (`bun install --frozen-lockfile`, OMP's
+  types and TypeScript) and runs `bun test` and `bun run typecheck` in `extension/` on both
+  targets; the "when defined" guard is gone now that fix/authority added the script.
+- `release.yml` writes each target's third-party notices in the build job
+  (`scripts/third-party-notices.sh` with the target triple, which the script needs for
+  `cargo fetch --target`; `linux-x64` is not a triple) as `THIRD-PARTY-NOTICES-<target>.txt`, so
+  the two targets' files do not collide when the publish job merges the artifacts. The publish job
+  adds `LICENSE`; both are listed in `SHA256SUMS` and uploaded with the other assets. Neither name
+  matches `cataly-<version>-<target>`, so `install.sh` and `cataly update` still find one binary.

@@ -23,18 +23,24 @@ function fakeHub(role: string, sent: any[], connects: { n: number }): Deps["conn
 	};
 }
 
+// The 5 ms bound is asserted on the fastest of several runs: one run under host load can stall
+// for longer while the code is fine (docs/build-notes.md, "Timing bounds under load").
 test("an ordinary session registers only start and switch and never connects (check 11)", async () => {
-	const pi = fakePi();
-	const connects = { n: 0 };
-	const t0 = performance.now();
-	bridge(pi, { env: {}, connect: fakeHub("lead", [], connects), uid: () => 1000 });
-	await pi.emit("session_start", { type: "session_start" }, ctxOf(pi));
-	const cost = performance.now() - t0;
-	expect([...pi.handlers.keys()].sort()).toEqual(["session_start", "session_switch"]);
-	expect(connects.n).toBe(0);
-	expect(pi.tools.length).toBe(0);
+	const costs: number[] = [];
+	for (let run = 0; run < 7; run++) {
+		const pi = fakePi();
+		const connects = { n: 0 };
+		const t0 = performance.now();
+		bridge(pi, { env: {}, connect: fakeHub("lead", [], connects), uid: () => 1000 });
+		await pi.emit("session_start", { type: "session_start" }, ctxOf(pi));
+		costs.push(performance.now() - t0);
+		expect([...pi.handlers.keys()].sort()).toEqual(["session_start", "session_switch"]);
+		expect(connects.n).toBe(0);
+		expect(pi.tools.length).toBe(0);
+	}
+	const cost = Math.min(...costs);
 	expect(cost).toBeLessThan(5);
-	console.log(`inert start-up cost: ${cost.toFixed(3)} ms`);
+	console.log(`inert start-up cost: ${cost.toFixed(3)} ms (fastest of ${costs.map(c => c.toFixed(3)).join(", ")})`);
 });
 
 test("a launched session is accepted, gets its tool and guidance, forwards calls and the stop", async () => {

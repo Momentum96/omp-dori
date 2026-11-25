@@ -54,21 +54,18 @@ jobs:
       - name: Test (voice)
         if: ${{ !cancelled() }}
         run: cargo test --locked --no-fail-fast --workspace --features voice
+      - name: Bridge dependencies (Bun, OMP's types for the type check)
+        if: ${{ !cancelled() }}
+        working-directory: extension
+        run: bun install --frozen-lockfile
       - name: Bridge tests (Bun)
         if: ${{ !cancelled() }}
         working-directory: extension
         run: bun test
-      # Runs once `extension/package.json` defines a `typecheck` script.
       - name: Bridge type check (Bun)
-        if: ${{ !cancelled() && hashFiles('extension/package.json') != '' }}
+        if: ${{ !cancelled() }}
         working-directory: extension
-        shell: bash
-        run: |
-          if bun -e 'process.exit(require("./package.json").scripts?.typecheck ? 0 : 1)'; then
-            bun run typecheck
-          else
-            echo "extension/package.json defines no typecheck script"
-          fi
+        run: bun run typecheck
       - name: Release build (voice)
         run: cargo build --locked --release --features voice
       - name: Binary size (voice)

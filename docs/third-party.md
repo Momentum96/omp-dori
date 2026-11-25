@@ -11,7 +11,7 @@ no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.
 | rusqlite | 0.37 | MIT (bundled SQLite: public domain) | https://crates.io/crates/rusqlite | `bundled`: no system SQLite; `backup`: SQLite's online backup for the consistent store snapshot of the home backup (decision 16) |
 | ring | 0.17 | Apache-2.0 AND ISC | https://crates.io/crates/ring | none beyond defaults off: SHA-256 (condition-job output, config and receipt digests); `rand::SystemRandom` (the operating system's secure generator) for the secure tokens of the session host: single-use launch tokens (`CATALY_LAUNCH`), session handles and delivery IDs (`host::random_hex`) |
 | toml | 0.9 | MIT OR Apache-2.0 | https://crates.io/crates/toml | `std`, `parse`, `serde`: reading the config (no writer) |
-| jiff | 0.2 | Unlicense OR MIT | https://crates.io/crates/jiff | `std`, `tzdb-zoneinfo`: IANA zones from the system zoneinfo, DST gaps and folds |
+| jiff | 0.2 | Unlicense OR MIT | https://crates.io/crates/jiff | `std`, `tzdb-zoneinfo`: IANA zones from the system zoneinfo, DST gaps and folds; `tz-system`: the machine's own zone (`/etc/localtime`, or `TZ`) for the owner's local day and local times (no extra crate on Linux or macOS) |
 | rustix | 1.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://crates.io/crates/rustix | `std`, `fs`, `process`, `termios`: `statvfs`, `getuid`, `kill(SIGTERM)` to own children, `O_NOFOLLOW`, echo off for the hidden token prompt |
 | hyper | 1.13 | MIT | https://crates.io/crates/hyper | `client`, `http1`: the HTTP/1.1 client under `relay::http`. Replaces reqwest by the measurement `DESIGN.md` 10.2 asked for (`docs/measurements.md`). |
 | hyper-util | 0.1 | MIT | https://crates.io/crates/hyper-util | `tokio`: the tokio I/O adapter for hyper; no pool or legacy client |
@@ -64,9 +64,12 @@ The fake `gh` and fake `omp` in `tests/support/` are POSIX shell scripts written
 `cargo metadata --locked --features voice` for one target: every crate linked into the release
 binary (normal dependencies, not build scripts, proc macros or dev-dependencies), its version and
 licence, and the licence and notice files the crate ships. It needs cargo and jq. The release
-workflow should run it once per target before packing, adding this step to the build job and the
-file to the archive:
+workflow's build job runs it once per target with that target's Rust triple and ships the file
+beside the binary as `THIRD-PARTY-NOTICES-<target>.txt` (`linux-x64`, `darwin-arm64`); the publish
+job adds `LICENSE`. Both are listed in `SHA256SUMS` like every other asset.
 
 ```yaml
-      - run: sh scripts/third-party-notices.sh ${{ matrix.target }} dist/THIRD-PARTY-NOTICES.txt
+      - name: Third-party notices
+        shell: bash
+        run: sh scripts/third-party-notices.sh ${{ matrix.triple }} "out/THIRD-PARTY-NOTICES-${{ matrix.target }}.txt"
 ```
