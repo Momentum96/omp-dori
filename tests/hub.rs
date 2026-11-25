@@ -366,10 +366,7 @@ fn setup_sets_the_lead() {
     };
     assert_eq!(lead(&preview)["value"], "-");
     assert!(
-        lead(&preview)["note"]
-            .as_str()
-            .unwrap()
-            .contains("no lead"),
+        lead(&preview)["note"].as_str().unwrap().contains("no lead"),
         "{preview}"
     );
     let args = [

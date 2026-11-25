@@ -310,7 +310,8 @@ mod tests {
                 .find(|c| c.name == name)
                 .map(|c| (c.level.clone(), c.detail.clone()))
         };
-        let intake = "[discord]\nowner = \"100000000000000001\"\nchannels = [\"100000000000000002\"]\n";
+        let intake =
+            "[discord]\nowner = \"100000000000000001\"\nchannels = [\"100000000000000002\"]\n";
         let (ctx, _stop, _dir) = ctx_with(intake, "health-intake");
         let checks = super::hub_checks(&ctx, &ctx.config());
         let (level, detail) = find(&checks, "lead").unwrap();

@@ -506,7 +506,12 @@ pub(super) fn load(paths: &Paths) -> Result<(Snapshot, String), Failure> {
 
 /// Writes one setting outside a setup run (`cataly service enable` pins `[omp] path`), under the same
 /// snapshot, validity, atomic-write and read-back rules.
-pub(super) fn write_one(paths: &Paths, section: &str, key: &str, value: &str) -> Result<(), String> {
+pub(super) fn write_one(
+    paths: &Paths,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
     let refused = |f: Failure| match f {
         Failure::Refused(m) | Failure::Usage(m) | Failure::Status(_, m) => m,
         Failure::Client(e) => e.to_string(),

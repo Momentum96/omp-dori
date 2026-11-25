@@ -86,7 +86,12 @@ impl Hub {
             Some(r) => r.sessions().err(),
             None => Some("OMP has not been probed yet".into()),
         };
-        let model = self.config_tx.borrow().lead.as_ref().map(|l| l.model.clone());
+        let model = self
+            .config_tx
+            .borrow()
+            .lead
+            .as_ref()
+            .map(|l| l.model.clone());
         let lead = match model {
             Some(model) => {
                 let phase = serde_json::to_value(self.lead.view().await.phase)

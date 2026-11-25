@@ -427,9 +427,15 @@ pub(crate) mod tests {
             Some("anthropic/claude-opus-5-5")
         );
         let plain = br#"{"value": {"default": "openai/gpt-5.2"}}"#;
-        assert_eq!(parse_default_model(plain).as_deref(), Some("openai/gpt-5.2"));
+        assert_eq!(
+            parse_default_model(plain).as_deref(),
+            Some("openai/gpt-5.2")
+        );
         assert_eq!(parse_default_model(br#"{"value": {"smol": "x/y"}}"#), None);
-        assert_eq!(parse_default_model(br#"{"value": {"default": "opus"}}"#), None);
+        assert_eq!(
+            parse_default_model(br#"{"value": {"default": "opus"}}"#),
+            None
+        );
         assert_eq!(parse_default_model(b"Unknown setting"), None);
     }
 }

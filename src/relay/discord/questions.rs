@@ -1360,7 +1360,10 @@ mod tests {
             "title": "Run bash: rm -rf @everyone *now*", "options": ["Approve Once", "Deny"]}))
         .unwrap();
         let text = local_notice(&approval, false);
-        assert!(text.starts_with("**Waiting on the machine:** a permission request"), "{text}");
+        assert!(
+            text.starts_with("**Waiting on the machine:** a permission request"),
+            "{text}"
+        );
         assert!(text.contains("@\u{200b}everyone \\*now\\*"), "{text}");
         assert!(text.contains("(remote approvals are off)"), "{text}");
         assert!(
@@ -1369,8 +1372,9 @@ mod tests {
         );
         assert!(text.contains(r#"'{"value":"Deny"}'"#), "{text}");
         assert!(text.encode_utf16().count() <= DISCORD_LIMIT);
-        let long = dialog_of(&json!({"id": "we`ird", "method": "confirm", "title": "x".repeat(5000)}))
-            .unwrap();
+        let long =
+            dialog_of(&json!({"id": "we`ird", "method": "confirm", "title": "x".repeat(5000)}))
+                .unwrap();
         let text = local_notice(&long, true);
         assert!(text.contains("…"), "{text}");
         assert!(text.contains("(it cannot be answered here)"), "{text}");

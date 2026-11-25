@@ -609,7 +609,9 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
         };
     }
     if l.current_version().is_none() {
-        return Outcome::Held("install Cataly first; the service runs the installed command".into());
+        return Outcome::Held(
+            "install Cataly first; the service runs the installed command".into(),
+        );
     }
     let config = match crate::config::load(&paths.config_file) {
         Ok(c) => c,
@@ -637,7 +639,13 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
         notes.push(format!("[omp] path set to {value}"));
     }
     // The folders of the tools the hub runs, as found now.
-    let tools = [config.omp.path.as_str(), "bun", "gh", "git", &config.sessions.tern];
+    let tools = [
+        config.omp.path.as_str(),
+        "bun",
+        "gh",
+        "git",
+        &config.sessions.tern,
+    ];
     let found: Vec<PathBuf> = tools
         .iter()
         .filter_map(|t| crate::omp::resolve(t))
@@ -645,11 +653,9 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
         .collect();
     let path_line = crate::sys::service::path_line(found.iter().map(PathBuf::as_path));
     let env_path = service_env_file(paths);
-    let keys = match crate::sys::service::env_file(
-        &env_path,
-        &config.sessions.credentials,
-        |k| std::env::var(k).ok(),
-    ) {
+    let keys = match crate::sys::service::env_file(&env_path, &config.sessions.credentials, |k| {
+        std::env::var(k).ok()
+    }) {
         Ok(k) => k,
         Err(e) => return Outcome::Held(e),
     };
@@ -663,7 +669,11 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
         Err(e) => return Outcome::Held(e),
     };
     notes.push(format!("PATH={path_line}"));
-    let verb = if keys.created { "written to" } else { "read from" };
+    let verb = if keys.created {
+        "written to"
+    } else {
+        "read from"
+    };
     notes.push(format!("provider keys {verb} {}", env_path.display()));
     if !keys.missing.is_empty() {
         notes.push(format!(

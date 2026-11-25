@@ -144,7 +144,8 @@ pub(crate) struct EnvFile {
 fn plain_value(value: &str) -> bool {
     !value.is_empty()
         && value.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+' | '=' | ':' | '@' | ',')
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | '+' | '=' | ':' | '@' | ',')
         })
 }
 
@@ -190,14 +191,11 @@ pub(crate) fn env_file(
     );
     let mut missing = Vec::new();
     for name in credentials {
-        match lookup(name).filter(|v| plain_value(v)) {
-            Some(value) => {
-                let _ = writeln!(text, "{name}={value}");
-            }
-            None => {
-                let _ = writeln!(text, "# {name}=");
-                missing.push(name.clone());
-            }
+        if let Some(value) = lookup(name).filter(|v| plain_value(v)) {
+            let _ = writeln!(text, "{name}={value}");
+        } else {
+            let _ = writeln!(text, "# {name}=");
+            missing.push(name.clone());
         }
     }
     super::fs::create_atomic(path, text.as_bytes()).map_err(|e| e.to_string())?;
@@ -237,11 +235,11 @@ impl Manager {
     }
 
     async fn call(&self, args: &[&str]) -> Result<(), String> {
-        let mut argv = vec![self.program.clone()];
-        argv.extend(args.iter().map(ToString::to_string));
+        let mut command = vec![self.program.clone()];
+        command.extend(args.iter().map(ToString::to_string));
         let env: Vec<(&str, &str)> = self.env.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let done = run(&Spec {
-            argv: &argv,
+            argv: &command,
             cwd: None,
             env: &env,
             timeout: MANAGER_TIMEOUT,
@@ -257,13 +255,11 @@ impl Manager {
         let said = String::from_utf8_lossy(&done.stderr);
         let mut message = format!(
             "`{}` failed: {}",
-            argv.join(" "),
+            command.join(" "),
             said.lines().next().unwrap_or("no message")
         );
         if !cfg!(target_os = "macos") && self.env.is_empty() {
-            message.push_str(
-                "; XDG_RUNTIME_DIR is not set, run this from your own login session",
-            );
+            message.push_str("; XDG_RUNTIME_DIR is not set, run this from your own login session");
         }
         Err(message)
     }
@@ -287,7 +283,13 @@ fn gui_domain() -> String {
 /// Writes the definition, enables and starts it, and records that Cataly created it.
 pub(crate) async fn enable(layout: &Layout, unit: &Unit<'_>) -> Result<PathBuf, String> {
     let path = file()?;
-    install(&path, &layout.service_marker(), unit, &Manager::of_session()).await?;
+    install(
+        &path,
+        &layout.service_marker(),
+        unit,
+        &Manager::of_session(),
+    )
+    .await?;
     Ok(path)
 }
 
@@ -446,7 +448,10 @@ mod tests {
         assert!(!text.contains("has space"));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
-        let dir_mode = std::fs::metadata(dir.join("secrets")).unwrap().permissions().mode();
+        let dir_mode = std::fs::metadata(dir.join("secrets"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(dir_mode & 0o777, 0o700);
 
         // An existing file is left as the owner wrote it.
@@ -459,7 +464,10 @@ mod tests {
                 missing: vec!["ANTHROPIC_API_KEY".into(), "ODD_KEY".into()],
             }
         );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "OPENAI_API_KEY=sk-2\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "OPENAI_API_KEY=sk-2\n"
+        );
     }
 
     #[tokio::test]
@@ -501,7 +509,9 @@ mod tests {
         } else {
             assert_eq!(
                 calls,
-                format!("--user daemon-reload {session}\n--user enable --now cataly.service {session}\n")
+                format!(
+                    "--user daemon-reload {session}\n--user enable --now cataly.service {session}\n"
+                )
             );
         }
         assert_eq!(
@@ -525,7 +535,11 @@ mod tests {
     async fn a_failing_manager_without_a_session_says_why() {
         let dir = scratch("service-nobus");
         let fake = dir.join("fake-manager");
-        std::fs::write(&fake, "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n").unwrap();
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'Failed to connect to bus' >&2\nexit 1\n",
+        )
+        .unwrap();
         make_executable(&fake);
         let manager = Manager::new(&fake.display().to_string(), |_| None);
         let err = manager.user(&["daemon-reload"]).await.unwrap_err();
