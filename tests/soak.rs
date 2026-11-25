@@ -3,7 +3,10 @@
 //! iterations the hub's resident memory (total, anonymous, file-backed), open descriptors, threads
 //! and live tokio tasks are sampled; the report gives each one's slope after the warm-up. Memory
 //! that levels off is caches filling; growth with every iteration is retained memory.
-//! `CATALY_SOAK_ITER` sets the iterations (default 2000).
+//! `CATALY_SOAK_ITER` sets the iterations (default 2000). For bisection, `CATALY_SOAK_SKIP` leaves
+//! parts out (comma list of `discord`, `send`, `restarts`, `lanes`, `jobs`, `reconnects`), and the
+//! allocator's `MALLOC_*` and `GLIBC_TUNABLES` variables and `LD_PRELOAD` (a heap sampler, see
+//! `docs/measurements.md`) are passed to the hub.
 
 #![allow(
     clippy::unwrap_used,
@@ -139,11 +142,22 @@ fn iterations() -> usize {
         .unwrap_or(2000)
 }
 
+/// Whether `CATALY_SOAK_SKIP` leaves this part out.
+fn skip(part: &str) -> bool {
+    std::env::var("CATALY_SOAK_SKIP").is_ok_and(|v| v.split(',').any(|p| p.trim() == part))
+}
+
 /// The hub with the fake OMP (turns and the ask form) as lead and lanes, intake and the ops room on
 /// the fake Discord, and every job kind: owner jobs on the fake `gh` and OMP, a probe and a cron
 /// job.
 fn soak_hub(fake: &FakeDiscord) -> TestHub {
-    let hub = TestHub::new("");
+    let mut hub = TestHub::new("");
+    for (key, value) in std::env::vars_os() {
+        let key = key.to_string_lossy().into_owned();
+        if key.starts_with("MALLOC_") || key == "GLIBC_TUNABLES" || key == "LD_PRELOAD" {
+            hub.env.push((key, PathBuf::from(value)));
+        }
+    }
     let omp = hub.install_fake("omp");
     let gh = hub.install_fake("gh");
     for f in ["rpc", "turns", "ask"] {
@@ -354,10 +368,10 @@ fn hub_soak() {
     let (mut connected, mut discord) = (Instant::now(), 0);
     for i in 0..total {
         let id = FIRST + 1000 * i as u64;
-        // Every fifth iteration is an owner message on Discord, up to 480 per run: the lead's
-        // receipt store takes at most 512 request IDs within its 7-day retention (HOST req. 59);
-        // the others are `cataly lead send` (no request ID), each a full turn of the lead.
-        let on_discord = discord < 480;
+        // Every fifth iteration is an owner message on Discord, each with its request ID (the
+        // lead's receipts no longer refuse the 513th within a week, decision 20); the others are
+        // `cataly lead send` (no request ID), each a full turn of the lead.
+        let on_discord = !skip("discord");
         if on_discord && i % 100 == 50 {
             fake.say(FakeDiscord::message(CH, id, OWNER, &format!("ASK {i}")));
             let (card, button) = new_card(&fake, &mut cards);
@@ -374,13 +388,13 @@ fn hub_soak() {
             fake.say(FakeDiscord::message(CH, id, OWNER, &format!("message {i}")));
             assert_eq!(reply(&fake, id), "ok");
             discord += 1;
-        } else {
+        } else if !skip("send") {
             let out = hub.cli(&["lead", "send", &format!("note {i}"), "--quiet"]);
             assert!(out.status.success(), "{out:?}");
         }
         // The Gateway's reconnect backoff resets after 60 s connected; reconnects come after that,
         // so each one waits the first backoff step only.
-        if i % 10 == 5 && connected.elapsed() > Duration::from_secs(61) {
+        if !skip("reconnects") && i % 10 == 5 && connected.elapsed() > Duration::from_secs(61) {
             // A requested reconnect (op 7, resumed) or an invalid session (op 9, identified
             // again), each with its catch-up read; the next message goes after that.
             let catch_ups = || {
@@ -399,17 +413,17 @@ fn hub_soak() {
             connected = Instant::now();
             reconnects += 1;
         }
-        if i % 100 == 60 {
+        if !skip("restarts") && i % 100 == 60 {
             assert!(hub.cli(&["lead", "stop"]).status.success());
             assert!(hub.cli(&["lead", "start"]).status.success());
             ready(&hub);
             restarts += 1;
         }
-        if i % 50 == 40 {
+        if !skip("lanes") && i % 50 == 40 {
             lane_cycle(&hub, &format!("s-{i}"));
             lanes += 1;
         }
-        if i % 20 == 15 {
+        if !skip("jobs") && i % 20 == 15 {
             for job in ["ping", "tick", "gh", "pr", "q", "bk", "h", "mail", "host"] {
                 // A live tick of the same job (the cron job runs every minute) refuses a dry one.
                 let out = hub.cli(&["job", "run", job, "--json"]);

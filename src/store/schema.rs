@@ -14,7 +14,7 @@ struct Migration {
     additive: bool,
 }
 
-const MIGRATIONS: [Migration; 8] = [
+const MIGRATIONS: [Migration; 9] = [
     Migration {
         sql: include_str!("migrations/0001_init.sql"),
         additive: false,
@@ -45,6 +45,10 @@ const MIGRATIONS: [Migration; 8] = [
     },
     Migration {
         sql: include_str!("migrations/0008_event_fields.sql"),
+        additive: true,
+    },
+    Migration {
+        sql: include_str!("migrations/0009_receipt_sessions.sql"),
         additive: true,
     },
 ];
@@ -144,11 +148,11 @@ mod tests {
         let mut conn = Connection::open(dir.join("s.db")).unwrap();
         migrate(&mut conn, &dir.join("backup")).unwrap();
         conn.execute_batch(
-            "PRAGMA user_version = 9; UPDATE meta SET value = '9' WHERE key = 'min_reader';",
+            "PRAGMA user_version = 99; UPDATE meta SET value = '99' WHERE key = 'min_reader';",
         )
         .unwrap();
         let err = migrate(&mut conn, &dir.join("backup")).unwrap_err();
-        assert!(matches!(err, StoreError::TooNew { found: 9, .. }));
+        assert!(matches!(err, StoreError::TooNew { found: 99, .. }));
         assert!(
             err.to_string()
                 .contains(&format!("cataly-v{}.db", latest()))

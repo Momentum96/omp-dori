@@ -1462,12 +1462,10 @@ Bounded already:
 - Subprocesses: every child is waited for and its output pumps joined (`sys::command`); the soak
   shows descriptors and threads level across 20 lead restarts and 40 lane cycles.
 
-Found, not changed (a decision for the owner): the lead's receipt store holds at most 512 request
-IDs (HOST req. 59) for target `lead` across all its sessions, kept 7 days. The 513th owner message
-on Discord within 7 days is refused and the room is held ("the receipt store of this target is
-full (512)"); the soak hit it at Discord message 512. HOST req. 59-60 say per session and deleted
-with the session record; the hub keys them by role, so a fresh session does not clear them either.
-The memory is bounded; the cliff is functional (about 73 owner messages a day).
+Found here, fixed in the follow-up (decision 20): the lead's receipt store held at most 512 request
+IDs for target `lead` across all its sessions, kept 7 days, and refused the 513th; the 513th owner
+message on Discord within 7 days held the room ("the receipt store of this target is full (512)"),
+about 73 owner messages a day. See "Receipts per session" below.
 
 ## Measuring
 
@@ -1480,4 +1478,28 @@ forbids (`unsafe_code = "forbid"` cannot be relaxed in a test target).
 The fake Discord now gives a new message an ID above every message already in its channel, as
 Discord does; before, the bot's posts (900…) sorted above later owner messages, so after a
 catch-up read the room's position passed every later owner message and they were never taken.
+
+# Receipts per session and the heap slope (LeakHunt2, 2026-11-26)
+
+## Receipts per session (decision 20)
+
+- Schema v9 (additive): `receipts.session`, the handle of the session the message was written into
+  (set when its inbox row goes `sent`, moved by a resend's rebind; NULL while pending). Indexes on
+  `(target, session, created_ms)`, `inbox_id`, and the hand-offs still `handed`.
+- Admission no longer counts receipts: `Admitted::Full` and the refusal "the receipt store of this
+  target is full (512)" are gone, for owner and other messages alike, and the early wake no longer
+  checks room. Each write of a batch trims its session to 512 receipts by evicting the oldest
+  settled ones: inbox row `delivered` or gone (or no row), and no relay hand-off of that request ID
+  still `handed`. Pending, sent, in-doubt and failed receipts are never evicted, so the session may
+  exceed 512 only by open ones, and an in-doubt or failed one still holds its room.
+- Exactly-once: the request-ID lookup still spans the whole target (all sessions), so a retry after a
+  lead restart is caught. A repeat is caught while its receipt is kept: every open one, the newest 512
+  settled ones per session, and at most 7 days (retention). Discord's own guard is unchanged: one
+  hand-off per message, ever, and a hand-off whose receipt the relay may read again is protected.
+- Retention also deletes settled receipts whose session record is gone (HOST req. 60).
+- Test: `store::host::receipt_cap::settled_receipts_are_evicted_oldest_first_per_session` (2,000 owner
+  messages to one room in one session all stored; 512 kept; repeats of recent ones caught; the
+  in-doubt one still reads in doubt; the unsettled hand-off keeps its receipt; a second session
+  counts apart). The soak now sends every fifth iteration on Discord with no limit: 600 to 2,400
+  owner messages per run went through with no hold (`docs/measurements.md`).
 
