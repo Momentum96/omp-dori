@@ -802,3 +802,78 @@ setup; other roles stay hand-edited.
   `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1, `contract_session` 5,
   `contract_discord` 3, `contract_lanes` 2, `contract_relays` 1); `bun test` in `extension/` 6
   passed.
+
+# Faster Discord wake (FastWake, 2026-11-25)
+
+## What was measured
+
+The Discord path of a live owner message was stamped in a release build at frame read, parse, owner
+gate, arrival commit, round pickup, route, the lead's `deliver`, the readback, the prompt write, the
+hub's read of OMP's `agent_start` and the relay round's sight of it (a throwaway build; the stamps
+are not in the tree). Figures are in `docs/measurements.md`. Two findings:
+
+- The arrival commit (8.2 ms, one `synchronous=FULL` fsync) was the only large hub cost before the
+  prompt write; everything else the hub does before the write took about 1.1 ms, plus the 2-2.3 ms
+  `get_state` readback HOST req. 50 requires (it carries the spend fence, so it stays).
+- The end-to-end figure itself was late by 8.6-9.4 ms at p50 and 35 ms at p95: the relay round sees
+  the lead's events only between rounds, and it was still waiting in `deliver` for the inbox commit
+  when `agent_start` came. The "about 20 ms of intake" noted under decision 15 was mostly this.
+
+## Changes
+
+- `relay::pipeline::Pipeline::arrive` (Discord only, `Relay::LIVE_ONCE`): a live owner message the
+  store would queue now (`Reads::arrives_at_once`: the room has a position below it and is not held,
+  nothing of the message is stored, the queue has room) is put in the writer's queue
+  (`Store::relay_queued`) and handed to the round at once; the round drains it next to the stored
+  queue. The writer applies requests in queue order, so the hand-off record and the lead's records
+  commit with or after the arrival, never before it. The Gateway task still waits for the commit
+  before reading the next frame. The read times of live messages moved from both intakes into the
+  pipeline (one implementation).
+- Recovery is the decision-15 one: a crash before the arrival commits leaves the room's position
+  below the message; the catch-up read at the next connect finds it as a message not read live, and
+  the lead's transcript decides before any send. A new Gateway session never replays a message, so
+  it cannot come back live.
+- Telegram and Slack keep the arrival commit first: both redeliver what was not acknowledged as live
+  messages in the next hub run, which would skip the transcript lookup and could deliver twice.
+- The wake latency is now taken up to the moment the lead reads `agent_start` (`Lead::turn_started`,
+  stamped before its followers see the event) instead of when the relay round gets to it.
+- Fewer serial reads: `Mailbox::deliver_as` decides with one read (unconfirmed batches, open rows,
+  early admission) instead of three; `Pipeline::hand_off` takes the hand-off record its caller just
+  read instead of reading it again.
+- Found while checking every early write: `cataly lead send --request-id` took the early wake with no
+  transcript lookup, so a retry with the same ID after a crash between the write and the commit
+  could reach the lead twice. The early wake is now opt-in (`Lead::deliver_live`, used only by the
+  relay pipeline, whose callers either read the message live or searched the transcript);
+  `Lead::deliver` commits first again.
+
+## Lane messages and lead messages without a request ID: not changed, and why
+
+- Without a request ID nothing derives the delivery marker before a record exists: the batch ID is
+  random and lives only in the record. An early write whose commit does not land leaves nothing to
+  look up, and if OMP did not keep the entry (it died with the hub) the message is lost; committed
+  first, the flush resends it once into the resumed session. Hub notes, lane notices and
+  `cataly lead send` without an ID stay commit-first.
+- Lead-to-lane messages with an ID arrive as fresh calls from the lead, so a retry after a hub crash
+  looks like a first send. Telling them apart would need a search of the lane's transcript before
+  every send, which costs more than the 8 ms commit as the file grows, plus the in-doubt fence of EVR
+  req. 62 for a write whose record failed. Owner messages routed to a lane's thread could reuse the
+  relay rule, but would need a second transcript lookup over lane sessions (closed and restarted
+  ones included) for a path with no wake target; not done (one implementation per concern).
+
+## Tests
+
+- `tests/discord_relay.rs` `crash_at_each_wake_point_delivers_once` gains `arrival_after_write`: the
+  arrival is held back, the prompt is written, the hub dies; the store holds no queue item for the
+  message, and after the restart the catch-up read finds it, the transcript shows it written, and it
+  is delivered once, answered at most once, nothing held. The three earlier points now run with the
+  arrival overlapping the hand-off. `relay_after_arrival` keeps its order (arrival committed, nothing
+  handed): debug builds take the commit-first arrival when that point is named.
+- `tests/lead.rs` `request_id_sends_commit_before_the_write`: with `wake_after_write` named, a CLI send
+  with a request ID does not trip the point (the write comes after the commit), and after a crash
+  the retry with the same ID returns the same inbox row; the transcript holds the text once. It
+  failed against the previous behaviour.
+- Closing runs: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean; `cargo test
+  --no-fail-fast` passed twice in a row after the last code change (284 passed, 5 ignored); `cargo
+  build --release`; each contract binary passed alone in release with `CATALY_CONTRACT_OMP=1`
+  against stock OMP 19.1.1 (`contract` 1, `contract_session` 5, `contract_discord` 3,
+  `contract_lanes` 2, `contract_relays` 1).

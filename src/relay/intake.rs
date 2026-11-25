@@ -4,7 +4,6 @@
 //! its live source (Gateway, long poll, Socket Mode) and its start-up checks; one stalled relay never
 //! delays another, since each runs in its own task with its own queue (MSG req. 2).
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -13,7 +12,7 @@ use serde::Serialize;
 use tokio::sync::{Notify, broadcast, watch};
 
 use super::Relay;
-use super::pipeline::{Pipeline, Step};
+use super::pipeline::{Arrival, Pipeline, Step};
 use crate::config::Config;
 use crate::host::lead::{Events, Lead};
 use crate::host::{Runtime, SessionEvent};
@@ -202,8 +201,6 @@ pub(crate) struct Round<R: Relay, T: Runtime> {
     store: Store,
     lead: Arc<Lead<T>>,
     pub(crate) wake: Notify,
-    /// Read times of live messages not yet handed off, by message.
-    reads: Mutex<HashMap<String, Instant>>,
     turn_running: AtomicBool,
     /// A turn ended (no continuation) since the last turn start.
     turn_ended: AtomicBool,
@@ -216,7 +213,6 @@ impl<R: Relay, T: Runtime> Round<R, T> {
             store,
             lead,
             wake: Notify::new(),
-            reads: Mutex::default(),
             turn_running: AtomicBool::new(false),
             turn_ended: AtomicBool::new(false),
         }
@@ -233,30 +229,16 @@ impl<R: Relay, T: Runtime> Round<R, T> {
         raw: String,
         read_at: Instant,
     ) -> Result<Arrived, String> {
-        let done = self
-            .store
-            .relay(RelayWrite::Arrive {
-                relay: R::NAME.into(),
-                room: room.into(),
-                message: message.into(),
-                seq,
-                parent: parent.map(str::to_string),
-                raw,
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-        let arrived = match done {
-            RelayDone::Arrived(a) => a,
-            _ => Arrived::Handled,
+        let arrival = Arrival {
+            room: room.into(),
+            message: message.into(),
+            seq,
+            parent: parent.map(str::to_string),
+            raw,
         };
-        if arrived == Arrived::Queued {
-            self.reads
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(format!("{room}/{message}"), read_at);
-            self.wake.notify_one();
-        }
-        Ok(arrived)
+        self.pipeline
+            .arrive(arrival, Some(read_at), &self.wake)
+            .await
     }
 
     /// Runs rounds until `source` ends, the config's `settings` change, or the owner or a shutdown
@@ -350,6 +332,7 @@ impl<R: Relay, T: Runtime> Round<R, T> {
     }
 
     async fn handle(&self, row: &QueueRow) -> Result<Step, String> {
+        let read_at = self.pipeline.read_at(&row.room, &row.message);
         let inbound = match self.pipeline.relay.normalise(row) {
             Ok(i) => i,
             Err(fault) => {
@@ -365,15 +348,10 @@ impl<R: Relay, T: Runtime> Round<R, T> {
                 return Ok(Step::Done);
             }
         };
-        let read_at = self
-            .reads
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&format!("{}/{}", row.room, row.message));
         if let Some(step) = self.pipeline.resume(row, &inbound, read_at).await? {
             return Ok(step);
         }
-        self.pipeline.hand_off(row, &inbound, read_at).await
+        self.pipeline.hand_off(row, &inbound, read_at, None).await
     }
 }
 

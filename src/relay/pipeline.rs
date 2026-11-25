@@ -6,14 +6,14 @@
 //! and posts the lead's final answer as a linked reply in parts from a durable outbox (DISC-OUT req.
 //! 20-29, DESIGN 12.2 A16).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use super::context::{self, Context};
 use super::{Inbound, PartOutcome, Relay};
@@ -25,7 +25,7 @@ use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 use crate::omp::transcript::{self, Reply};
 use crate::store::Store;
-use crate::store::relay::{HandoffRow, OWED_WINDOW_MS, QueueRow, RelayWrite};
+use crate::store::relay::{Arrived, HandoffRow, OWED_WINDOW_MS, QueueRow, RelayDone, RelayWrite};
 use crate::sys::latency::Latency;
 use crate::sys::now_ms;
 
@@ -47,6 +47,23 @@ pub(crate) enum Step {
     Deferred,
 }
 
+/// An owner message for the arrival queue, live or found by a catch-up read.
+pub(crate) struct Arrival {
+    pub(crate) room: String,
+    pub(crate) message: String,
+    pub(crate) seq: i64,
+    pub(crate) parent: Option<String>,
+    pub(crate) raw: String,
+}
+
+/// A live message not handed off yet.
+struct Live {
+    /// When its frame or poll response was read, for the wake latency.
+    read_at: Instant,
+    /// Its queue item while the arrival commit runs (decision 15); `None` once committed.
+    row: Option<QueueRow>,
+}
+
 /// The pipeline of one relay.
 pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     pub(crate) relay: Arc<R>,
@@ -63,6 +80,8 @@ pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     stuck: Mutex<HashSet<String>>,
     /// A failed seen mark is logged once per run (MSG-04).
     seen_failed: AtomicBool,
+    /// Live messages not handed off yet, by room and message.
+    live: Mutex<HashMap<(String, String), Live>>,
     /// Frame read time of a wake still waiting for its turn to start.
     wake: Mutex<Option<Instant>>,
     /// Relay frame read to OMP `agent_start` (DESIGN 2.3, wake end to end).
@@ -92,23 +111,198 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             context: Context::default(),
             stuck: Mutex::default(),
             seen_failed: AtomicBool::new(false),
+            live: Mutex::default(),
             wake: Mutex::new(None),
             wake_latency,
         }
     }
 
+    fn live(&self) -> MutexGuard<'_, HashMap<(String, String), Live>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queues an owner message durably (DISC-IN req. 22, MSG req. 4): its position moves only after
+    /// the hand-off. `read_at` is when a live message's frame or poll response was read, `None`
+    /// for one found by a catch-up read; `wake` starts the handling round.
+    ///
+    /// Decision 15: on a relay whose live messages never come back live after a restart
+    /// ([`Relay::LIVE_ONCE`]), a live message the store would queue now goes to the round at once
+    /// and its arrival commits alongside the hand-off. The arrival is queued in the writer before
+    /// the round can see the message, so the hand-off record and the lead's records commit with or
+    /// after it, never before. A crash before it commits leaves the room's position below the
+    /// message: the catch-up read finds it again, and the lead's transcript decides before any send.
+    pub(crate) async fn arrive(
+        &self,
+        arrival: Arrival,
+        read_at: Option<Instant>,
+        wake: &Notify,
+    ) -> Result<Arrived, String> {
+        let Arrival {
+            room,
+            message,
+            seq,
+            parent,
+            raw,
+        } = arrival;
+        let key = (room.clone(), message.clone());
+        let early = match read_at {
+            Some(_) if R::LIVE_ONCE && !Self::commit_first() => {
+                let (r, m, bytes) = (room.clone(), message.clone(), raw.len());
+                self.store
+                    .read(move |reads| reads.arrives_at_once(R::NAME, &r, &m, seq, bytes))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            _ => None,
+        };
+        let row = early.map(|position_at| QueueRow {
+            room: room.clone(),
+            message: message.clone(),
+            seq,
+            parent: parent.clone(),
+            position_at,
+            raw: raw.clone(),
+            created_ms: now_ms(),
+        });
+        let write = RelayWrite::Arrive {
+            relay: R::NAME.into(),
+            room,
+            message,
+            seq,
+            parent,
+            raw,
+        };
+        let done = match (row, read_at) {
+            (Some(row), Some(at)) => {
+                // Debug builds only: the crash test of a hand-off written before its arrival
+                // commits holds the arrival back.
+                #[cfg(debug_assertions)]
+                if crate::sys::fault::named("arrival_after_write") {
+                    self.live().insert(
+                        key,
+                        Live {
+                            read_at: at,
+                            row: Some(row),
+                        },
+                    );
+                    wake.notify_one();
+                    return std::future::pending().await;
+                }
+                let committed = self
+                    .store
+                    .relay_queued(write)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                self.live().insert(
+                    key.clone(),
+                    Live {
+                        read_at: at,
+                        row: Some(row),
+                    },
+                );
+                wake.notify_one();
+                committed.await
+            }
+            _ => self.store.relay(write).await,
+        };
+        let arrived = done.map(|d| match d {
+            RelayDone::Arrived(a) => a,
+            _ => Arrived::Handled,
+        });
+        self.settle_live(
+            key,
+            arrived.as_ref().ok().copied(),
+            read_at,
+            early.is_some(),
+            wake,
+        );
+        arrived.map_err(|e| e.to_string())
+    }
+
+    /// Keeps a live message's entry in step with what its arrival became (`None`: the store
+    /// failed). `early`: it went to the round before the commit.
+    fn settle_live(
+        &self,
+        key: (String, String),
+        arrived: Option<Arrived>,
+        read_at: Option<Instant>,
+        early: bool,
+        wake: &Notify,
+    ) {
+        let mut live = self.live();
+        match (arrived, read_at) {
+            // Committed: the stored item stands in for it, unless the round took it already.
+            (Some(Arrived::Queued), Some(_)) if early => {
+                if let Some(l) = live.get_mut(&key) {
+                    l.row = None;
+                }
+            }
+            (Some(Arrived::Queued), Some(at)) => {
+                live.insert(
+                    key,
+                    Live {
+                        read_at: at,
+                        row: None,
+                    },
+                );
+                drop(live);
+                wake.notify_one();
+            }
+            // Not queued after all: a round that has not taken it never will.
+            _ if early => {
+                live.remove(&key);
+            }
+            _ => {}
+        }
+    }
+
+    /// Debug builds only: the crash test that stops after the arrival commit and before the
+    /// hand-off needs that order.
+    #[cfg(debug_assertions)]
+    fn commit_first() -> bool {
+        crate::sys::fault::named("relay_after_arrival")
+    }
+
+    #[cfg(not(debug_assertions))]
+    const fn commit_first() -> bool {
+        false
+    }
+
+    /// The read time of a live message, taken by its hand-off; `None` for anything else.
+    pub(crate) fn read_at(&self, room: &str, message: &str) -> Option<Instant> {
+        self.live()
+            .remove(&(room.to_string(), message.to_string()))
+            .map(|l| l.read_at)
+    }
+
     /// Hands queued messages on, lowest first per room; a room with a held or failed message is
     /// skipped for the rest of the round (DISC-IN req. 26-27, 43). `handle` takes one queue row.
+    /// Live messages whose arrival still commits take their place in the queue (decision 15).
     pub(crate) async fn drain<F, Fut>(&self, mut handle: F) -> Result<(), String>
     where
         F: FnMut(QueueRow) -> Fut,
         Fut: Future<Output = Result<Step, String>>,
     {
-        let (queue, positions) = self
+        let (mut queue, positions) = self
             .store
             .read(|r| Ok((r.queue(R::NAME)?, r.positions(R::NAME)?)))
             .await
             .map_err(|e| e.to_string())?;
+        let committing: Vec<QueueRow> = self
+            .live()
+            .values()
+            .filter_map(|l| l.row.clone())
+            .filter(|row| {
+                !queue
+                    .iter()
+                    .any(|q| q.room == row.room && q.message == row.message)
+            })
+            .collect();
+        if !committing.is_empty() {
+            queue.extend(committing);
+            queue.sort_by_key(|r| r.seq);
+        }
         let mut blocked: HashSet<String> = positions
             .into_iter()
             .filter(|p| p.held.is_some())
@@ -158,7 +352,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                     .await?;
                 Step::Done
             }
-            Some(_) => self.hand_off(row, inbound, read_at).await?,
+            Some(h) => self.hand_off(row, inbound, read_at, Some(&h)).await?,
             None => return Ok(None),
         }))
     }
@@ -366,22 +560,17 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
     }
 
     /// Hands a queued owner message to the lead (DISC-IN req. 46-47). `read_at` is its frame's read
-    /// time when it came live, for the wake latency.
+    /// time when it came live, for the wake latency; `found` is its hand-off record as the caller
+    /// just read it (`None`: it has none).
     pub(crate) async fn hand_off(
         self: &Arc<Self>,
         row: &QueueRow,
         inbound: &Inbound,
         read_at: Option<Instant>,
+        found: Option<&HandoffRow>,
     ) -> Result<Step, String> {
         let digest = inbox::digest("relay", &inbound.stable);
-        let found = {
-            let (room, message) = (row.room.clone(), row.message.clone());
-            self.store
-                .read(move |r| r.handoff(R::NAME, &room, &message))
-                .await
-                .map_err(|e| e.to_string())?
-        };
-        if let Some(h) = &found {
+        if let Some(h) = found {
             if h.digest != digest {
                 // The same message with other content: never resent silently (DISC-IN req. 51).
                 return self
@@ -490,7 +679,9 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         step
     }
 
-    /// Delivers a handed-off owner message to the lead and records its receipt.
+    /// Delivers a handed-off owner message to the lead and records its receipt. The lead may write
+    /// it before its records commit: it was read live in this run, or the transcript showed it was
+    /// not written earlier (decision 15).
     async fn to_lead(
         self: &Arc<Self>,
         row: &QueueRow,
@@ -504,7 +695,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             .is_some_and(|s| s.status == Status::Idle);
         let receipt = self
             .lead
-            .deliver(Message {
+            .deliver_live(Message {
                 sender: "owner".into(),
                 text,
                 urgent: true,
@@ -551,7 +742,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                 self.apply(&row.room, &row.message, r.state, r.reason.as_deref())
                     .await
             }
-            None => self.hand_off(row, inbound, None).await,
+            None => self.hand_off(row, inbound, None, Some(h)).await,
         }
     }
 
@@ -632,16 +823,20 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         Ok(Step::Held(why))
     }
 
-    /// Follows the lead's events: a turn start after a wake records the wake latency.
+    /// Follows the lead's events: a turn start after a wake records the wake latency, up to when
+    /// the lead read OMP's `agent_start` (this round may follow its events later). A turn start
+    /// from before the wake leaves it waiting for the next one.
     pub(crate) fn on_event(&self, event: &SessionEvent) {
-        if *event == SessionEvent::TurnStarted
-            && let Some(at) = self
-                .wake
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take()
-        {
-            self.wake_latency.record(at.elapsed());
+        if *event != SessionEvent::TurnStarted {
+            return;
+        }
+        let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(at) = *wake else {
+            return;
+        };
+        if let Some(started) = self.lead.turn_started().filter(|s| *s >= at) {
+            *wake = None;
+            self.wake_latency.record(started - at);
         }
     }
 

@@ -132,3 +132,58 @@ fn lead_restarts_on_its_session_after_omp_exits() {
     // The probe, then three lead processes; nothing started after the cancel.
     assert_eq!(pids.lines().count(), 4, "{pids}");
 }
+
+/// Decision 15 writes early only what the caller knows was not written before (a relay message
+/// read live, or one its transcript lacks). A `lead send` with a request ID commits first: the
+/// crash point after an early write never fires, and a retry with the same ID after a crash finds
+/// its receipt, so the lead gets the message once.
+#[test]
+fn request_id_sends_commit_before_the_write() {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    hub.fixture("omp", "turns", Some(""));
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        omp.display(),
+        work.display()
+    ));
+    hub.env.push((
+        "CATALY_FAULT".into(),
+        std::path::PathBuf::from("wake_after_write"),
+    ));
+    hub.start();
+    let lead = live(&hub, &Value::Null);
+    let file = std::path::PathBuf::from(lead["session"]["session_file"].as_str().unwrap());
+    let send = |hub: &TestHub| {
+        hub.json(&[
+            "lead",
+            "send",
+            "hello once",
+            "--request-id",
+            "cli-1",
+            "--json",
+        ])
+    };
+    let first = send(&hub);
+    assert!(first["inbox_id"].is_i64(), "{first}");
+    assert!(
+        hub.cli(&["status"]).status.success(),
+        "the hub is still up: the write came after the commit"
+    );
+    hub.crash();
+    hub.env.clear();
+    hub.start();
+    live(&hub, &lead["session"]["pid"]);
+    let again = send(&hub);
+    assert_eq!(again["inbox_id"], first["inbox_id"], "{again}");
+    std::thread::sleep(Duration::from_secs(1));
+    let entries = std::fs::read_to_string(&file)
+        .unwrap()
+        .matches("hello once")
+        .count();
+    assert_eq!(entries, 1, "written once");
+    assert!(hub.stop().success());
+}

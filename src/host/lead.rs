@@ -243,6 +243,8 @@ pub(crate) struct Lead<R: Runtime> {
     pub(crate) confirm_latency: Latency,
     /// Every event of the current session, for the relays (answers, typing, questions).
     followers: broadcast::Sender<SessionEvent>,
+    /// When the lead last read a turn start, before its followers see it (the relays' wake end).
+    turn_started: Mutex<Option<Instant>>,
 }
 
 impl<R: Runtime> Lead<R> {
@@ -266,6 +268,7 @@ impl<R: Runtime> Lead<R> {
             wake_latency: Latency::default(),
             confirm_latency: Latency::default(),
             followers: broadcast::channel(256).0,
+            turn_started: Mutex::new(None),
         })
     }
 
@@ -892,8 +895,7 @@ impl<R: Runtime> Lead<R> {
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             };
-            // Nobody following is fine; a slow follower sees `Lagged` and reads the state again.
-            let _ = self.followers.send(event.clone());
+            self.forward(&event);
             match event {
                 SessionEvent::TurnEnded { .. }
                 | SessionEvent::Quiet
@@ -1050,7 +1052,19 @@ impl<R: Runtime> Lead<R> {
 
     /// Hands a message to the lead (COORD-10, COORD-15): stored, then delivered at once when the lead
     /// can read. Accepted even with no lead session; it goes out once a lead exists (COORD req. 24).
+    /// The message commits before it is written: a sender's retry after a crash finds its receipt.
     pub(crate) async fn deliver(&self, request: Message) -> Result<Receipt, String> {
+        self.deliver_as(request, false).await
+    }
+
+    /// [`Lead::deliver`] for an owner request the caller knows was not written to the lead before:
+    /// read live in this hub run, or absent from the lead's transcripts. It may be written while
+    /// its records commit (decision 15, [`inbox::Mailbox::deliver_as`]).
+    pub(crate) async fn deliver_live(&self, request: Message) -> Result<Receipt, String> {
+        self.deliver_as(request, true).await
+    }
+
+    async fn deliver_as(&self, request: Message, live: bool) -> Result<Receipt, String> {
         let called = Instant::now();
         let (receipt, stored) = {
             let _one = self.flushing.lock().await;
@@ -1060,7 +1074,7 @@ impl<R: Runtime> Lead<R> {
                 .is_some_and(|s| s.snapshot().quota_blocked.is_some());
             let (receipt, stored, notes) = self
                 .mailbox
-                .deliver(&request, session.as_deref(), blocked)
+                .deliver_as(&request, session.as_deref(), blocked, live)
                 .await?;
             self.report(notes, Some(called)).await;
             (receipt, stored)
@@ -1070,6 +1084,26 @@ impl<R: Runtime> Lead<R> {
         };
         self.wake.notify_one();
         Ok(self.mailbox.receipt(request.request_id, id).await)
+    }
+
+    /// When the lead last read a turn start of its session.
+    pub(crate) fn turn_started(&self) -> Option<Instant> {
+        *self
+            .turn_started
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Passes an event to the relays; a turn start is stamped first. Nobody following is fine; a
+    /// slow follower sees `Lagged` and reads the state again.
+    fn forward(&self, event: &SessionEvent) {
+        if *event == SessionEvent::TurnStarted {
+            *self
+                .turn_started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        }
+        let _ = self.followers.send(event.clone());
     }
 
     /// The receipt of an earlier request ID; `None` when the ID is unknown.

@@ -83,6 +83,21 @@ fn requests_in(file: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// Arrival queue items of one Discord message in the hub's store.
+fn queued(hub: &TestHub, message: u64) -> i64 {
+    let db = rusqlite::Connection::open_with_flags(
+        hub.state().join("cataly.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM arrival_queue WHERE relay = 'discord' AND message = ?1",
+        [message.to_string()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 fn reference(create: &support::discord::Seen) -> Option<String> {
     create.body["message_reference"]["message_id"]
         .as_str()
@@ -271,15 +286,18 @@ fn crash_after_arrival_delivers_once() {
     assert!(hub.stop().success());
 }
 
-/// Decision 15: the lead's wake is written while its records commit. A crash at each point of that
-/// order (before the commit, after the prompt write with the commit held back, after the commit)
-/// leaves the message delivered exactly once after the restart: the lead's transcript decides
-/// before any send, and nothing is lost or held.
+/// Decision 15: the lead's wake is written while its records commit, and a live Discord message is
+/// handed off while its arrival commits. A crash at each point of that order (before the commit,
+/// after the prompt write with the commit held back, the same with the arrival held back too, after
+/// the commit) leaves the message delivered exactly once after the restart: the catch-up read finds
+/// a message whose arrival never landed, the lead's transcript decides before any send, and
+/// nothing is lost or held.
 #[test]
 fn crash_at_each_wake_point_delivers_once() {
     for (n, point) in [
         "wake_before_commit",
         "wake_after_write",
+        "arrival_after_write",
         "wake_after_commit",
     ]
     .into_iter()
@@ -296,6 +314,13 @@ fn crash_at_each_wake_point_delivers_once() {
         let exit = hub.wait_exit(WAIT);
         assert!(!exit.success(), "{point}: the fault point ended the hub");
         let before = requests_in(&file).len();
+        if point == "arrival_after_write" {
+            assert_eq!(
+                queued(&hub, id),
+                0,
+                "the arrival had not committed when the prompt was written"
+            );
+        }
         hub.env.clear();
         hub.start();
         ready(&hub);

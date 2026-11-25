@@ -813,6 +813,43 @@ impl Reads {
         stmt.query_map([relay], queue_from_row)?.collect()
     }
 
+    /// Decision 15 for a live arrival: the room's position when an `Arrive` of this message would
+    /// queue it now and nothing of it is stored yet (no queue item, no hand-off), else `None`. The
+    /// room must already have a position and not be held, so a crash before the arrival commits
+    /// leaves the message to the catch-up read.
+    pub(crate) fn arrives_at_once(
+        &self,
+        relay: &str,
+        room: &str,
+        message: &str,
+        seq: i64,
+        bytes: usize,
+    ) -> rusqlite::Result<Option<i64>> {
+        let found: Option<(i64, Option<String>)> = self
+            .0
+            .query_row(
+                "SELECT position, held FROM positions WHERE relay = ?1 AND room = ?2",
+                params![relay, room],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((position, None)) = found else {
+            return Ok(None);
+        };
+        if position >= seq {
+            return Ok(None);
+        }
+        let (known, used): (bool, i64) = self.0.query_row(
+            "SELECT EXISTS (SELECT 1 FROM handoffs WHERE relay = ?1 AND room = ?2 AND message = ?3) \
+             OR EXISTS (SELECT 1 FROM arrival_queue WHERE relay = ?1 AND room = ?2 AND message = ?3), \
+             (SELECT COALESCE(SUM(bytes), 0) FROM arrival_queue WHERE relay = ?1)",
+            params![relay, room, message],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
+        Ok((!known && used.saturating_add(bytes) <= QUEUE_CAP_BYTES).then_some(position))
+    }
+
     /// The relay's state document.
     pub(crate) fn relay_state(&self, relay: &str) -> rusqlite::Result<Option<String>> {
         self.0

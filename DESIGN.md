@@ -104,7 +104,7 @@ Targets are budgets for review, not promises; each is measured before anything i
 | Added by all owner jobs | < 5 MiB | Benchmark with every owner job enabled (OJ requirement 14). |
 | Added during a voice call | ≤ 25 MiB | Voice benchmark with recorded audio (milestone 5). |
 | Hub start to control socket answering | ≤ 150 ms | Timestamp at process start versus first successful `status` in CI. OMP probe runs after, off this path. |
-| Wake, hub part: relay frame read to `prompt` line written to OMP stdin | p50 ≤ 5 ms, p99 ≤ 25 ms. An owner request to the lead is written while its durable commit runs (decision 15), so the fsync is off this path; other deliveries (lane messages, hub notes, requests without a request ID) still commit first | The hub stamps each request at frame read, commit, write and `agent_start`; the last 1,000 samples form a histogram served by `cataly stats latency`. |
+| Wake, hub part: relay frame read to `prompt` line written to OMP stdin | p50 ≤ 5 ms, p99 ≤ 25 ms. An owner request from a relay to the lead is written while its durable commit runs (decision 15), and on Discord the arrival commit runs beside the hand-off too, so no fsync is on this path there; other deliveries (lane messages, hub notes, `cataly lead send`, Telegram and Slack arrivals) still commit first | The hub stamps each request at frame read, commit, write and `agent_start`; the last 1,000 samples form a histogram served by `cataly stats latency`. |
 | Wake, end to end: relay frame read to OMP `agent_start` | p50 ≤ 150 ms, p95 ≤ 300 ms on the CI runner | Contract suite scenario: fake Discord Gateway, stock OMP, loopback fake model. |
 | CLI round trip (`cataly status`) | p50 ≤ 20 ms | CI benchmark, 100 calls. |
 | Bridge cost in an ordinary (non-Cataly) OMP session | < 5 ms added start-up | Contract suite: OMP start with and without the extension link (EXT problems section). |
@@ -518,11 +518,15 @@ resets, buying credits and paid overage stay refused, in code:
 - Hub notices in doubt are never resent; the lead is told once and may confirm or release (COORD-13).
   Lead-to-lane messages in doubt fence the lane's inbox until the lead releases it (EVR req. 62).
 - A message found in another session's file is "misdelivered": never resent, owner told once.
-- **Early wake (decision 15).** An owner request that goes to the lead alone is written before its records
-  commit, under a delivery marker derived from its request ID. A message not read live in this hub run
-  (restart, catch-up, a hand-off made again) is looked up in the current and previous lead transcripts before
-  any send: found means delivered; a transcript that cannot be searched holds the room; with no lead running
-  yet it waits. Written with a record that then fails to commit is in doubt, never resent.
+- **Early wake (decision 15).** An owner request from a relay that goes to the lead alone is written before its
+  records commit, under a delivery marker derived from its request ID; on Discord, whose Gateway never
+  replays a message to a new session, a live message is also handed off while its arrival commits (the
+  room's position stays below it until then, so a crash leaves it to the catch-up read). A message not read
+  live in this hub run (restart, catch-up, a hand-off made again) is looked up in the current and previous
+  lead transcripts before any send: found means delivered; a transcript that cannot be searched holds the
+  room; with no lead running yet it waits. Written with a record that then fails to commit is in doubt, never
+  resent. Senders that cannot prove a request was not written before (Telegram and Slack redeliver live,
+  `cataly lead send` retries with the same request ID, lane messages, notes) commit first.
 - Remote approvals (off by default) deny on any doubt: a card that cannot be posted, an unacknowledged press,
   or a run that ended.
 

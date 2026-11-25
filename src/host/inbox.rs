@@ -255,39 +255,75 @@ impl Mailbox {
         self.admitted(req.request_id.clone(), done).await
     }
 
-    /// Stores a message and delivers what may go now (COORD req. 15, 24). When the target can take
-    /// it at once, the message and the batch that carries it are stored in one commit (DESIGN 2.3,
-    /// 7.2); an owner request to the lead that goes alone is written while that commit runs
-    /// (decision 15, [`Mailbox::wake_early`]), anything else after it. Otherwise it is stored and
-    /// the inbox is flushed as usual. `Err` is a refusal; nothing was stored.
+    /// Stores a message and delivers what may go now (COORD req. 15, 24), committing it before it
+    /// is written ([`Mailbox::deliver_as`] without `live`).
     pub(crate) async fn deliver<S: Control>(
         &self,
         req: &Message,
         session: Option<&S>,
         quota_blocked: bool,
     ) -> Result<(Receipt, Option<i64>, Vec<Note>), String> {
+        self.deliver_as(req, session, quota_blocked, false).await
+    }
+
+    /// Stores a message and delivers what may go now (COORD req. 15, 24). When the target can take
+    /// it at once, the message and the batch that carries it are stored in one commit (DESIGN 2.3,
+    /// 7.2). With `live` (the caller knows it was not written before), an owner request to the lead
+    /// that goes alone is written while that commit runs (decision 15, [`Mailbox::wake_early`]);
+    /// anything else after it. Otherwise it is stored and the inbox is flushed as usual. `Err` is a
+    /// refusal; nothing was stored.
+    pub(crate) async fn deliver_as<S: Control>(
+        &self,
+        req: &Message,
+        session: Option<&S>,
+        quota_blocked: bool,
+        live: bool,
+    ) -> Result<(Receipt, Option<i64>, Vec<Note>), String> {
         let admit = self.offer(req)?;
-        let target = self.target.clone();
-        let clear = self
-            .store
-            .read(move |r| r.sent_deliveries(&target))
-            .await
-            .is_ok_and(|sent| sent.is_empty());
         let early = req
             .request_id
-            .as_deref()
-            .filter(|_| self.target == LEAD && req.identity.is_none())
-            .map(|rid| wake_id(&self.target, rid));
-        let live = session.filter(|s| s.alive());
-        let batch = match live {
-            Some(s) if clear => self
-                .batch(s, quota_blocked, Some(req), early.as_deref())
+            .clone()
+            .filter(|_| live && self.target == LEAD && req.identity.is_none())
+            .map(|rid| (wake_id(&self.target, &rid), rid));
+        let alive = session.filter(|s| s.alive());
+        // One read decides: nothing written still unconfirmed, the open rows a batch would carry,
+        // and whether the store would admit the early wake's request at once.
+        let (target, wake) = (self.target.clone(), early.clone());
+        let decided = match alive {
+            Some(_) => self
+                .store
+                .read(move |r| {
+                    if !r.sent_deliveries(&target)?.is_empty() {
+                        return Ok(None);
+                    }
+                    let rows = r.inbox_open(&target)?;
+                    let at_once = match &wake {
+                        Some((id, rid)) => r.admits_at_once(&target, rid, id)?,
+                        None => false,
+                    };
+                    Ok(Some((rows, at_once)))
+                })
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let batch = match (alive, decided) {
+            (Some(s), Some((rows, at_once))) => self
+                .batch(
+                    s,
+                    quota_blocked,
+                    Some(req),
+                    early.as_ref().map(|(id, _)| id.as_str()),
+                    Some(rows),
+                )
                 .await
                 .map_err(|e| e.to_string())?
-                .filter(|b| b.extra),
+                .filter(|b| b.extra)
+                .map(|b| (b, at_once)),
             _ => None,
         };
-        let (Some(batch), Some(session)) = (batch, live) else {
+        let (Some((batch, at_once)), Some(session)) = (batch, alive) else {
             let done = self
                 .store
                 .host(HostWrite::Admit(admit))
@@ -300,20 +336,8 @@ impl Mailbox {
             };
             return Ok((receipt, stored, self.stored_anyway(notes)));
         };
-        if batch.early {
-            let (target, rid, id) = (
-                self.target.clone(),
-                req.request_id.clone().unwrap_or_default(),
-                batch.delivery.id.clone(),
-            );
-            let at_once = self
-                .store
-                .read(move |r| r.admits_at_once(&target, &rid, &id))
-                .await
-                .unwrap_or(false);
-            if at_once {
-                return self.wake_early(req, admit, batch, session).await;
-            }
+        if batch.early && at_once {
+            return self.wake_early(req, admit, batch, session).await;
         }
         let Batch {
             delivery,
@@ -367,9 +391,12 @@ impl Mailbox {
         #[cfg(debug_assertions)]
         crate::sys::fault::point("wake_before_commit");
         let commit = async {
-            // The crash test after the write needs a commit that has not landed.
+            // The crash tests after the write need a commit that has not landed (with the
+            // relay's arrival held back too for `arrival_after_write`).
             #[cfg(debug_assertions)]
-            if crate::sys::fault::named("wake_after_write") {
+            if crate::sys::fault::named("wake_after_write")
+                || crate::sys::fault::named("arrival_after_write")
+            {
                 std::future::pending::<()>().await;
             }
             self.store
@@ -384,7 +411,10 @@ impl Mailbox {
             outgoing.fresh = session.refresh().await.is_ok();
             let outcome = session.deliver(outgoing).await;
             #[cfg(debug_assertions)]
-            crate::sys::fault::point("wake_after_write");
+            {
+                crate::sys::fault::point("wake_after_write");
+                crate::sys::fault::point("arrival_after_write");
+            }
             outcome
         };
         let (done, outcome) = tokio::join!(commit, write);
@@ -764,7 +794,7 @@ impl Mailbox {
             inbox,
             timing,
             ..
-        }) = self.batch(session, quota_blocked, None, None).await?
+        }) = self.batch(session, quota_blocked, None, None, None).await?
         else {
             return Ok(None);
         };
@@ -780,12 +810,14 @@ impl Mailbox {
 
     /// The batch of pending rows, and `extra` (a message being admitted), that may go to `session`
     /// now; `None` when nothing may go. A batch of `extra` alone takes the `early` ID when given.
+    /// `open` is the target's open rows when the caller has just read them.
     async fn batch<S: Control>(
         &self,
         session: &S,
         quota_blocked: bool,
         extra: Option<&Message>,
         early: Option<&str>,
+        open: Option<Vec<InboxRow>>,
     ) -> Result<Option<Batch>, StoreError> {
         let snapshot = session.snapshot();
         let (Some(session_id), Some(file)) = (&snapshot.session_id, &snapshot.session_file) else {
@@ -802,11 +834,13 @@ impl Mailbox {
             !quota_blocked || owner || identity.is_some_and(|i| i.starts_with(QUOTA_PREFIX))
         };
         let extra = extra.filter(|m| may_go(m.owner, m.identity.as_deref()));
-        let target = self.target.clone();
-        let rows: Vec<InboxRow> = self
-            .store
-            .read(move |r| r.inbox_open(&target))
-            .await?
+        let open = if let Some(rows) = open {
+            rows
+        } else {
+            let target = self.target.clone();
+            self.store.read(move |r| r.inbox_open(&target)).await?
+        };
+        let rows: Vec<InboxRow> = open
             .into_iter()
             .filter(|r| r.state == "pending" && may_go(r.owner, r.identity.as_deref()))
             .collect();

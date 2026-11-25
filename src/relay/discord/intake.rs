@@ -23,7 +23,7 @@ use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 pub(crate) use crate::relay::intake::Shared;
 use crate::relay::intake::{Stop, supervise};
-use crate::relay::pipeline::{Pipeline, Step};
+use crate::relay::pipeline::{Arrival, Pipeline, Step};
 use crate::relay::text::{self, Checks, DISCORD_LIMIT};
 use crate::relay::{Facts, Inbound, PartOutcome, Relay};
 use crate::store::Store;
@@ -79,6 +79,7 @@ fn id(text: &str) -> Result<Snowflake, String> {
 impl Relay for DiscordRelay {
     const NAME: &'static str = NAME;
     const REPEATABLE: bool = true;
+    const LIVE_ONCE: bool = true;
 
     fn parts(&self, answer: &str) -> Result<Vec<String>, String> {
         let answer = answer.trim();
@@ -253,8 +254,6 @@ pub(crate) struct Intake<T: Runtime> {
     token_intents: (String, u64),
     scope: Mutex<Scope>,
     pub(super) wake: Notify,
-    /// Frame read times of live messages not yet handed off.
-    reads: Mutex<HashMap<String, Instant>>,
     started_ms: i64,
     /// When the current connection was established, for the catch-up latency.
     established: Mutex<Option<Instant>>,
@@ -350,7 +349,6 @@ impl<T: Runtime> Intake<T> {
             token_intents: (token, gateway::intents(settings.follow_threads)),
             scope: Mutex::new(scope),
             wake: Notify::new(),
-            reads: Mutex::default(),
             started_ms: now_ms(),
             established: Mutex::new(None),
             catch_up_backoff: Mutex::new((CATCH_UP_FIRST, None)),
@@ -796,7 +794,7 @@ impl<T: Runtime> Intake<T> {
         }
         gathered.reverse();
         for m in gathered {
-            self.take(&m, room, parent).await;
+            self.take(&m, room, parent, None).await;
         }
         Ok(())
     }
@@ -810,12 +808,14 @@ impl<T: Runtime> Intake<T> {
         );
     }
 
-    /// Queues an owner message or passes anything else (DISC-IN req. 12-14, 22, 24).
+    /// Queues an owner message or passes anything else (DISC-IN req. 12-14, 22, 24). `read_at` is a
+    /// live message's frame read time, `None` for one found by a catch-up read.
     async fn take(
         &self,
         raw: &Value,
         room: Snowflake,
         parent: Option<Snowflake>,
+        read_at: Option<Instant>,
     ) -> Option<Arrived> {
         let (message, _) = types::ids(raw)?;
         let gate = types::gate(raw, self.owner);
@@ -848,19 +848,15 @@ impl<T: Runtime> Intake<T> {
                 None
             }
             Gate::Owner => {
-                let done = self
-                    .write(RelayWrite::Arrive {
-                        relay: NAME.into(),
-                        room: room.to_string(),
-                        message: message.to_string(),
-                        seq: message.seq(),
-                        parent: parent.map(|p| p.to_string()),
-                        raw: raw.to_string(),
-                    })
-                    .await;
-                match done {
-                    Ok(RelayDone::Arrived(a)) => Some(a),
-                    Ok(_) => None,
+                let arrival = Arrival {
+                    room: room.to_string(),
+                    message: message.to_string(),
+                    seq: message.seq(),
+                    parent: parent.map(|p| p.to_string()),
+                    raw: raw.to_string(),
+                };
+                match self.pipeline.arrive(arrival, read_at, &self.wake).await {
+                    Ok(a) => Some(a),
                     Err(e) => {
                         log::warn("owner message not queued", &[("error", &e)]);
                         self.flag(true).await;
@@ -871,9 +867,10 @@ impl<T: Runtime> Intake<T> {
         }
     }
 
-    /// A live message (DISC-IN req. 22): scope, gate, then the durable queue before anything else.
+    /// A live message (DISC-IN req. 22): scope, gate, then the durable queue, which the hand-off
+    /// may overlap (decision 15, [`Pipeline::arrive`]).
     async fn arrive(&self, raw: Value, read_at: Instant) {
-        let Some((message, channel)) = types::ids(&raw) else {
+        let Some((_, channel)) = types::ids(&raw) else {
             return;
         };
         let room = self.scope().room(channel);
@@ -885,18 +882,12 @@ impl<T: Runtime> Intake<T> {
                 None => return,
             },
         };
-        if let Some(arrived) = self.take(&raw, channel, parent).await {
+        if let Some(arrived) = self.take(&raw, channel, parent, Some(read_at)).await {
             // Debug builds only: the crash test of acceptance check 4 stops here, after the arrival
             // commit and before the hand-off.
             #[cfg(debug_assertions)]
             if arrived == Arrived::Queued {
                 crate::sys::fault::point("relay_after_arrival");
-            }
-            if arrived == Arrived::Queued {
-                self.reads
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(message.to_string(), read_at);
             }
             self.wake.notify_one();
         }
@@ -1011,6 +1002,7 @@ impl<T: Runtime> Intake<T> {
     }
 
     async fn handle(self: &Arc<Self>, row: &QueueRow) -> Result<Step, String> {
+        let read_at = self.pipeline.read_at(&row.room, &row.message);
         let inbound = match self.pipeline.relay.normalise(row) {
             Ok(i) => i,
             Err(fault) => {
@@ -1022,11 +1014,6 @@ impl<T: Runtime> Intake<T> {
                 return Ok(Step::Done);
             }
         };
-        let read_at = self
-            .reads
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&row.message);
         if let Some(step) = self.pipeline.resume(row, &inbound, read_at).await? {
             return Ok(step);
         }
@@ -1043,7 +1030,7 @@ impl<T: Runtime> Intake<T> {
             .ok()
             .flatten()
             .and_then(|v| v.parse::<i64>().ok());
-        let step = self.pipeline.hand_off(row, &inbound, read_at).await;
+        let step = self.pipeline.hand_off(row, &inbound, read_at, None).await;
         if let Some(previous) = previous
             && now_ms() - previous >= crate::jobs::duration_ms(self.settings.away)
         {

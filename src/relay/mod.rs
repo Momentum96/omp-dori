@@ -67,6 +67,12 @@ pub(crate) trait Relay: Send + Sync + 'static {
     /// A part whose post ended uncertain may be posted again: the platform enforces the nonce
     /// (Discord). Elsewhere an uncertain part is never repeated (MSG req. 8, DESIGN 5.1).
     const REPEATABLE: bool;
+    /// A live message is never received live again once the hub restarts: one whose arrival did
+    /// not commit before a crash comes back only through the catch-up read, as a message not read
+    /// live, so the lead's transcript is searched before any send (Discord: a new Gateway session
+    /// replays nothing). The round may then hand it off while its arrival commits (decision 15).
+    /// Telegram and Slack redeliver what was not acknowledged as live messages: they commit first.
+    const LIVE_ONCE: bool;
 
     /// The answer text as the parts this platform takes (outgoing checks applied, tables rendered,
     /// split at its limit), or why it cannot be posted.

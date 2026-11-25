@@ -310,16 +310,27 @@ impl Store {
         &self.commit_latency
     }
 
-    async fn call<T>(
+    /// Queues one request in the writer's order; the receiver answers after its commit.
+    async fn queue<T>(
         &self,
         make: impl FnOnce(writer::Reply<T>) -> Request,
-    ) -> Result<T, StoreError> {
+    ) -> Result<oneshot::Receiver<Result<T, StoreError>>, StoreError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(make(reply))
             .await
             .map_err(|_| StoreError::WriterGone)?;
-        rx.await.map_err(|_| StoreError::WriterGone)?
+        Ok(rx)
+    }
+
+    async fn call<T>(
+        &self,
+        make: impl FnOnce(writer::Reply<T>) -> Request,
+    ) -> Result<T, StoreError> {
+        self.queue(make)
+            .await?
+            .await
+            .map_err(|_| StoreError::WriterGone)?
     }
 
     pub(crate) async fn append_events(
@@ -414,6 +425,18 @@ impl Store {
         write: relay::RelayWrite,
     ) -> Result<relay::RelayDone, StoreError> {
         self.call(|r| Request::Relay(Box::new(write), r)).await
+    }
+
+    /// One relay mutation queued now, its answer awaited later. The writer applies requests in
+    /// the order they were queued, so a write queued after this one never commits before it: a
+    /// live arrival's hand-off can start while the arrival commits (decision 15).
+    pub(crate) async fn relay_queued(
+        &self,
+        write: relay::RelayWrite,
+    ) -> Result<impl Future<Output = Result<relay::RelayDone, StoreError>> + use<>, StoreError>
+    {
+        let rx = self.queue(|r| Request::Relay(Box::new(write), r)).await?;
+        Ok(async move { rx.await.map_err(|_| StoreError::WriterGone)? })
     }
 
     /// One lead-record mutation (request log, questions, unanswered, stream jobs, reminders).

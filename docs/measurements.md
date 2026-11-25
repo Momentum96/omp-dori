@@ -333,3 +333,52 @@ commits [inference, not broken down]. End to end, Discord gained 3-5 ms at p50 r
 hold through its own commit) was not broken down. Telegram gained 16 ms at p50, Slack 5 ms; single
 runs, so these are indications, not a controlled comparison. The DESIGN 2.3 budgets stand; the
 hub-part row now says which deliveries take the early path. macOS figures are not measured.
+
+## Faster Discord wake (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Commands: `cargo build --release`; `CATALY_CONTRACT_OMP=1 cargo test --release --test contract_discord
+discord_requests_against_stock_omp -- --nocapture --test-threads=1` (41 wakes of an idle lead per run)
+and `... --test contract_relays ...` (21 Telegram and 21 Slack wakes per run). The stage table comes
+from a throwaway build that stamped each Discord message at every stage (written to a file, not in the
+tree), two runs before and two after, p50 / p95 in ms. The machine was shared with three other build
+agents (load average 8-10 on 16 cores), so tails are noisy.
+
+| Stage (Discord, live owner message to an idle lead) | Before (a225fb7) | After |
+| --- | --- | --- |
+| Gateway frame read to parsed and dispatched | 0.05-0.06 / 0.08 | 0.05-0.06 / 0.09-0.10 |
+| Owner gate and scope | 0.02 / 0.03-0.04 | 0.02 / 0.03-0.04 |
+| Arrival commit (`synchronous=FULL`) | 8.19-8.20 / 8.49-8.76, on the path | 8.24-8.27 / 8.86-10.85, beside the hand-off |
+| Round picks the message up (catch-up flag, queue read) | 0.32-0.40 / 0.53 | 0.31-0.34 / 0.49-0.70 |
+| Scope check, hand-off record read, question match, route | 0.29-0.36 / 0.50-0.66 | 0.21-0.26 / 0.37-0.48 |
+| To the lead's `deliver`, its lock | 0.06-0.07 / 0.09 | 0.04-0.06 / 0.10-0.11 |
+| Inbox decision reads (three, now one) | 0.19-0.21 / 0.35-0.41 | 0.18-0.22 / 0.32-0.33 |
+| `get_state` readback (HOST req. 50, kept) | 2.03-2.30 / 7.66-10.26 | 1.96-2.28 / 8.06-11.93 |
+| Prompt line written | 0.05-0.07 / 0.08-0.11 | 0.05-0.07 / 0.09-0.13 |
+| Hub part: frame read to prompt written (sum of the rows above) | about 11.2-11.7 at p50 | about 2.8-3.3 at p50 |
+| Prompt written to the hub reading OMP's `agent_start` | 6.01-6.59 / 14.80-17.19 | 7.01-7.70 / 14.25-15.81 |
+| Frame read to the hub reading `agent_start` (the wake, end to end) | 17.43-18.42 / 30.68-41.52 | 10.92-10.93 / 28.52-33.31 |
+| The hub reading `agent_start` to the relay round seeing it (what the old figure added) | 8.58-9.42 / 35.20-35.26 | no longer counted |
+
+End to end from `cataly stats` (`*_wake_latency`, frame or poll response read to `agent_start`). The
+recorded figure now ends when the lead reads `agent_start`; before, it ended when the relay round got
+to the event, up to 35 ms later at p95. "Before" below is a225fb7 with only that measuring change
+applied, so both columns measure the same thing:
+
+| Measure | Before, same metric (two runs) | After | Target |
+| --- | --- | --- | --- |
+| Discord, 41 wakes | p50 20.1 / 23.4 ms, p95 28.8 / 125.7 ms | p50 10.7 ms, p95 27.4 ms, p99 29.4 ms, max 40.8 ms (stage runs: p50 11.0 / 10.7, p95 28.6 / 33.3) | p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Discord as recorded before the metric change | p50 27.0-29.3 ms, p95 52.6-60.2 ms | (not recorded any more) | |
+| Telegram, 21 wakes (arrival still commits first) | p50 22.6 / 20.0 ms, p95 32.2 / 27.1 ms | p50 22.7 / 23.0 ms, p95 46.6 / 49.7 ms | as Discord |
+| Slack, 21 wakes (arrival still commits first) | p50 21.1 / 17.1 ms, p95 31.3 / 26.4 ms | p50 21.2 / 22.2 ms, p95 38.8 / 54.4 ms | as Discord |
+| Hub part, Discord (`hub_wake`: `deliver` call to prompt written) | p50 2.8 / 3.3 ms | p50 2.4 ms, p95 15.6 ms | p50 ≤ 5 ms, p99 ≤ 25 ms |
+| `cataly lead send` without a request ID (`contract_session`, 40 wakes, commits first) | p50 8.7 ms | p50 8.5 ms, p99 13.9 ms | |
+| Hub RSS, Discord and the lead, after the run | 16.6-16.8 MB | 16,539,648 bytes (15.8 MiB) | ≤ 30 MiB idle |
+| Release binary | 13,145,944 bytes | 13,233,912 bytes | none set |
+
+Discord halves at p50 (the arrival fsync left the path); its p95 is set by OMP's side (readback and
+`agent_start` after the write, 14-16 ms at p95) and stayed. Telegram and Slack keep the arrival
+commit before the hand-off (`docs/build-notes.md`); their p50 did not move, and their p95 in the
+after runs is within the spread of single 21-sample runs on the loaded machine (both after runs are
+higher; their path lost two reads and gained nothing [inference: load, not the change]). What is left
+of the Discord hub part is the readback (2 ms) and about 1 ms of reads and scheduling. macOS figures
+are not measured.
