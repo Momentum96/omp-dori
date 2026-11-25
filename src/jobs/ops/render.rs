@@ -147,6 +147,23 @@ pub(crate) struct Panel {
     pub(crate) muted_until_ms: Option<i64>,
     /// The mute button's length, in minutes.
     pub(crate) mute_minutes: u64,
+    /// The panel is not pinned because the bot may not pin messages.
+    pub(crate) pin_refused: bool,
+}
+
+/// The footer: the version and update word, after the unpinned note while the bot may not pin.
+fn footer(pin_refused: bool, lang: Language, version: &str) -> String {
+    let tail = format!("Cataly {version} · {}", t(lang, "마지막 갱신", "updated"));
+    if pin_refused {
+        let note = t(
+            lang,
+            "고정 안 됨: 봇에 메시지 고정 권한이 없어요",
+            "Not pinned: the bot has no permission to pin messages",
+        );
+        format!("{note}\n{tail}")
+    } else {
+        tail
+    }
 }
 
 /// Korean or English.
@@ -454,7 +471,7 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
         "thumbnail": { "url": format!("attachment://{THUMB}") },
         "image": { "url": format!("attachment://{BANNER}") },
         "fields": fields,
-        "footer": { "text": cut(&format!("Cataly {version} · {}", t(lang, "마지막 갱신", "updated")), FOOTER_MAX) },
+        "footer": { "text": cut(&footer(p.pin_refused, lang, version), FOOTER_MAX) },
     });
     let mute = if p.muted_until_ms.is_some() {
         button(t(lang, "알림 다시 켜기", "Unmute alerts"), "🔔", MUTE)
@@ -840,6 +857,7 @@ pub(crate) mod tests {
             }],
             muted_until_ms: None,
             mute_minutes: 60,
+            pin_refused: false,
         }
     }
 

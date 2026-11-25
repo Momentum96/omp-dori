@@ -2,6 +2,10 @@
 
 ## 0.1.3 (Unreleased)
 
+- The ops panel tries again to pin itself when a pin fails: right after the hub starts, then at
+  most once an hour until it works, so granting the bot Pin Messages later is enough. While the
+  bot may not pin, the panel footer says so. Once pinned, an unpin by hand is left alone until the
+  hub restarts.
 - A failed OMP probe is tried again by itself after 5 s, 15 s and 45 s, then every 5 minutes,
   instead of waiting until the OMP executable changes. Just after an OMP update the first start
   can take longer than the probe allows; the lead now starts as soon as a later probe works.

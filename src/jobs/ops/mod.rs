@@ -60,6 +60,8 @@ pub(crate) struct Ops {
     refresh: AtomicBool,
     /// The last reason the panel could not be kept, logged once.
     trouble: Mutex<Option<String>>,
+    /// Whether the panel is pinned, for this hub run.
+    pin: Mutex<PinTrack>,
 }
 
 impl Ops {
@@ -185,6 +187,8 @@ pub(crate) struct Turn<'a, B: Board + ?Sized> {
     pub(crate) channel: &'a str,
     pub(crate) now: i64,
     pub(crate) version: &'a str,
+    /// The panel's pin state, kept for the hub run.
+    pub(crate) pin: &'a Mutex<PinTrack>,
 }
 
 impl<B: Board + ?Sized> Turn<'_, B> {
@@ -250,20 +254,136 @@ impl<B: Board + ?Sized> Turn<'_, B> {
         }
         panel.recent.clone_from(&state.recent);
         panel.muted_until_ms = muted;
-        let body = render::panel(&panel, self.lang, self.version).to_string();
         let key = format!("ops:{}", self.channel);
-        board::publish(
+        let message = self.message(&key).await;
+        if let Some(m) = &message {
+            panel.pin_refused = self.keep_pin(m).await;
+        }
+        let body = render::panel(&panel, self.lang, self.version).to_string();
+        // The pin is kept below, retried while it fails.
+        let due = board::publish(
             self.store,
-            self.board,
+            &NoPin(self.board),
             &key,
             self.channel,
             &body,
             now,
             force,
         )
-        .await
+        .await;
+        if message.is_none()
+            && let Some(m) = self.message(&key).await
+        {
+            self.keep_pin(&m).await;
+        }
+        due
     }
 
+    /// The panel's message, once created.
+    async fn message(&self, key: &str) -> Option<String> {
+        match docs::get::<Post>(self.store, BOARD, key).await {
+            Ok(found) => found.and_then(|(p, _)| p.message),
+            Err(_) => None,
+        }
+    }
+
+    /// Pins the panel while it is not known pinned: right away, then at most once an hour. Once
+    /// pinned, an unpin by hand (seen at most once an hour) ends the tries for this hub run. Returns
+    /// whether the panel is unpinned for lack of the permission.
+    async fn keep_pin(&self, message: &str) -> bool {
+        let lock = || self.pin.lock().unwrap_or_else(PoisonError::into_inner);
+        let pinned = {
+            let mut t = lock();
+            if t.message.as_deref() != Some(message) {
+                *t = PinTrack {
+                    message: Some(message.to_string()),
+                    refusals_logged: t.refusals_logged,
+                    ..PinTrack::default()
+                };
+            }
+            let due = t.last_ms.is_none_or(|at| self.now - at >= HOUR_MS);
+            if t.stopped || !due {
+                return t.refused();
+            }
+            t.last_ms = Some(self.now);
+            t.pinned
+        };
+        if pinned {
+            let shown = self.board.board_is_pinned(self.channel, message).await;
+            let mut t = lock();
+            if shown == Some(false) {
+                t.stopped = true;
+            }
+            return t.refused();
+        }
+        let result = self.board.board_pin(self.channel, message).await;
+        let mut t = lock();
+        match result {
+            Ok(()) => {
+                t.pinned = true;
+                t.refused_now = false;
+            }
+            Err((true, why)) => {
+                t.refused_now = true;
+                if t.refusals_logged == 0 {
+                    t.refusals_logged += 1;
+                    log::info(
+                        "ops panel not pinned: the bot may not pin messages; tried again hourly",
+                        &[("error", &why)],
+                    );
+                }
+            }
+            Err((false, why)) => log::info("ops panel not pinned", &[("error", &why)]),
+        }
+        t.refused()
+    }
+}
+
+/// The panel's pin as this hub run knows it.
+#[derive(Debug, Default)]
+pub(crate) struct PinTrack {
+    /// The message the rest is about.
+    message: Option<String>,
+    pinned: bool,
+    /// Unpinned by hand after a pin: no more tries until the hub restarts.
+    stopped: bool,
+    /// The last try refused for lack of the permission.
+    refused_now: bool,
+    /// The last try or check.
+    last_ms: Option<i64>,
+    /// Refusals logged this run: at most one.
+    refusals_logged: u32,
+}
+
+impl PinTrack {
+    fn refused(&self) -> bool {
+        self.refused_now && !self.pinned && !self.stopped
+    }
+}
+
+/// A board whose posts are not pinned on create: the ops panel keeps its pin itself.
+struct NoPin<'a, B: Board + ?Sized>(&'a B);
+
+impl<B: Board + ?Sized> Board for NoPin<'_, B> {
+    fn board_create<'a>(
+        &'a self,
+        channel: &'a str,
+        text: &'a str,
+        nonce: &'a str,
+    ) -> BoxFut<'a, Result<String, (bool, String)>> {
+        self.0.board_create(channel, text, nonce)
+    }
+    fn board_edit<'a>(
+        &'a self,
+        channel: &'a str,
+        message: &'a str,
+        text: &'a str,
+    ) -> BoxFut<'a, Result<(), String>> {
+        self.0.board_edit(channel, message, text)
+    }
+}
+
+impl<B: Board + ?Sized> Turn<'_, B> {
     fn words(&self, r: &Recent, extra: &Extra) -> (String, String) {
         let title = render::line(r, self.lang);
         let detail = match r.kind.as_str() {
@@ -513,14 +633,33 @@ impl Board for Embeds {
         })
     }
 
-    fn board_pin<'a>(&'a self, channel: &'a str, message: &'a str) -> BoxFut<'a, ()> {
+    fn board_pin<'a>(
+        &'a self,
+        channel: &'a str,
+        message: &'a str,
+    ) -> BoxFut<'a, Result<(), (bool, String)>> {
+        Box::pin(async move {
+            let channel = channel_id(channel).map_err(|e| (false, e))?;
+            let message = channel_id(message).map_err(|e| (false, e))?;
+            self.rest.pin(channel, message).await.map_err(|e| {
+                // Missing Permissions (50013) or plain Forbidden.
+                let refused = e.code == Some(50013) || e.status == Some(403);
+                (refused, e.to_string())
+            })
+        })
+    }
+
+    fn board_is_pinned<'a>(
+        &'a self,
+        channel: &'a str,
+        message: &'a str,
+    ) -> BoxFut<'a, Option<bool>> {
         Box::pin(async move {
             let (Ok(channel), Ok(message)) = (channel_id(channel), channel_id(message)) else {
-                return;
+                return None;
             };
-            if let Err(e) = self.rest.pin(channel, message).await {
-                log::info("ops panel not pinned", &[("error", &e)]);
-            }
+            let found = self.rest.message(channel, message).await.ok()?;
+            found.get("pinned").and_then(Value::as_bool)
         })
     }
 }
@@ -591,6 +730,7 @@ async fn pass(ctx: &Arc<Ctx>) {
         channel: &channel,
         now,
         version: env!("CARGO_PKG_VERSION"),
+        pin: &ctx.ops.pin,
     };
     let force = ctx.ops.refresh.swap(false, Ordering::SeqCst);
     turn.run(panel, events, &jobs, &extra, force).await;
@@ -674,6 +814,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         recent: Vec::new(),
         muted_until_ms: None,
         mute_minutes: config.ops.mute.as_secs() / 60,
+        pin_refused: false,
     };
     (panel, extra)
 }

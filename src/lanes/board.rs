@@ -36,8 +36,21 @@ pub(crate) trait Board: Send + Sync {
         text: &'a str,
     ) -> BoxFut<'a, Result<(), String>>;
     /// Pins a newly created post where the messenger and the bot's permissions allow; best effort.
-    fn board_pin<'a>(&'a self, _channel: &'a str, _message: &'a str) -> BoxFut<'a, ()> {
-        Box::pin(async {})
+    /// `Err((refused, why))`: `refused` when the bot lacks the permission to pin.
+    fn board_pin<'a>(
+        &'a self,
+        _channel: &'a str,
+        _message: &'a str,
+    ) -> BoxFut<'a, Result<(), (bool, String)>> {
+        Box::pin(async { Ok(()) })
+    }
+    /// Whether the messenger shows the post pinned; `None` when it cannot tell.
+    fn board_is_pinned<'a>(
+        &'a self,
+        _channel: &'a str,
+        _message: &'a str,
+    ) -> BoxFut<'a, Option<bool>> {
+        Box::pin(async { None })
     }
 }
 
@@ -167,8 +180,11 @@ pub(crate) async fn publish<B: Board + ?Sized>(
     };
     let stored = version + i64::from(created);
     let posted = step(board, channel, &post, body, now, write).await?;
-    if created && let Some(id) = &posted.message {
-        board.board_pin(channel, id).await;
+    if created
+        && let Some(id) = &posted.message
+        && let Err((_, why)) = board.board_pin(channel, id).await
+    {
+        crate::log::info("board post not pinned", &[("error", &why)]);
     }
     if let Err(e) = docs::put(store, BOARD, key, &posted, Some(stored)).await {
         crate::log::warn("board record not saved", &[("error", &e)]);

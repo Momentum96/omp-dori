@@ -7,6 +7,10 @@ use crate::store::tests::open_temp;
 struct Fake {
     calls: Mutex<Vec<(String, String)>>,
     next: Mutex<u64>,
+    /// Pins still to refuse for lack of the permission.
+    refuse: Mutex<u32>,
+    /// What Discord shows as pinned.
+    shown: Mutex<Option<bool>>,
 }
 
 impl Fake {
@@ -49,12 +53,27 @@ impl Board for Fake {
             .push((format!("edit {m}"), text.into()));
         Box::pin(async { Ok(()) })
     }
-    fn board_pin<'a>(&'a self, _c: &'a str, m: &'a str) -> BoxFut<'a, ()> {
+    fn board_pin<'a>(&'a self, _c: &'a str, m: &'a str) -> BoxFut<'a, Result<(), (bool, String)>> {
         self.calls
             .lock()
             .unwrap()
             .push((format!("pin {m}"), String::new()));
-        Box::pin(async {})
+        let mut refuse = self.refuse.lock().unwrap();
+        let result = if *refuse > 0 {
+            *refuse -= 1;
+            Err((true, "403 Missing Permissions (50013)".to_string()))
+        } else {
+            Ok(())
+        };
+        Box::pin(async move { result })
+    }
+    fn board_is_pinned<'a>(&'a self, _c: &'a str, m: &'a str) -> BoxFut<'a, Option<bool>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((format!("check {m}"), String::new()));
+        let shown = *self.shown.lock().unwrap();
+        Box::pin(async move { shown })
     }
 }
 
@@ -105,6 +124,7 @@ struct Room {
     store: Store,
     fake: Fake,
     settings: OpsSettings,
+    pin: Mutex<PinTrack>,
     _keep: (crate::store::WriterHandle, crate::sys::fs::tests::Scratch),
 }
 
@@ -115,6 +135,7 @@ impl Room {
             store,
             fake: Fake::default(),
             settings: OpsSettings::default(),
+            pin: Mutex::default(),
             _keep: (handle, dir),
         }
     }
@@ -136,6 +157,7 @@ impl Room {
             channel: "100000000000000012",
             now,
             version: "0.1.1",
+            pin: &self.pin,
         };
         let extra = Extra {
             host: "부하 172%".into(),
@@ -181,6 +203,83 @@ async fn panel_created_once_then_edited_at_most_once_a_minute() {
     assert_eq!(calls[2].0, format!("edit {id}"), "edited, not recreated");
     assert!(calls[2].1.contains("바쁨"));
     assert_eq!(room.fake.count("create"), 1);
+}
+
+/// A pin refused for lack of the permission is noted once in the footer and logged once, tried
+/// again at most once an hour, and pinned once when the permission arrives.
+#[tokio::test]
+async fn refused_pin_is_retried_hourly_until_it_works() {
+    let room = Room::new("ops-pin-refused");
+    let ko = Language::Korean;
+    let ready = || panel_with(40.0, HostState::Ready);
+    *room.fake.refuse.lock().unwrap() = u32::MAX;
+    room.at(START, ready(), Vec::new(), &[], ko).await;
+    assert_eq!(room.fake.count("pin"), 1, "tried right after the create");
+    // The next edit carries the note; no new try within the hour.
+    room.at(START + MIN, ready(), Vec::new(), &[], ko).await;
+    let calls = room.fake.calls();
+    let edit = calls.last().unwrap();
+    assert!(edit.0.starts_with("edit"), "{calls:?}");
+    assert_eq!(
+        edit.1
+            .matches("고정 안 됨: 봇에 메시지 고정 권한이 없어요")
+            .count(),
+        1
+    );
+    for minute in 2..60 {
+        room.at(START + minute * MIN, ready(), Vec::new(), &[], ko)
+            .await;
+    }
+    assert_eq!(room.fake.count("pin"), 1);
+    // Still refused an hour on: tried once more, logged no more.
+    room.at(START + HOUR_MS, ready(), Vec::new(), &[], ko).await;
+    assert_eq!(room.fake.count("pin"), 2);
+    assert_eq!(room.pin.lock().unwrap().refusals_logged, 1);
+    // The permission arrives: the next hourly try pins, and the note goes.
+    *room.fake.refuse.lock().unwrap() = 0;
+    room.at(START + HOUR_MS + 30 * MIN, ready(), Vec::new(), &[], ko)
+        .await;
+    assert_eq!(room.fake.count("pin"), 2, "not before the hour");
+    room.at(START + 2 * HOUR_MS, ready(), Vec::new(), &[], ko)
+        .await;
+    assert_eq!(room.fake.count("pin"), 3);
+    room.at(START + 2 * HOUR_MS + MIN, ready(), Vec::new(), &[], ko)
+        .await;
+    let calls = room.fake.calls();
+    let edit = calls.last().unwrap();
+    assert!(edit.0.starts_with("edit"), "{calls:?}");
+    assert!(!edit.1.contains("고정 안 됨"));
+    for hour in 3..6 {
+        room.at(START + hour * HOUR_MS, ready(), Vec::new(), &[], ko)
+            .await;
+    }
+    assert_eq!(room.fake.count("pin"), 3, "pinned once, then left alone");
+    assert_eq!(room.pin.lock().unwrap().refusals_logged, 1);
+}
+
+/// After a pin works, an unpin by hand ends the tries for the hub run.
+#[tokio::test]
+async fn hand_unpin_stops_the_tries() {
+    let room = Room::new("ops-pin-unpinned");
+    let ko = Language::Korean;
+    let ready = || panel_with(40.0, HostState::Ready);
+    *room.fake.shown.lock().unwrap() = Some(true);
+    room.at(START, ready(), Vec::new(), &[], ko).await;
+    assert_eq!(room.fake.count("pin"), 1);
+    room.at(START + HOUR_MS, ready(), Vec::new(), &[], ko).await;
+    assert_eq!(room.fake.count("check"), 1, "still pinned");
+    *room.fake.shown.lock().unwrap() = Some(false);
+    room.at(START + 2 * HOUR_MS, ready(), Vec::new(), &[], ko)
+        .await;
+    assert_eq!(room.fake.count("check"), 2);
+    for hour in 3..8 {
+        room.at(START + hour * HOUR_MS, ready(), Vec::new(), &[], ko)
+            .await;
+    }
+    assert_eq!(room.fake.count("pin"), 1, "never pinned again");
+    assert_eq!(room.fake.count("check"), 2, "not watched any more");
+    let calls = room.fake.calls();
+    assert!(calls.iter().all(|(_, body)| !body.contains("고정 안 됨")));
 }
 
 /// Busy and ready flapping for an hour changes only the panel: no alert is ever posted.
