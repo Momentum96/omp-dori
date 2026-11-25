@@ -208,7 +208,7 @@ impl Base {
             || self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 
-    fn authority(&self) -> String {
+    pub(crate) fn authority(&self) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host)
         } else {
@@ -303,6 +303,18 @@ pub(crate) async fn call(
     base: &Base,
     req: &Request<'_>,
     policy: Policy,
+    observe: impl FnMut(&Response),
+) -> Outcome {
+    call_capped(base, req, policy, BODY_CAP, observe).await
+}
+
+/// [`call`] with another response-body cap (downloads, `cataly transcribe`). A declared length
+/// over the cap is refused before the body is read.
+pub(crate) async fn call_capped(
+    base: &Base,
+    req: &Request<'_>,
+    policy: Policy,
+    cap: usize,
     mut observe: impl FnMut(&Response),
 ) -> Outcome {
     let started = Instant::now();
@@ -312,7 +324,7 @@ pub(crate) async fn call(
     let mut maybe_sent: Option<String> = None;
     loop {
         attempt += 1;
-        let result = timeout(policy.attempt, once(base, req))
+        let result = timeout(policy.attempt, once(base, req, cap))
             .await
             .unwrap_or_else(|_| Err(Attempt::Unknown("no complete answer in time".into())));
         let elapsed = started.elapsed();
@@ -377,7 +389,7 @@ fn after_doubt(maybe_sent: Option<String>, last: Outcome) -> Outcome {
     }
 }
 
-async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
+async fn once(base: &Base, req: &Request<'_>, cap: usize) -> Result<Response, Attempt> {
     let tcp = timeout(
         CONNECT_TIMEOUT,
         TcpStream::connect((base.host.as_str(), base.port)),
@@ -386,7 +398,7 @@ async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
     .map_err(|_| Attempt::NotSent("connect timed out".into()))?
     .map_err(|e| Attempt::NotSent(format!("connect failed: {}", e.kind())))?;
     if !base.tls {
-        return exchange(tcp, base, req).await;
+        return exchange(tcp, base, req, cap).await;
     }
     let name = ServerName::try_from(base.host.clone())
         .map_err(|_| Attempt::NotSent("invalid server name".into()))?;
@@ -400,10 +412,10 @@ async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
     .await
     .map_err(|_| Attempt::NotSent("TLS handshake timed out".into()))?
     .map_err(|e| Attempt::NotSent(format!("TLS handshake failed: {e}")))?;
-    exchange(tls, base, req).await
+    exchange(tls, base, req, cap).await
 }
 
-async fn exchange<S>(io: S, base: &Base, req: &Request<'_>) -> Result<Response, Attempt>
+async fn exchange<S>(io: S, base: &Base, req: &Request<'_>, cap: usize) -> Result<Response, Attempt>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -434,10 +446,17 @@ where
             .map_err(|e| Attempt::Unknown(format!("request failed: {e}")))?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = Limited::new(response.into_body(), BODY_CAP)
+        let declared = headers
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok());
+        if declared.is_some_and(|n| n > cap) {
+            return Err(Attempt::Unknown(format!("declared body over {cap} bytes")));
+        }
+        let body = Limited::new(response.into_body(), cap)
             .collect()
             .await
-            .map_err(|_| Attempt::Unknown("response body unreadable or over 2 MiB".into()))?
+            .map_err(|_| Attempt::Unknown(format!("response body unreadable or over {cap} bytes")))?
             .to_bytes()
             .to_vec();
         Ok(Response {

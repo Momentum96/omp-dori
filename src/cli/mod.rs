@@ -6,6 +6,7 @@ mod lead;
 pub(crate) mod out;
 mod setup;
 mod slot;
+mod transcribe;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -49,6 +50,18 @@ const RUN_TIMEOUT: Duration = Duration::from_mins(24 * 60 + 2);
 pub(crate) fn main() -> ExitCode {
     let words: Vec<String> = std::env::args().skip(1).collect();
     // `slot` keeps its command's words verbatim after `--`, so it parses its own line.
+    // `transcribe` takes one path or URL and runs locally against the owner's command.
+    if words.first().map(String::as_str) == Some("transcribe") {
+        return match Paths::from_env() {
+            Ok(paths) => {
+                ExitCode::from(transcribe::run(words.get(1..).unwrap_or_default(), &paths))
+            }
+            Err(e) => {
+                out::error_line(&format!("cataly: {e}"));
+                ExitCode::from(exit::FAILED)
+            }
+        };
+    }
     if words.first().map(String::as_str) == Some("slot")
         && !words
             .iter()

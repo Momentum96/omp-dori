@@ -236,6 +236,9 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
         }
     };
     log::set_level(config.hub.log_level);
+    if let Some(why) = config.voice.refusal() {
+        log::warn("voice is off", &[("reason", &why)]);
+    }
     let (store, writer) = match Store::open(&paths.db_file(), &paths.backup_dir) {
         Ok(opened) => opened,
         Err(e) => {
