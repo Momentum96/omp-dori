@@ -109,6 +109,14 @@ pub(crate) struct DiscordSettings {
     pub(crate) form_default_after: Duration,
     /// Set an empty bot avatar at start (MSG-11; the owner may turn it off).
     pub(crate) profile: bool,
+    /// The owner counts as back when his message comes this long after his previous one (OJ req. 50).
+    pub(crate) away: Duration,
+    /// Watched rooms that hold conversations with other people (OJ req. 53); a subset of `channels`.
+    pub(crate) others: Vec<Snowflake>,
+    /// A message from someone else unanswered this long is reported once (default 120 minutes).
+    pub(crate) others_alert: Duration,
+    /// Entries older than this are dropped silently (default 24 hours).
+    pub(crate) others_drop: Duration,
 }
 
 /// Most watched Discord channels (DISC-IN req. 5).
@@ -127,6 +135,10 @@ impl Default for DiscordSettings {
             remote_approvals: false,
             form_default_after: Duration::from_mins(3),
             profile: true,
+            away: Duration::from_hours(3),
+            others: Vec::new(),
+            others_alert: Duration::from_mins(120),
+            others_drop: Duration::from_hours(24),
         }
     }
 }
@@ -765,6 +777,42 @@ fn discord_intake(errors: &mut Vec<ConfigError>, d: &mut Section<'_>, out: &mut 
         Duration::from_hours(1),
     ) {
         out.form_default_after = after;
+    }
+    if let Some(away) = d.duration(
+        errors,
+        "away",
+        Duration::from_secs(1),
+        Duration::from_hours(720),
+    ) {
+        out.away = away;
+    }
+    if let Some(list) = d.strings(errors, "others") {
+        for text in &list {
+            match Snowflake::parse(text).filter(|id| out.channels.contains(id)) {
+                Some(id) if !out.others.contains(&id) => out.others.push(id),
+                Some(_) => {}
+                None => errors.push(d.error(
+                    "others",
+                    &format!("'{text}' is not one of the watched channels"),
+                )),
+            }
+        }
+    }
+    if let Some(alert) = d.duration(
+        errors,
+        "others_alert",
+        Duration::from_secs(1),
+        Duration::from_hours(168),
+    ) {
+        out.others_alert = alert;
+    }
+    if let Some(drop) = d.duration(
+        errors,
+        "others_drop",
+        Duration::from_secs(1),
+        Duration::from_hours(720),
+    ) {
+        out.others_drop = drop;
     }
     if out.channels.is_empty() != out.owner.is_none() {
         errors.push(d.error(

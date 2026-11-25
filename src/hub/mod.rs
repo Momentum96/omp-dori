@@ -4,9 +4,13 @@
 //! Start-up order: directories, hub log, lock, config, store (with migrations), socket, job engine
 //! (recovery first), supervised tasks, stall detector, then `READY=1`.
 
+pub(crate) mod bridge;
 pub(crate) mod dispatch;
 pub(crate) mod socket;
+mod streams;
 pub(crate) mod supervisor;
+mod to_lead;
+mod tool;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -59,6 +63,8 @@ pub(crate) struct Hub {
     lead: Arc<Lead<Headless>>,
     agent_start: Latency,
     pub(crate) discord: Arc<crate::relay::discord::intake::Shared>,
+    links: Arc<crate::host::bridge::Links>,
+    streams: Arc<streams::Streams>,
 }
 
 impl Hub {
@@ -146,6 +152,15 @@ impl Hub {
                 ))
             }
         }
+    }
+
+    fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config_tx.borrow())
+    }
+
+    /// The Discord client when a token is set up; `None` otherwise.
+    fn discord_rest(&self) -> Option<Arc<crate::relay::discord::Rest>> {
+        self.jobs.ctx().discord(&self.config()).ok()
     }
 }
 
@@ -242,27 +257,43 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
     ExitCode::from(code)
 }
 
-async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
-    let signals = match Signals::install() {
-        Ok(s) => s,
-        Err(e) => {
-            refuse(&format!("cataly hub: signal handlers: {e}"));
-            return exit::FAILED;
-        }
-    };
-    let listener = match socket::bind(&paths.socket) {
-        Ok(l) => Arc::new(l),
+/// Signal handlers first (an early TERM is still graceful), then the control socket. `Err` is the
+/// exit status after the refusal was reported.
+fn open(paths: &Paths) -> Result<(Signals, Arc<tokio::net::UnixListener>), u8> {
+    let signals = Signals::install().map_err(|e| {
+        refuse(&format!("cataly hub: signal handlers: {e}"));
+        exit::FAILED
+    })?;
+    match socket::bind(&paths.socket) {
+        Ok(l) => Ok((signals, Arc::new(l))),
         Err(socket::BindError::Live) => {
             refuse(&format!(
                 "cataly hub is already running (socket {} answers)",
                 paths.socket.display()
             ));
-            return exit::ALREADY_RUNNING;
+            Err(exit::ALREADY_RUNNING)
         }
         Err(e) => {
             refuse(&format!("cataly hub: {e}"));
-            return exit::FAILED;
+            Err(exit::FAILED)
         }
+    }
+}
+
+/// Where the lead's stream jobs run: the lead's working directory, else home, else `/`.
+fn stream_cwd(config: &Config) -> std::path::PathBuf {
+    config
+        .lead
+        .as_ref()
+        .and_then(|l| l.cwd.clone())
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("/"))
+}
+
+async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
+    let (signals, listener) = match open(paths) {
+        Ok(opened) => opened,
+        Err(code) => return code,
     };
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (supervisor, mut exit_rx) = Supervisor::new(Policy::HUB, shutdown_rx.clone());
@@ -290,6 +321,14 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             return exit::FAILED;
         }
     };
+    let links = Arc::new(crate::host::bridge::Links::default());
+    let lead_cwd = stream_cwd(&config_rx.borrow());
+    let streams = streams::Streams::new(
+        jobs.clone(),
+        store.clone(),
+        lead_cwd,
+        paths.files_dir.clone(),
+    );
     let (lead, agent_start, discord) = sessions(
         paths,
         &jobs,
@@ -298,6 +337,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         &store,
         &supervisor,
         &shutdown_rx,
+        &links,
     );
     let hub = Arc::new(Hub {
         paths: paths.clone(),
@@ -313,6 +353,8 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         lead: Arc::clone(&lead),
         agent_start,
         discord,
+        links,
+        streams: Arc::clone(&streams),
     });
     {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
@@ -320,6 +362,8 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             socket::serve(Arc::clone(&hub), Arc::clone(&listener))
         });
     }
+    spawn_lead_tasks(&hub, &supervisor, &shutdown_rx);
+    streams.resume().await;
     let heartbeat = spawn_background(&supervisor, paths, omp, config_rx, &store, &shutdown_rx);
     let notifier = Arc::new(Notifier::from_env());
     let marker = paths.stall_marker();
@@ -347,6 +391,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
 
 /// The lead and Discord intake, each under its supervised task; returns the lead, its `agent_start`
 /// latency ring and intake's shared state.
+#[allow(clippy::too_many_arguments)]
 fn sessions(
     paths: &Paths,
     jobs: &Jobs,
@@ -355,6 +400,7 @@ fn sessions(
     store: &Store,
     supervisor: &Supervisor,
     shutdown: &watch::Receiver<bool>,
+    links: &Arc<crate::host::bridge::Links>,
 ) -> (
     Arc<Lead<Headless>>,
     Latency,
@@ -362,7 +408,16 @@ fn sessions(
 ) {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
-    let lead = lead(paths, jobs, omp, config, store, &agent_start, &events);
+    let lead = lead(
+        paths,
+        jobs,
+        omp,
+        config,
+        store,
+        &agent_start,
+        &events,
+        links,
+    );
     {
         let (lead, stop) = (Arc::clone(&lead), shutdown.clone());
         supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
@@ -371,6 +426,28 @@ fn sessions(
         paths, jobs, &lead, &events, config, store, supervisor, shutdown,
     );
     (lead, agent_start, discord)
+}
+
+/// Events to the lead, owed-reply reminders and the unanswered watch, each a supervised task.
+fn spawn_lead_tasks(hub: &Arc<Hub>, supervisor: &Supervisor, shutdown: &watch::Receiver<bool>) {
+    {
+        let (hub, stop) = (Arc::clone(hub), shutdown.clone());
+        supervisor.spawn("to-lead", move || {
+            to_lead::route(Arc::clone(&hub), stop.clone())
+        });
+    }
+    {
+        let (hub, stop) = (Arc::clone(hub), shutdown.clone());
+        supervisor.spawn("reminders", move || {
+            to_lead::remind(Arc::clone(&hub), stop.clone())
+        });
+    }
+    {
+        let (hub, stop) = (Arc::clone(hub), shutdown.clone());
+        supervisor.spawn("unanswered", move || {
+            to_lead::others(Arc::clone(&hub), stop.clone())
+        });
+    }
 }
 
 /// Events of the lead and the relays, recorded one at a time in the order they were emitted (a task
@@ -392,6 +469,7 @@ fn hub_events(jobs: &Jobs) -> Events {
 }
 
 /// The standing lead with its headless runtime (DESIGN 4.2), started by its supervised task.
+#[allow(clippy::too_many_arguments)]
 fn lead(
     paths: &Paths,
     jobs: &Jobs,
@@ -400,6 +478,7 @@ fn lead(
     store: &Store,
     agent_start: &Latency,
     events: &Events,
+    links: &Arc<crate::host::bridge::Links>,
 ) -> Arc<Lead<Headless>> {
     let gate = jobs.clone();
     let (state, socket, logs) = (
@@ -408,10 +487,12 @@ fn lead(
         paths.logs_dir.join("sessions"),
     );
     let agent_start = agent_start.clone();
+    let links = Arc::clone(links);
     Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
         gate_held: Arc::new(move || gate.gate().held),
+        bridge_link: Arc::new(crate::omp::extension::check),
         events: Arc::clone(events),
         store: store.clone(),
         state_dir: paths.state_dir.clone(),
@@ -424,6 +505,7 @@ fn lead(
             extra_flags: config.sessions.extra_flags.clone(),
             spend_phrases: config.sessions.spend_phrases.clone(),
             agent_start: agent_start.clone(),
+            links: Arc::clone(&links),
         }),
     })
 }

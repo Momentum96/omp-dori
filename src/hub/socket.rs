@@ -102,14 +102,14 @@ pub(crate) async fn serve(
     }
 }
 
-enum Line {
+pub(super) enum Line {
     Text(String),
     TooLong,
     Closed,
 }
 
 /// Reads one line of at most `MAX_LINE` bytes.
-async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Line {
+pub(super) async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Line {
     let mut buf = Vec::new();
     loop {
         let chunk = match reader.fill_buf().await {
@@ -141,7 +141,8 @@ async fn send(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
 }
 
 async fn connection(hub: &Arc<Hub>, stream: UnixStream) {
-    let (read, mut writer) = stream.into_split();
+    let (read, writer) = stream.into_split();
+    let mut writer = writer;
     let mut reader = BufReader::new(read);
     loop {
         let line = match tokio::time::timeout(IDLE, read_line(&mut reader)).await {
@@ -170,6 +171,10 @@ async fn connection(hub: &Arc<Hub>, stream: UnixStream) {
         };
         if request.method == method::EVENTS_FOLLOW {
             follow(hub, request.id, request.params, &mut reader, &mut writer).await;
+            return;
+        }
+        if request.method == super::bridge::HELLO {
+            super::bridge::serve(hub, request.id, request.params, &mut reader, writer).await;
             return;
         }
         let started = Instant::now();

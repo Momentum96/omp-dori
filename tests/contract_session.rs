@@ -6,7 +6,8 @@
 //! file; follow-up; steer; abort; an approval dialog answered Deny; resume identity; lease. Then the
 //! hub end to end: the lead starts, a message is written and confirmed from the session file, the
 //! lead stops cleanly and resumes its session after a hub restart (acceptance check 12), and the
-//! fallback chain moves a usage-limited lead to the backup model (acceptance check 9).
+//! fallback chain moves a usage-limited lead to the backup model (acceptance check 9). The bridge
+//! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead.
 
 #![allow(
     clippy::unwrap_used,
@@ -78,18 +79,24 @@ impl Sandbox {
     }
 
     fn omp(&self, extra: &[String]) -> Rpc {
+        self.omp_with(false, extra, &[])
+    }
+
+    /// OMP in rpc-ui mode; `discover` lets it load the agent directory's extensions (the bridge
+    /// link), else only `-e` paths in `extra` load.
+    fn omp_with(&self, discover: bool, extra: &[String], env: &[(&str, PathBuf)]) -> Rpc {
         let mut cmd = Command::new(installed_omp());
         cmd.args([
             "--mode",
             "rpc-ui",
             "--approval-mode",
             "always-ask",
-            "--no-extensions",
             "--no-skills",
             "--no-rules",
             "--no-context-files",
             "--model=fake/primary",
         ])
+        .args((!discover).then_some("--no-extensions"))
         .args(extra)
         .current_dir(self.root.join("work"))
         .env_clear()
@@ -97,6 +104,7 @@ impl Sandbox {
         .env("HOME", self.root.join("home"))
         .env("PI_CODING_AGENT_DIR", self.root.join("agent"))
         .env("PI_NOTIFICATIONS", "off")
+        .envs(env.iter().map(|(k, v)| (*k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -471,5 +479,224 @@ fn lead_falls_back_along_the_owner_chain() {
     assert_eq!(fallbacks.len(), 1, "{fallbacks:?}");
     assert_eq!(fallbacks[0]["urgent"], false);
     assert!(sandbox.model.seen().iter().any(|m| m == "backup"));
+    // A reported fallback is never an unexpected model (DESIGN 6.1).
+    let kinds = hub.event_kinds();
+    assert!(
+        !kinds.iter().any(|k| k == "session.model_unexpected"),
+        "{kinds:?}"
+    );
+    assert!(hub.stop().success());
+}
+
+/// Loads the installed bridge through a counting proxy of OMP's extension API and records what it
+/// registered, the entries it wrote and its own load cost (import plus factory) inside OMP.
+const PROBE: &str = r#"import { writeFileSync } from "node:fs";
+export default async function probe(pi: any) {
+	const seen = { on: [] as string[], tools: [] as string[], entries: [] as string[], loadMs: 0 };
+	const dump = () => writeFileSync(process.env.CATALY_PROBE_OUT!, JSON.stringify(seen));
+	const proxy = new Proxy(pi, {
+		get(t: any, k: string | symbol) {
+			if (k === "on") return (n: string, h: any) => (seen.on.push(n), t.on(n, h));
+			if (k === "registerTool") return (d: any) => (seen.tools.push(d.name), t.registerTool(d));
+			if (k === "appendEntry") return (c: string, d: any) => (seen.entries.push(c), t.appendEntry(c, d));
+			const v = t[k];
+			return typeof v === "function" ? v.bind(t) : v;
+		},
+	});
+	const t0 = performance.now();
+	const bridge = await import(process.env.CATALY_PROBE_BRIDGE!);
+	bridge.default(proxy);
+	seen.loadMs = performance.now() - t0;
+	dump();
+	for (const e of ["session_start", "agent_end", "session_shutdown"]) pi.on(e, dump);
+}
+"#;
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+/// One prompt through an ordinary (non-Cataly) session; returns once OMP has exited.
+fn ordinary_turn(mut omp: Rpc) {
+    let p =
+        omp.send(json!({"type": "prompt", "message": "hello", "streamingBehavior": "followUp"}));
+    assert_eq!(omp.result_of(&p)["status"], "completed");
+    omp.close();
+}
+
+/// Acceptance check 11 and the bridge contract case (PATCH-12 "bridge load and inert behaviour"):
+/// in an ordinary OMP session the installed bridge registers only the session start and switch
+/// handlers, writes nothing and never connects; its own load cost inside OMP is measured, and OMP's
+/// start-up with and without the link.
+#[test]
+fn bridge_in_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new("bridge");
+    let mut linker = TestHub::new("");
+    linker
+        .env
+        .push(("PI_CODING_AGENT_DIR".into(), sandbox.root.join("agent")));
+    let out = linker.cli(&["bridge", "install"]);
+    assert!(out.status.success(), "{out:?}");
+    let link = sandbox.root.join("agent/extensions/cataly.ts");
+    let target = std::fs::read_link(&link).unwrap();
+    // A listener where the bridge would connect: any accept means it was not inert.
+    let socket = sandbox.root.join("hub.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let probe = sandbox.root.join("probe.ts");
+    std::fs::write(&probe, PROBE).unwrap();
+    let out = sandbox.root.join("probe.json");
+    let env = [
+        ("CATALY_SOCKET", socket.clone()),
+        ("CATALY_PROBE_OUT", out.clone()),
+        ("CATALY_PROBE_BRIDGE", target.clone()),
+    ];
+
+    // Inert, observed through the probe (the link is set aside so the bridge loads once).
+    let parked = sandbox.root.join("cataly.ts.parked");
+    std::fs::rename(&link, &parked).unwrap();
+    let sessions = format!("--session-dir={}", sandbox.root.join("sessions").display());
+    ordinary_turn(sandbox.omp_with(
+        false,
+        &["-e".into(), probe.display().to_string(), sessions.clone()],
+        &env,
+    ));
+    let seen: Value = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(
+        seen["on"],
+        json!(["session_start", "session_switch"]),
+        "{seen}"
+    );
+    assert_eq!(seen["tools"], json!([]), "{seen}");
+    assert_eq!(seen["entries"], json!([]), "{seen}");
+    let load_ms = seen["loadMs"].as_f64().unwrap();
+
+    // Inert through the real link, discovered by OMP itself.
+    std::fs::rename(&parked, &link).unwrap();
+    ordinary_turn(sandbox.omp_with(true, std::slice::from_ref(&sessions), &env));
+    assert!(
+        listener.accept().is_err(),
+        "an ordinary session connected to the hub socket"
+    );
+    for body in sandbox.model.bodies() {
+        let text = body.to_string();
+        assert!(
+            !text.contains("Cataly: your role"),
+            "guidance in an ordinary session"
+        );
+        assert!(
+            !text.contains("\"name\":\"cataly\""),
+            "hub tool in an ordinary session"
+        );
+    }
+    for entry in std::fs::read_dir(sandbox.root.join("sessions")).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap_or_default();
+        assert!(
+            !text.contains("\"customType\":\"cataly\""),
+            "marker written"
+        );
+    }
+
+    let [with, empty, none] = startup_medians(&sandbox, &link, &parked, &sessions, &env);
+    eprintln!(
+        "MEASURE bridge_load_in_omp_ms={load_ms:.2} omp_ready_ms link={with:.1} \
+         empty_extension={empty:.1} no_extension={none:.1}; link minus empty={:.1}",
+        with - empty
+    );
+    assert!(
+        load_ms < 5.0,
+        "bridge import and factory took {load_ms:.2} ms"
+    );
+    assert!(
+        listener.accept().is_err(),
+        "a start-up run connected to the hub socket"
+    );
+    drop(linker);
+}
+
+/// OMP start-up (spawn to `ready`) medians, interleaved: with the bridge link; with only an empty
+/// extension (OMP's own cost of loading any extension); with no extension at all.
+fn startup_medians(
+    sandbox: &Sandbox,
+    link: &Path,
+    parked: &Path,
+    sessions: &str,
+    env: &[(&str, PathBuf)],
+) -> [f64; 3] {
+    let noop = sandbox.root.join("agent/extensions/noop.ts");
+    let noop_parked = sandbox.root.join("noop.ts.parked");
+    std::fs::write(
+        &noop_parked,
+        "export default function noop(_pi: unknown) {}\n",
+    )
+    .unwrap();
+    let mut runs: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    std::fs::rename(link, parked).unwrap();
+    for n in 0..30 {
+        let variant = n % 3;
+        match variant {
+            0 => std::fs::rename(parked, link).unwrap(),
+            1 => {
+                std::fs::rename(link, parked).unwrap();
+                std::fs::rename(&noop_parked, &noop).unwrap();
+            }
+            _ => std::fs::rename(&noop, &noop_parked).unwrap(),
+        }
+        let started = Instant::now();
+        let omp = sandbox.omp_with(true, &[sessions.to_string()], env);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        omp.close();
+        runs[variant].push(ms);
+    }
+    std::fs::rename(parked, link).unwrap();
+    runs.map(median)
+}
+
+/// The bridge contract case for an accepted lead: it connects, the hub's tool is offered and the
+/// guidance is in the system prompt; the session gets the Cataly marker.
+#[test]
+fn bridge_accepted_lead_in_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let lead_box = Sandbox::new("bridgelead");
+    let mut hub = lead_hub(&lead_box, "fake/primary", "");
+    hub.start();
+    let live = wait_lead(&hub, |v| {
+        v["phase"] == "live" && v["bridge"]["connected"] == true
+    });
+    assert!(
+        live["bridge"]["session"] == live["session"]["session_id"],
+        "{live}"
+    );
+    assert!(hub.cli(&["lead", "send", "bridge check"]).status.success());
+    let last = hub.until(Duration::from_secs(60), || {
+        let bodies = lead_box.model.bodies();
+        let last = bodies.last()?.to_string();
+        last.contains("bridge check").then_some(last)
+    });
+    wait_lead(&hub, |v| v["sent"] == 0 && v["waiting"] == 0);
+    assert!(last.contains("Cataly: your role"), "no guidance: {last}");
+    // OMP offers an extension tool either as a top-level tool or, with its default
+    // `tools.commands`, as a command mounted in `bash` and listed in the system prompt.
+    let top_level = last.contains("\"name\":\"cataly\"");
+    assert!(
+        top_level || last.contains("Cataly's records and watches"),
+        "no hub tool: {last}"
+    );
+    eprintln!(
+        "MEASURE lead_tool_offered_as={}",
+        if top_level { "tool" } else { "command" }
+    );
+    let file = live["session"]["session_file"].as_str().unwrap();
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(
+        text.contains("\"customType\":\"cataly\""),
+        "no session marker"
+    );
     assert!(hub.stop().success());
 }

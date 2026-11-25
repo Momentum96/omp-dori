@@ -61,6 +61,81 @@ pub(crate) struct Field {
     /// Default text, or a hidden field's value.
     pub(crate) value: String,
     pub(crate) required: bool,
+    pub(crate) limits: Limits,
+}
+
+/// What a text field accepts (DISC-OUT req. 63, 72): a number within `min`/`max`, or text within
+/// `min_len`/`max_len`; `long` for a textarea.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Limits {
+    pub(crate) number: bool,
+    pub(crate) min: Option<String>,
+    pub(crate) max: Option<String>,
+    pub(crate) min_len: Option<usize>,
+    pub(crate) max_len: Option<usize>,
+    pub(crate) long: bool,
+}
+
+impl Limits {
+    fn of(t: &Tag, number: bool, long: bool) -> Result<Self, String> {
+        let num = |k: &str| -> Result<Option<String>, String> {
+            match t.attr(k) {
+                Some(v) if v.trim().parse::<f64>().is_ok_and(f64::is_finite) => {
+                    Ok(Some(v.trim().to_string()))
+                }
+                Some(_) => Err(format!("a {k} that is not a number")),
+                None => Ok(None),
+            }
+        };
+        let len = |k: &str| -> Result<Option<usize>, String> {
+            t.attr(k)
+                .map(|v| {
+                    v.trim()
+                        .parse::<usize>()
+                        .map_err(|_| format!("a {k} that is not a count"))
+                })
+                .transpose()
+        };
+        Ok(Self {
+            number,
+            min: if number { num("min")? } else { None },
+            max: if number { num("max")? } else { None },
+            min_len: len("minlength")?,
+            max_len: len("maxlength")?,
+            long,
+        })
+    }
+
+    /// Checks one answer; the error names the field.
+    pub(crate) fn check(&self, name: &str, value: &str) -> Result<(), String> {
+        let count = value.chars().count();
+        if self.min_len.is_some_and(|m| count < m) || self.max_len.is_some_and(|m| count > m) {
+            return Err(format!(
+                "{name} takes {} to {} characters",
+                self.min_len.unwrap_or(0),
+                self.max_len
+                    .map_or_else(|| "any number of".into(), |m| m.to_string())
+            ));
+        }
+        if !self.number || value.is_empty() {
+            return Ok(());
+        }
+        let n = value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .ok_or(format!("{name} takes a number"))?;
+        let bound = |b: &Option<String>| b.as_deref().and_then(|v| v.parse::<f64>().ok());
+        if bound(&self.min).is_some_and(|m| n < m) || bound(&self.max).is_some_and(|m| n > m) {
+            return Err(format!(
+                "{name} takes a number from {} to {}",
+                self.min.as_deref().unwrap_or("any"),
+                self.max.as_deref().unwrap_or("any")
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A readable form.
@@ -229,7 +304,7 @@ struct Reader {
     label: Option<String>,
     legend: Option<String>,
     option: Option<(String, bool, String)>,
-    textarea: Option<(String, String, bool)>,
+    textarea: Option<(String, String, bool, Limits)>,
     /// The open select's field name.
     select: Option<String>,
     /// Fields (and choice) inside the open label, waiting for its text.
@@ -240,7 +315,7 @@ impl Reader {
     fn text(&mut self, words: &str) {
         if let Some((_, _, w)) = self.option.as_mut() {
             w.push_str(words);
-        } else if let Some((_, w, _)) = self.textarea.as_mut() {
+        } else if let Some((_, w, _, _)) = self.textarea.as_mut() {
             w.push_str(words);
         } else if let Some(l) = self.legend.as_mut() {
             l.push_str(words);
@@ -295,7 +370,8 @@ impl Reader {
             }
             "select" => self.select = None,
             "textarea" => {
-                let (name, words, required) = self.textarea.take().ok_or("malformed nesting")?;
+                let (name, words, required, limits) =
+                    self.textarea.take().ok_or("malformed nesting")?;
                 self.fields.push(Field {
                     label: String::new(),
                     name,
@@ -303,6 +379,7 @@ impl Reader {
                     choices: Vec::new(),
                     value: words,
                     required,
+                    limits,
                 });
             }
             _ => {}
@@ -349,6 +426,7 @@ impl Reader {
                     choices: Vec::new(),
                     value: String::new(),
                     required: t.has("required"),
+                    limits: Limits::default(),
                 });
                 if self.label.is_some() {
                     self.pending.push((self.fields.len() - 1, None));
@@ -365,7 +443,8 @@ impl Reader {
             "textarea" => {
                 let name = field_name(t)?;
                 self.new_field(&name)?;
-                self.textarea = Some((name, String::new(), t.has("required")));
+                let limits = Limits::of(t, false, true)?;
+                self.textarea = Some((name, String::new(), t.has("required"), limits));
             }
             _ => {}
         }
@@ -404,6 +483,7 @@ impl Reader {
                         choices: Vec::new(),
                         value: String::new(),
                         required,
+                        limits: Limits::default(),
                     });
                     self.fields.len() - 1
                 };
@@ -437,6 +517,7 @@ impl Reader {
                     choices: Vec::new(),
                     value,
                     required,
+                    limits: Limits::of(t, kind == "number", false)?,
                 });
                 if self.label.is_some() {
                     self.pending.push((self.fields.len() - 1, None));

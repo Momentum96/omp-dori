@@ -69,6 +69,15 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
             Ok(()) => check("omp", "ok", r.summary(), None),
         },
     });
+    out.push(match crate::omp::extension::check() {
+        Ok(()) => check(
+            "bridge",
+            "ok",
+            "OMP's extension folder links this version's bridge",
+            None,
+        ),
+        Err(e) => check("bridge", "warn", e, Some("cataly bridge install")),
+    });
     if config
         .destinations
         .values()
@@ -241,7 +250,7 @@ mod tests {
         let dir = crate::sys::fs::tests::scratch("health");
         let note = dir.join("note.md");
         let cfg = format!(
-            "[jobs.h]\nkind = \"health\"\nfiles = [{{ path = \"{}\", max_age = \"1h\" }}]\n[health]\nignore = [\"omp\"]\n",
+            "[jobs.h]\nkind = \"health\"\nfiles = [{{ path = \"{}\", max_age = \"1h\" }}]\n[health]\nignore = [\"omp\", \"bridge\"]\n",
             note.display()
         );
         let (ctx, _stop, _dir) = ctx_with(&cfg, "health-ctx");

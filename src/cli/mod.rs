@@ -118,6 +118,9 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
     if p.is(&["setup"]) {
         return setup::run(p, paths, as_json);
     }
+    if p.is(&["bridge", "install"]) || p.is(&["bridge", "status"]) {
+        return bridge(p.is(&["bridge", "install"]), as_json);
+    }
     let mut hub = Client::connect(&paths.socket)?;
     if let Some(done) = owner_verbs(p, &mut hub, as_json) {
         return done;
@@ -167,28 +170,7 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
             }
         }
         ["job", verb @ ("enable" | "disable")] => {
-            let name = p.args.first().cloned().unwrap_or_default();
-            let (m, params) = if *verb == "enable" {
-                (
-                    method::JOB_ENABLE,
-                    json!({ "name": name, "ack": p.flag("--ack") }),
-                )
-            } else {
-                (method::JOB_DISABLE, json!({ "name": name }))
-            };
-            let reply = hub.call(m, params, CALL_TIMEOUT)?;
-            if as_json {
-                out::json(&reply);
-            } else {
-                out::line(&format!(
-                    "job {name} {}",
-                    if *verb == "enable" {
-                        "resumed"
-                    } else {
-                        "on hold"
-                    }
-                ));
-            }
+            job_hold(p, &mut hub, *verb == "enable", as_json)?;
         }
         ["config", "reload"] => {
             let reply = hub.call(method::CONFIG_RELOAD, json!({}), CALL_TIMEOUT)?;
@@ -205,6 +187,45 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
                 other.join(" ")
             )));
         }
+    }
+    Ok(())
+}
+
+/// `job enable` (resume, `--ack` after a broken-off run) and `job disable` (hold).
+fn job_hold(p: &Parsed, hub: &mut Client, enable: bool, as_json: bool) -> Result<(), Failure> {
+    let name = p.args.first().cloned().unwrap_or_default();
+    let (m, params) = if enable {
+        (
+            method::JOB_ENABLE,
+            json!({ "name": name, "ack": p.flag("--ack") }),
+        )
+    } else {
+        (method::JOB_DISABLE, json!({ "name": name }))
+    };
+    let reply = hub.call(m, params, CALL_TIMEOUT)?;
+    if as_json {
+        out::json(&reply);
+    } else {
+        let state = if enable { "resumed" } else { "on hold" };
+        out::line(&format!("job {name} {state}"));
+    }
+    Ok(())
+}
+
+/// `bridge install` and `bridge status`. Works without a hub: the link is a file in OMP's
+/// extension folder (DESIGN 11.2).
+fn bridge(install: bool, as_json: bool) -> Result<(), Failure> {
+    let installed = if install {
+        crate::omp::extension::install().map(drop)
+    } else {
+        crate::omp::extension::check()
+    };
+    let (link, _) = crate::omp::extension::locations().map_err(Failure::Refused)?;
+    installed.map_err(Failure::Refused)?;
+    if as_json {
+        out::json(&json!({ "link": link.display().to_string(), "ok": true }));
+    } else {
+        out::line(&format!("bridge linked at {}", link.display()));
     }
     Ok(())
 }

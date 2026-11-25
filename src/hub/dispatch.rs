@@ -411,7 +411,21 @@ async fn lead_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure
     match name {
         method::LEAD_START => ok(&lead.start(p.fresh).await.map_err(refused)?),
         method::LEAD_STOP => ok(&lead.stop(p.force).await.map_err(refused)?),
-        method::LEAD_STATUS => ok(&lead.view().await),
+        method::LEAD_STATUS => {
+            let view = lead.view().await;
+            let mut value = serde_json::to_value(&view).map_err(|e| refused(e.to_string()))?;
+            let bridge = view
+                .session
+                .as_ref()
+                .map_or_default(|s| hub.links.view(&s.handle));
+            if let Value::Object(map) = &mut value {
+                map.insert(
+                    "bridge".into(),
+                    serde_json::to_value(bridge).unwrap_or(Value::Null),
+                );
+            }
+            Ok(value)
+        }
         method::LEAD_SEND => {
             let request = crate::host::inbox::Message {
                 sender: "owner".into(),

@@ -26,6 +26,7 @@ use crate::relay::Inbound;
 use crate::relay::text::DISCORD_LIMIT;
 use crate::store::relay::{QueueRow, RelayWrite};
 
+mod panel;
 /// The question summary may be at most this long (DISC-OUT req. 63).
 const SUMMARY_MAX: usize = 1500;
 /// Buttons at most: 5 rows of 5 (DISC-OUT req. 67).
@@ -49,15 +50,15 @@ enum Kind {
         hidden: serde_json::Map<String, Value>,
         free: bool,
         multi: bool,
+        limits: super::form::Limits,
     },
-    /// An HTML form with several editable fields, answered by a reply holding a JSON map of field
-    /// name to value (DISC-OUT req. 63, 70, 72); hidden fields are returned unchanged.
+    /// An HTML form with several editable fields: select menus, a modal for text and Submit
+    /// (`panel`); hidden fields are returned unchanged.
     Fields {
         fields: Vec<Field>,
         hidden: serde_json::Map<String, Value>,
     },
-    /// The `ask` tool with several questions, answered by a reply holding a JSON map of question ID
-    /// to answer, like a form with several fields.
+    /// The `ask` tool with several questions, answered like a form with several fields.
     Asks {
         questions: Vec<Question>,
     },
@@ -83,6 +84,11 @@ struct Card {
     body: String,
     stamp: String,
     state: State,
+    /// The fields of a `Fields` or `Asks` card and the owner's answers so far.
+    items: Option<Vec<panel::Item>>,
+    draft: Vec<panel::Val>,
+    /// Further messages of a card that one message cannot hold.
+    extra: Vec<Snowflake>,
 }
 
 /// The open cards of this run.
@@ -126,13 +132,13 @@ impl Cards {
         self.lock()
             .open
             .values()
-            .find(|c| c.message == message)
+            .find(|c| c.message == message || c.extra.contains(&message))
             .cloned()
     }
 }
 
 /// Keeps text from mentioning anyone, opening code spans or forming Markdown (DISC-OUT req. 63).
-fn neutral(text: &str) -> String {
+pub(crate) fn neutral(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -211,6 +217,7 @@ fn card_of(
                     hidden,
                     free: field.kind == FieldKind::Text,
                     multi,
+                    limits: field.limits.clone(),
                 },
                 text,
                 field.choices.iter().map(|c| c.label.clone()).collect(),
@@ -307,51 +314,6 @@ fn default_of(f: &Field) -> Value {
     }
 }
 
-/// One answered field, checked against the field (DISC-OUT req. 72): a choice by its exact value or,
-/// uniquely, its visible label; a list as an array of choices; text as a string or a number.
-fn field_value(f: &Field, value: Value) -> Result<Value, String> {
-    let choice = |item: &Value| -> Option<Value> {
-        let s = match item {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => return None,
-        };
-        if let Some(c) = f.choices.iter().find(|c| c.value == s) {
-            return Some(Value::String(c.value.clone()));
-        }
-        let hits: Vec<_> = f
-            .choices
-            .iter()
-            .filter(|c| c.label.eq_ignore_ascii_case(&s))
-            .collect();
-        match hits.as_slice() {
-            [one] => Some(Value::String(one.value.clone())),
-            _ => None,
-        }
-    };
-    let name = neutral(&f.name);
-    match f.kind {
-        FieldKind::Text | FieldKind::Hidden => match value {
-            Value::String(s) => Ok(Value::String(s)),
-            Value::Number(n) => Ok(Value::String(n.to_string())),
-            _ => Err(format!("{name} takes text")),
-        },
-        FieldKind::One => choice(&value).ok_or_else(|| format!("{name} takes one of its choices")),
-        FieldKind::Many => {
-            let items = match value {
-                Value::Array(items) => items,
-                one => vec![one],
-            };
-            items
-                .iter()
-                .map(choice)
-                .collect::<Option<Vec<Value>>>()
-                .map(Value::Array)
-                .ok_or_else(|| format!("{name} takes a list of its choices"))
-        }
-    }
-}
-
 /// The answer OMP takes for choice `index`.
 fn answer_of(card: &Card, dialog: &Dialog, index: usize) -> Option<Value> {
     let label = card.choices.get(index)?;
@@ -388,42 +350,6 @@ fn answer_of(card: &Card, dialog: &Dialog, index: usize) -> Option<Value> {
     })
 }
 
-/// A JSON map answering a form with several fields (DISC-OUT req. 70, 72): only editable fields,
-/// omitted ones keep their defaults, required ones end up non-empty.
-fn fields_answer(
-    fields: &[Field],
-    hidden: &serde_json::Map<String, Value>,
-    text: &str,
-) -> Result<Value, String> {
-    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(text) else {
-        return Err(
-            "reply with a JSON map of field name to value, such as {\"field\": \"value\"}".into(),
-        );
-    };
-    let mut data = hidden.clone();
-    for f in fields {
-        data.insert(f.name.clone(), default_of(f));
-    }
-    for (name, value) in map {
-        let Some(f) = fields.iter().find(|f| f.name == name) else {
-            return Err(format!("{} is not a field of this form", neutral(&name)));
-        };
-        data.insert(name, field_value(f, value)?);
-    }
-    for f in fields.iter().filter(|f| f.required) {
-        let empty = match data.get(&f.name) {
-            None | Some(Value::Null) => true,
-            Some(Value::String(s)) => s.is_empty(),
-            Some(Value::Array(a)) => a.is_empty(),
-            Some(_) => false,
-        };
-        if empty {
-            return Err(format!("{} is required", neutral(&f.name)));
-        }
-    }
-    Ok(json!({ "data": data }))
-}
-
 /// An `ask` dialog with several questions: each with its ID, choices and recommended choice.
 fn asks_card(questions: &[Question]) -> Option<(Kind, String, Vec<String>, Option<usize>)> {
     if questions.is_empty() {
@@ -449,45 +375,6 @@ fn asks_card(questions: &[Question]) -> Option<(Kind, String, Vec<String>, Optio
         Vec::new(),
         None,
     ))
-}
-
-/// A JSON map answering an `ask` dialog with several questions: a choice by its label (a list for
-/// several), or free text; an omitted question takes its recommended choice or is refused.
-fn asks_answer(questions: &[Question], text: &str) -> Result<Value, String> {
-    let Ok(Value::Object(mut map)) = serde_json::from_str::<Value>(text) else {
-        return Err(
-            "reply with a JSON map of question to answer, such as {\"q1\": \"yes\"}".into(),
-        );
-    };
-    if let Some(name) = map.keys().find(|k| !questions.iter().any(|q| &q.id == *k)) {
-        return Err(format!("{} is not a question here", neutral(name)));
-    }
-    let mut answers = Vec::with_capacity(questions.len());
-    for q in questions {
-        let given = map.remove(&q.id);
-        let items: Vec<String> = match given {
-            None => match q.recommended.and_then(|r| q.options.get(r)) {
-                Some(r) => vec![r.clone()],
-                None => return Err(format!("{} is not answered", neutral(&q.id))),
-            },
-            Some(Value::Array(items)) if q.multi => items
-                .iter()
-                .map(|i| i.as_str().map(str::to_string))
-                .collect::<Option<Vec<String>>>()
-                .ok_or_else(|| format!("{} takes a list of texts", neutral(&q.id)))?,
-            Some(Value::String(s)) => vec![s],
-            Some(_) => return Err(format!("{} takes text", neutral(&q.id))),
-        };
-        let picked: Option<Vec<&String>> = items
-            .iter()
-            .map(|i| q.options.iter().find(|o| o.eq_ignore_ascii_case(i.trim())))
-            .collect();
-        answers.push(match picked {
-            Some(labels) => json!({"id": q.id, "selectedOptions": labels}),
-            None => json!({"id": q.id, "selectedOptions": [], "customInput": items.join(", ")}),
-        });
-    }
-    Ok(json!({ "answers": answers }))
 }
 
 fn form_data(field: &str, hidden: &serde_json::Map<String, Value>, value: Value) -> Value {
@@ -538,16 +425,19 @@ fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
                 }
             })
         }
-        Kind::Fields { fields, hidden } => fields_answer(fields, hidden, text),
-        Kind::Asks { questions } => asks_answer(questions, text),
+        Kind::Fields { .. } | Kind::Asks { .. } => {
+            Err("use the menus, Fill in and Submit on the question".into())
+        }
         Kind::Form {
             field,
             values,
             hidden,
             free,
             multi,
+            limits,
         } => {
             if *free {
+                limits.check(&neutral(field), text)?;
                 return Ok(form_data(field, hidden, json!(text)));
             }
             let items: Vec<&str> = if *multi {
@@ -638,14 +528,24 @@ impl<T: Runtime> Intake<T> {
             Ok(Err(e)) => log::info("question not updated", &[("error", &e)]),
             Err(_) => log::info("question not updated within 3 s", &[]),
         }
+        self.mark_question(channel, message, false).await;
+    }
+
+    /// Records a posted question as open, or closes its record (DISC-OUT req. 76).
+    async fn mark_question(&self, channel: Snowflake, message: Snowflake, open: bool) {
         let write = RelayWrite::Question {
             relay: NAME.into(),
             room: channel.to_string(),
             message: message.to_string(),
-            open: false,
+            open,
         };
         if let Err(e) = self.store.relay(write).await {
-            log::warn("question record not closed", &[("error", &e)]);
+            let what = if open {
+                "question not recorded"
+            } else {
+                "question record not closed"
+            };
+            log::warn(what, &[("error", &e)]);
         }
     }
 
@@ -694,12 +594,8 @@ impl<T: Runtime> Intake<T> {
             } else {
                 "Closed: answered elsewhere."
             };
-            self.edit_closing(
-                card.channel,
-                card.message,
-                &format!("{}\n\n{status}", card.body),
-            )
-            .await;
+            self.close(&card, &format!("{}\n\n{status}", card.body))
+                .await;
         }
         for dialog in dialogs {
             let known = {
@@ -743,9 +639,9 @@ impl<T: Runtime> Intake<T> {
         };
         match kind {
             Kind::Approval => {}
-            Kind::Fields { .. } | Kind::Asks { .. } => body.push_str(
-                "\nReply to this message with a JSON map of name to value; omitted ones keep their defaults.",
-            ),
+            Kind::Fields { .. } | Kind::Asks { .. } => {
+                body.push_str("\nChoose in the menus, use Fill in for text, then press Submit.");
+            }
             _ => body.push_str("\nReply to this message with a number or your answer."),
         }
         if let Some(r) = recommended {
@@ -760,6 +656,7 @@ impl<T: Runtime> Intake<T> {
     }
 
     /// The first message of a card: an approval card as a reply, or a question's placeholder.
+    /// Returns its ID; `None` (logged) when it was not posted.
     async fn first_message(
         &self,
         dialog: &Dialog,
@@ -768,9 +665,9 @@ impl<T: Runtime> Intake<T> {
         body: &str,
         stamp: &str,
         components: Option<&Value>,
-    ) -> Result<Value, super::RestError> {
+    ) -> Option<Snowflake> {
         let approval = dialog.kind == DialogKind::Approval;
-        if approval {
+        let posted = if approval {
             let mut create = json!({
                 "content": body,
                 "nonce": nonce(&format!("approval:{}:{}:{stamp}", self.bot, dialog.id), 0),
@@ -793,6 +690,16 @@ impl<T: Runtime> Intake<T> {
                 "nonce": nonce(&format!("question:{}:{}:{stamp}", self.bot, dialog.id), 0),
             });
             self.rest.create(channel, placeholder).await
+        };
+        match posted {
+            Ok(v) => v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(Snowflake::parse),
+            Err(e) => {
+                log::warn("question not posted; it stays local", &[("error", &e)]);
+                None
+            }
         }
     }
 
@@ -865,19 +772,35 @@ impl<T: Runtime> Intake<T> {
             }
             return skip(self);
         }
+        let panel = matches!(kind, Kind::Fields { .. } | Kind::Asks { .. });
         let multi = matches!(
             kind,
             Kind::Ask { multi: true, .. }
                 | Kind::Form { multi: true, .. }
                 | Kind::Form { free: true, .. }
-                | Kind::Fields { .. }
-                | Kind::Asks { .. }
-        );
+        ) || panel;
         let stamp = self.stamp(approval, reply_to, &dialog.id);
-        let components = (self.buttons && !multi && body.encode_utf16().count() <= DISCORD_LIMIT)
-            .then(|| buttons(&stamp, &choices, recommended, approval));
+        let items = match &kind {
+            Kind::Fields { fields, .. } => panel::of_fields(fields),
+            Kind::Asks { questions } => panel::of_questions(questions),
+            _ => None,
+        };
+        let mut pages = items
+            .as_deref()
+            .and_then(|i| panel::layout(&stamp, i))
+            .unwrap_or_default();
+        if panel && (!self.buttons || pages.is_empty()) {
+            // Without components such a question cannot be answered on Discord; it stays local.
+            return skip(self);
+        }
+        let components = if panel {
+            Some(pages.remove(0))
+        } else {
+            (self.buttons && !multi && body.encode_utf16().count() <= DISCORD_LIMIT)
+                .then(|| buttons(&stamp, &choices, recommended, approval))
+        };
         // The card exists before its buttons can be seen, so no press can find it missing.
-        let first = self
+        let message = self
             .first_message(
                 dialog,
                 channel,
@@ -887,16 +810,6 @@ impl<T: Runtime> Intake<T> {
                 components.as_ref(),
             )
             .await;
-        let message = match first {
-            Ok(v) => v
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(Snowflake::parse),
-            Err(e) => {
-                log::warn("question not posted; it stays local", &[("error", &e)]);
-                None
-            }
-        };
         let Some(message) = message else {
             if approval {
                 // Fail closed (DISC-OUT req. 83).
@@ -912,19 +825,14 @@ impl<T: Runtime> Intake<T> {
             kind,
             choices,
             body: body.clone(),
-            stamp,
+            stamp: stamp.clone(),
             state: State::Open,
+            draft: items.as_deref().map_or_default(panel::draft),
+            items,
+            extra: Vec::new(),
         };
         self.cards.lock().open.insert(dialog.id.clone(), card);
-        let write = RelayWrite::Question {
-            relay: NAME.into(),
-            room: channel.to_string(),
-            message: message.to_string(),
-            open: true,
-        };
-        if let Err(e) = self.store.relay(write).await {
-            log::warn("question not recorded", &[("error", &e)]);
-        }
+        self.mark_question(channel, message, true).await;
         if !approval
             && !self
                 .show(&dialog.id, channel, message, &body, components)
@@ -932,10 +840,33 @@ impl<T: Runtime> Intake<T> {
         {
             return;
         }
+        self.post_parts(&dialog.id, channel, &stamp, pages).await;
         if let Some(index) = recommended {
             let me = Arc::clone(self);
             let id = dialog.id.clone();
             tokio::spawn(async move { me.recommended_after(&id, index).await });
+        }
+    }
+
+    /// Posts the second and later messages of a card too large for one, each with its rows.
+    async fn post_parts(&self, dialog: &str, channel: Snowflake, stamp: &str, pages: Vec<Value>) {
+        for (n, rows) in pages.into_iter().enumerate() {
+            let seed = format!("question:{}:{dialog}:{stamp}:{}", self.bot, n + 1);
+            let part = json!({"content": format!("Part {} of the question above.", n + 2),
+                "nonce": nonce(&seed, 0), "components": rows});
+            match self.rest.create(channel, part).await {
+                Ok(v) => {
+                    if let Some(id) = v
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(Snowflake::parse)
+                        && let Some(c) = self.cards.lock().open.get_mut(dialog)
+                    {
+                        c.extra.push(id);
+                    }
+                }
+                Err(e) => log::warn("question part not posted", &[("error", &e)]),
+            }
         }
     }
 
@@ -1002,15 +933,21 @@ impl<T: Runtime> Intake<T> {
         if !press.by_owner(self.application, self.owner) || press.channel != card.channel {
             return self.refuse(&press, "Only the owner can answer this.").await;
         }
-        let index = press
+        let Some(action) = press
             .custom_id
             .strip_prefix(&format!("cy:{}:", card.stamp))
-            .and_then(|i| i.parse::<usize>().ok())
-            .filter(|i| *i < card.choices.len());
-        let Some(index) = index else {
+            .map(str::to_string)
+        else {
             return self
                 .refuse(&press, "This button is not part of the question.")
                 .await;
+        };
+        let Some(index) = action
+            .parse::<usize>()
+            .ok()
+            .filter(|i| *i < card.choices.len())
+        else {
+            return self.panel_press(card, &action, press).await;
         };
         let Some(card) = self.cards.take(&card.dialog) else {
             return;
@@ -1040,17 +977,45 @@ impl<T: Runtime> Intake<T> {
             .lead
             .snapshot()
             .and_then(|s| s.dialogs.iter().find(|d| d.id == card.dialog).cloned());
-        let outcome = match live.as_ref().and_then(|d| answer_of(&card, d, index)) {
-            Some(answer) => self.lead.answer(&card.dialog, &answer).await,
-            None => Err("the question was already answered".into()),
+        if let Some(answer) = live.as_ref().and_then(|d| answer_of(&card, d, index)) {
+            self.submit_value(card, answer, done).await;
+        } else {
+            self.cards.remove(&card.dialog);
+            let content = format!("{}\n\nClosed: the question was already answered", card.body);
+            self.close(&card, &content).await;
+        }
+    }
+
+    /// Submits an answer of a taken card and closes the card.
+    async fn submit_value(&self, card: Card, answer: Value, done: String) {
+        let live = self
+            .lead
+            .snapshot()
+            .is_some_and(|s| s.dialogs.iter().any(|d| d.id == card.dialog));
+        let outcome = if live {
+            self.lead.answer(&card.dialog, &answer).await
+        } else {
+            Err("the question was already answered".into())
         };
         self.cards.remove(&card.dialog);
         let content = match outcome {
             Ok(()) => done,
             Err(e) => format!("{}\n\nClosed: {}", card.body, neutral(&e)),
         };
-        self.edit_closing(card.channel, card.message, &content)
-            .await;
+        self.close(&card, &content).await;
+    }
+
+    /// Edits a card's question into its final text and clears the components of its other parts.
+    async fn close(&self, card: &Card, content: &str) {
+        self.edit_closing(card.channel, card.message, content).await;
+        for part in &card.extra {
+            let body = json!({ "content": "Closed.", "components": [] });
+            if let Err(e) =
+                tokio::time::timeout(EDIT_BUDGET, self.rest.edit(card.channel, *part, body)).await
+            {
+                log::info("question part not updated within 3 s", &[("error", &e)]);
+            }
+        }
     }
 
     /// An owner message that answers an open question (DISC-OUT req. 70-73): a reply to the question,
@@ -1144,6 +1109,11 @@ mod tests {
 
     fn card(dialog: &Dialog) -> Card {
         let (kind, body, choices, _) = card_of(dialog, false).unwrap();
+        let items = match &kind {
+            Kind::Fields { fields, .. } => panel::of_fields(fields),
+            Kind::Asks { questions } => panel::of_questions(questions),
+            _ => None,
+        };
         Card {
             dialog: dialog.id.clone(),
             channel: Snowflake::parse("7").unwrap(),
@@ -1153,6 +1123,9 @@ mod tests {
             body,
             stamp: "s".into(),
             state: State::Open,
+            draft: items.as_deref().map_or_default(panel::draft),
+            items,
+            extra: Vec::new(),
         }
     }
 
@@ -1174,75 +1147,78 @@ mod tests {
         assert!(typed_answer(&c, "green").is_err());
     }
 
-    /// DISC-OUT req. 63, 70, 72: a form with several fields is posted with its fields and answered by
-    /// a JSON map; omitted fields keep their defaults, hidden ones are returned unchanged.
+    /// DISC-OUT req. 63, 72: a form with several fields gets a select per choice field, a modal for
+    /// its text fields and Submit; ranges, lengths and required fields are checked; the owner never
+    /// types JSON.
     #[test]
-    fn forms_with_several_fields_take_a_json_map() {
-        let html = r#"<form><p>Release details</p><fieldset><legend>Channel</legend><label><input type="radio" name="channel" value="s" checked> Stable</label><label><input type="radio" name="channel" value="b"> Beta</label></fieldset><label>Note <input type="text" name="note" required></label><input type="hidden" name="k" value="v"></form>"#;
+    fn forms_with_several_fields_use_menus_and_a_modal() {
+        let html = r#"<form><p>Release details</p><fieldset><legend>Channel</legend><label><input type="radio" name="channel" value="s" checked> Stable</label><label><input type="radio" name="channel" value="b"> Beta</label></fieldset><label>Note <input type="text" name="note" required maxlength="5"></label><label>Count <input type="number" name="count" min="1" max="3"></label><input type="hidden" name="k" value="v"></form>"#;
         let d = dialog_of(&json!({"id": "f", "method": "form", "html": html})).unwrap();
-        let c = card(&d);
+        let mut c = card(&d);
         assert!(matches!(c.kind, Kind::Fields { .. }), "{:?}", c.kind);
-        assert_eq!(c.choices, Vec::<String>::new(), "no buttons");
         assert!(
-            c.body.contains("- channel")
-                && c.body.contains("s = Stable")
-                && c.body.contains("- note"),
-            "{}",
-            c.body
+            typed_answer(&c, r#"{"note": "x"}"#).is_err(),
+            "no JSON answers"
         );
-        assert!(answer_of(&c, &d, 0).is_none());
+        let items = c.items.clone().unwrap();
+        let pages = panel::layout("s", &items).unwrap();
         assert_eq!(
-            typed_answer(&c, r#"{"note": "ship it"}"#).unwrap(),
-            json!({"data": {"channel": "s", "note": "ship it", "k": "v"}})
+            pages.len(),
+            1,
+            "one message holds one select and one button row"
         );
+        let rows = pages[0].as_array().unwrap();
+        assert_eq!(rows[0]["components"][0]["type"], 3);
+        assert_eq!(rows[0]["components"][0]["custom_id"], "cy:s:s:0");
+        assert_eq!(rows[1]["components"][0]["custom_id"], "cy:s:m:1-2");
+        assert_eq!(rows[1]["components"][1]["custom_id"], "cy:s:go");
+        let missing = panel::answer(&c.kind, &items, &c.draft).unwrap_err();
+        assert!(
+            missing.iter().any(|p| p.contains("is required")),
+            "{missing:?}"
+        );
+        c.draft[1] = panel::Val::Text("toolong".into());
+        assert!(panel::answer(&c.kind, &items, &c.draft).unwrap_err()[0].contains("characters"));
+        c.draft[1] = panel::Val::Text("ship".into());
+        c.draft[2] = panel::Val::Text("9".into());
+        assert!(panel::answer(&c.kind, &items, &c.draft).unwrap_err()[0].contains("from 1 to 3"));
+        c.draft[2] = panel::Val::Text("2".into());
+        c.draft[0] = panel::Val::Picks(vec![1]);
         assert_eq!(
-            typed_answer(&c, r#"{"channel": "beta", "note": "x"}"#).unwrap()["data"]["channel"],
-            "b"
+            panel::answer(&c.kind, &items, &c.draft).unwrap(),
+            json!({"data": {"channel": "b", "note": "ship", "count": "2", "k": "v"}})
         );
-        assert!(
-            typed_answer(&c, r#"{"channel": "s"}"#).is_err(),
-            "note is required"
-        );
-        assert!(
-            typed_answer(&c, r#"{"k": "w", "note": "x"}"#).is_err(),
-            "hidden"
-        );
-        assert!(typed_answer(&c, r#"{"channel": "nightly", "note": "x"}"#).is_err());
-        assert!(typed_answer(&c, "beta").is_err());
     }
 
-    /// An `ask` with several questions is posted as one card and answered by a JSON map.
+    /// An `ask` with several questions: one select per question, one message per question when one
+    /// message cannot hold them, Submit on the last.
     #[test]
-    fn ask_with_several_questions_takes_a_json_map() {
+    fn ask_with_several_questions_uses_menus() {
+        let q = |id: &str| json!({"id": id, "question": id, "options": [{"label": "A"}, {"label": "B"}]});
         let d = dialog_of(&json!({"type": "extension_ui_request", "id": "d2", "method": "ask",
-            "questions": [
-                {"id": "color", "question": "Pick", "options": [{"label": "Red"}, {"label": "Blue"}], "recommended": 1},
-                {"id": "size", "question": "Size", "multi": true, "options": [{"label": "S"}, {"label": "M"}]}
-            ]}))
+            "questions": [q("a"), q("b"), q("c"), q("d"), q("e"), {"id": "f", "question": "Why?", "options": []}]}))
         .unwrap();
-        let c = card(&d);
+        let mut c = card(&d);
         assert!(matches!(c.kind, Kind::Asks { .. }), "{:?}", c.kind);
+        let items = c.items.clone().unwrap();
+        let pages = panel::layout("s", &items).unwrap();
+        assert_eq!(pages.len(), 6, "one message per question");
+        assert_eq!(pages[5][0]["components"][0]["custom_id"], "cy:s:m:5");
+        assert_eq!(pages[5][1]["components"][0]["custom_id"], "cy:s:go");
+        for (n, slot) in c.draft.iter_mut().take(5).enumerate() {
+            *slot = panel::Val::Picks(vec![n % 2]);
+        }
         assert!(
-            c.body.contains("- color") && c.body.contains("default: Blue"),
-            "{}",
-            c.body
+            panel::answer(&c.kind, &items, &c.draft).is_err(),
+            "f unanswered"
         );
+        c.draft[5] = panel::Val::Text("because".into());
+        let a = panel::answer(&c.kind, &items, &c.draft).unwrap();
         assert_eq!(
-            typed_answer(&c, r#"{"size": ["s", "M"]}"#).unwrap(),
-            json!({"answers": [
-                {"id": "color", "selectedOptions": ["Blue"]},
-                {"id": "size", "selectedOptions": ["S", "M"]}
-            ]})
+            a["answers"][1],
+            json!({"id": "b", "selectedOptions": ["B"]})
         );
-        assert_eq!(
-            typed_answer(&c, r#"{"color": "green", "size": "M"}"#).unwrap()["answers"][0]["customInput"],
-            "green"
-        );
-        assert!(
-            typed_answer(&c, r#"{"color": "Red"}"#).is_err(),
-            "size unanswered"
-        );
-        assert!(typed_answer(&c, r#"{"shape": "x", "size": "M"}"#).is_err());
+        assert_eq!(a["answers"][5]["customInput"], "because");
     }
 
     #[test]

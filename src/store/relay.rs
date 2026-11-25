@@ -481,6 +481,13 @@ fn write_rows(tx: &Transaction<'_>, change: &RelayWrite, now: i64) -> rusqlite::
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![relay, room, message, now, text],
                 )?;
+                // The request log entry opens on admission (DESIGN 12.2 C16, OPC req. 56).
+                super::lead::open_request(tx, text, request_id, now)?;
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES ('owner_last_ms', ?1) \
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    [now.to_string()],
+                )?;
             }
             Ok(RelayDone::Done)
         }

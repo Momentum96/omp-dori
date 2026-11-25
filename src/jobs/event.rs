@@ -79,6 +79,16 @@ pub(crate) enum EventKind {
     DeliveryFailed,
     RelayHeld,
     RelayStopped,
+    /// A session's model is neither the requested one nor a fallback OMP reported (DESIGN 6.1).
+    ModelUnexpected,
+    BridgeRefused,
+    /// The owner returned after a long silence (OJ-20, OJ-21).
+    Digest,
+    /// A message from someone else waited past the alert age (OJ-22).
+    Unanswered,
+    /// A stream job's output line matched (WS-02).
+    StreamLine,
+    StreamEnded,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -89,7 +99,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 47] = [
+const KINDS: [KindRow; 53] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -382,6 +392,42 @@ const KINDS: [KindRow; 47] = [
         "relay.stopped",
         &["relay", "reason"],
         "{relay} intake stopped: {reason}",
+    ),
+    (
+        EventKind::ModelUnexpected,
+        "session.model_unexpected",
+        &["role", "model", "requested"],
+        "{role} session runs on {model}, which OMP did not report as a fallback of {requested}",
+    ),
+    (
+        EventKind::BridgeRefused,
+        "bridge.refused",
+        &["reason"],
+        "an OMP bridge was refused: {reason}",
+    ),
+    (
+        EventKind::Digest,
+        "owner.digest",
+        &["since", "rooms", "events"],
+        "the owner is back after a while: digest since {since} ({rooms} room(s), {events} event(s))",
+    ),
+    (
+        EventKind::Unanswered,
+        "owner.unanswered",
+        &["room", "author", "age", "excerpt", "link"],
+        "{author} has waited {age} for an answer in {room}: {excerpt} ({link})",
+    ),
+    (
+        EventKind::StreamLine,
+        "stream.line",
+        &["job", "line"],
+        "{job}: {line}",
+    ),
+    (
+        EventKind::StreamEnded,
+        "stream.ended",
+        &["job", "reason"],
+        "{job} stopped: {reason}",
     ),
 ];
 

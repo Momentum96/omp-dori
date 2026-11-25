@@ -2,6 +2,7 @@
 //! usage and lease readers. This milestone starts no session; the probe result is cached here, shown
 //! by health and `status`, and re-taken when the configured executable changes on disk.
 
+pub(crate) mod extension;
 pub(crate) mod launch;
 pub(crate) mod probe;
 pub(crate) mod rpc;

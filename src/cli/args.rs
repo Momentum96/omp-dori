@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 33] = [
+pub(crate) const COMMANDS: [Spec; 35] = [
     Spec {
         path: &["hub"],
         args: &[],
@@ -85,6 +85,20 @@ pub(crate) const COMMANDS: [Spec; 33] = [
         flags: &["--json"],
         values: &[],
         summary: "apply the config file; an invalid file is refused and the running config kept",
+    },
+    Spec {
+        path: &["bridge", "install"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "link the bridge into OMP's extension folder (PI_CODING_AGENT_DIR or ~/.omp/agent)",
+    },
+    Spec {
+        path: &["bridge", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "check that OMP's extension folder links this version's bridge",
     },
     Spec {
         path: &["setup"],
@@ -182,7 +196,7 @@ pub(crate) const COMMANDS: [Spec; 33] = [
         args: &[],
         flags: &["--json"],
         values: &[],
-        summary: "list the lead's waiting, sent and in-doubt messages",
+        summary: "list the lead's waiting, sent and in-doubt messages and notes for the next wake",
     },
     Spec {
         path: &["lead", "confirm"],

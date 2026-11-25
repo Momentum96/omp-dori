@@ -3,6 +3,7 @@
 //! pool of read-only connections.
 
 pub(crate) mod host;
+pub(crate) mod lead;
 mod read;
 pub(crate) mod relay;
 mod schema;
@@ -411,6 +412,11 @@ impl Store {
         write: relay::RelayWrite,
     ) -> Result<relay::RelayDone, StoreError> {
         self.call(|r| Request::Relay(Box::new(write), r)).await
+    }
+
+    /// One lead-record mutation (request log, questions, unanswered, stream jobs, reminders).
+    pub(crate) async fn lead(&self, write: lead::LeadWrite) -> Result<lead::LeadDone, StoreError> {
+        self.call(|r| Request::Lead(Box::new(write), r)).await
     }
 }
 

@@ -534,4 +534,15 @@ impl FakeDiscord {
             "message": {"id": message}, "member": {"user": {"id": user}}});
         self.gw(Gw::Dispatch("INTERACTION_CREATE", raw));
     }
+
+    /// Any component or modal interaction: `kind` 3 with `data` holding `component_type` and
+    /// `values`, or 5 (modal submit) with its `components`.
+    pub fn interact(&self, user: &str, channel: &str, message: &str, kind: u64, data: &Value) {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let raw = json!({"id": (710_000_000_000_000_000u64 + n).to_string(), "token": format!("tik{n}"),
+            "application_id": APP, "channel_id": channel, "type": kind, "data": data,
+            "message": {"id": message}, "member": {"user": {"id": user}}});
+        self.gw(Gw::Dispatch("INTERACTION_CREATE", raw));
+    }
 }

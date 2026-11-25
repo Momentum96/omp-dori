@@ -85,6 +85,8 @@ pub(crate) struct Listed {
     pub(crate) sender: String,
     pub(crate) queued_ms: i64,
     pub(crate) preview: String,
+    /// Whether the entry starts a turn (urgent or the owner's); a quiet note waits for the next one.
+    pub(crate) wakes: bool,
 }
 
 /// Something the inbox owner must report or measure.
@@ -411,6 +413,7 @@ impl Mailbox {
                         sender: row.sender.clone(),
                         queued_ms: row.created_ms,
                         preview: preview(&row.text),
+                        wakes: row.urgent || row.owner,
                     },
                     row,
                 )

@@ -183,3 +183,27 @@ floor measured above. The release binary grew by
 0.97 MiB with the Gateway (tokio-tungstenite, its handshake only), intake, questions and the form
 reader. `strings target/release/cataly | grep relay_after_arrival` finds nothing: the crash-test fault
 point is compiled out of release builds. macOS figures are not measured.
+
+## Slice 2c: bridge, lead records, owner jobs with Discord (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+`cargo build --release`, then `CATALY_CONTRACT_OMP=1 cargo test --release --test contract_discord --
+--nocapture --test-threads=1`: the lead runs stock OMP with the bridge linked, on the loopback fake
+model; intake on the fake Discord. `rss_with_discord_lead_and_owner_jobs` configures every owner job
+kind live (`github` and `pr` on the fake `gh`, `quota` on stock OMP, `backup` on a local git tree,
+`health` with one file check, `items`, `pressure`), answers one request, then reads `cataly stats`
+after 10 s idle. Figures from one run:
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Hub RSS, Discord connected, the lead attached with its bridge, all seven owner job kinds live, idle (OMP excluded) | 13.0 MiB (13,647,872 bytes) | ≤ 30 MiB idle; owner jobs < 5 MiB |
+| Hub RSS, Discord and the lead with its bridge, after 40 wakes, a follow-up and 5 reconnects (OMP excluded) | 13.4 MiB (14,004,224 bytes; slice 2b: 12.5 MiB) | ≤ 30 MiB idle |
+| Wake end to end: Gateway frame read to OMP `agent_start` (41 wakes) | p50 38.1 ms, p95 52.3 ms, p99 80.8 ms, max 95.0 ms | p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Of which hub `deliver` call to `prompt` line written | p50 9.6 ms, p95 13.2 ms | p50 ≤ 5 ms (disk floor above) |
+| Reconnect (op 7) to catch-up complete (6 connects) | p50 21.4 ms, max 361 ms (the first connect) | none set |
+| Release binary (`cargo build --release`, stripped) | 10,346,616 bytes (9.87 MiB; slice 2b: 9,700,888) | none set |
+
+The two RSS rows are not a controlled comparison of the owner jobs' share (the runs differ in traffic);
+the owner-jobs run with everything live is still 13.0 MiB, and part B's controlled figure for all owner
+jobs was 0.8 MiB. The binary grew by 0.62 MiB with the
+bridge socket, the hub tool, lead records, the digest and unanswered watch and the question panel.
+Debug build of the same runs: 24.3 MiB and 24.4 MiB. macOS figures are not measured.

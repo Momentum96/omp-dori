@@ -39,6 +39,8 @@ pub struct FakeModel {
     pub port: u16,
     /// Model IDs of the requests seen, in order.
     seen: Arc<Mutex<Vec<String>>>,
+    /// The request bodies, in order (system prompt, tools, messages).
+    bodies: Arc<Mutex<Vec<Value>>>,
 }
 
 /// The `models.yml` naming this provider with the given model IDs.
@@ -62,7 +64,8 @@ impl FakeModel {
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let shared = Arc::clone(&seen);
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let shared = (Arc::clone(&seen), Arc::clone(&bodies));
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -74,9 +77,9 @@ impl FakeModel {
                     let Ok((stream, _)) = listener.accept().await else {
                         continue;
                     };
-                    let seen = Arc::clone(&shared);
+                    let shared = shared.clone();
                     tokio::spawn(async move {
-                        let service = service_fn(move |req| answer(req, Arc::clone(&seen)));
+                        let service = service_fn(move |req| answer(req, shared.clone()));
                         let _ = hyper::server::conn::http1::Builder::new()
                             .serve_connection(TokioIo::new(stream), service)
                             .await;
@@ -84,11 +87,15 @@ impl FakeModel {
                 }
             });
         });
-        Self { port, seen }
+        Self { port, seen, bodies }
     }
 
     pub fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
+    }
+
+    pub fn bodies(&self) -> Vec<Value> {
+        self.bodies.lock().unwrap().clone()
     }
 }
 
@@ -117,14 +124,18 @@ fn last_user_text(body: &Value) -> String {
     }
 }
 
+/// What the server records: model IDs and request bodies.
+type Records = (Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
+
 async fn answer(
     req: Request<Incoming>,
-    seen: Arc<Mutex<Vec<String>>>,
+    (seen, bodies): Records,
 ) -> Result<Response<ChannelBody>, Infallible> {
     let bytes = req.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let model = body["model"].as_str().unwrap_or_default().to_string();
     seen.lock().unwrap().push(model.clone());
+    bodies.lock().unwrap().push(body.clone());
     let (tx, rx) = mpsc::channel(64);
     if model == "limited" {
         let error = json!({"error": {

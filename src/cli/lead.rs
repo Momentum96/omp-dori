@@ -46,8 +46,9 @@ fn print_view(v: &Value) {
         }
     }
     out::line(&format!(
-        "inbox    {} waiting, {} sent, {} in doubt",
+        "inbox    {} waiting, {} notes for the next wake, {} sent, {} in doubt",
         text(v, "waiting"),
+        text(v, "notes"),
         text(v, "sent"),
         text(v, "in_doubt")
     ));
@@ -178,10 +179,13 @@ pub(super) fn verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Resul
                             .get("queued_ms")
                             .and_then(Value::as_i64)
                             .map_or_else(String::new, crate::jobs::instant_text);
+                        let mut state = text(r, "state");
+                        if state == "pending" && r.get("wakes") == Some(&Value::Bool(false)) {
+                            state = "note".into();
+                        }
                         out::line(&format!(
-                            "{:>3}  {:<9} {:<12} {at}  {}",
+                            "{:>3}  {state:<9} {:<12} {at}  {}",
                             text(r, "index"),
-                            text(r, "state"),
                             text(r, "sender"),
                             text(r, "preview")
                         ));

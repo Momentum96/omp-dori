@@ -70,6 +70,8 @@ pub(crate) struct Headless {
     pub(crate) spend_phrases: Vec<String>,
     /// Prompt line written to the turn's `agent_start`.
     pub(crate) agent_start: Latency,
+    /// Launch tokens for the bridge hello (EXT req. 5).
+    pub(crate) links: Arc<super::bridge::Links>,
 }
 
 impl Runtime for Headless {
@@ -77,6 +79,7 @@ impl Runtime for Headless {
 
     async fn start(&self, spec: StartSpec) -> Result<(Arc<Session>, Started), StartError> {
         let token = super::random_hex(16);
+        self.links.issue(&token, &spec.handle, spec.role);
         let argv = Launch {
             exe: &self.exe,
             model: &spec.model,
@@ -142,6 +145,10 @@ struct State {
     fallback_to: Option<String>,
     /// OMP's latest fallback report, until a readback shows its model in use.
     fallback_report: Option<FallbackReport>,
+    /// The model the hub asked for with `set_model`, which replaces the start model as expected.
+    asked_model: Option<String>,
+    /// The unexpected model already reported, so one model is reported once (DESIGN 6.1).
+    unexpected: Option<String>,
     /// When the last delivery's line was written, until its turn starts.
     wake_written: Option<Instant>,
     seq: u64,
@@ -631,7 +638,10 @@ impl Inner {
 
     /// Model events from what readbacks show (HOST req. 77): one `ModelChanged` per change, one
     /// `Fallback` per change OMP reported as a fallback (a repeated report of the same move adds
-    /// nothing), one `FallbackRecovered` when the requested model is back.
+    /// nothing), one `FallbackRecovered` when the requested model is back, and one
+    /// `ModelUnexpected` when a turn is over on a model nobody asked for and OMP did not report as a
+    /// fallback (DESIGN 6.1; OMP reports a fallback during the turn, so judging at the turn's end
+    /// never mistakes a move whose report is still on its way).
     fn track_model(&self, st: &mut State, previous: Option<String>) {
         let Some(model) = st.latest.as_ref().and_then(|s| s.model.clone()) else {
             return;
@@ -645,6 +655,21 @@ impl Inner {
             );
         }
         self.settle_fallback(st);
+        if !st.latest.as_ref().is_some_and(ReadState::idle) {
+            return;
+        }
+        let requested = st
+            .asked_model
+            .clone()
+            .unwrap_or_else(|| self.requested_model.clone());
+        let expected =
+            names_model(&requested, &model) || st.fallback_to.as_deref() == Some(model.as_str());
+        if expected {
+            st.unexpected = None;
+        } else if st.unexpected.as_deref() != Some(model.as_str()) {
+            st.unexpected = Some(model.clone());
+            self.emit(st, SessionEvent::ModelUnexpected { model, requested });
+        }
     }
 
     /// Matches a pending fallback report against the model in use.
@@ -1139,9 +1164,11 @@ impl Control for Session {
             }
         }
         {
-            // A change asked for here is no fallback; the readback after it must be new.
+            // A change asked for here is no fallback and becomes the expected model; the
+            // readback after it must be new.
             let mut st = inner.lock();
             st.fallback_report = None;
+            st.asked_model = Some(selector.to_string());
             st.fresh = false;
             inner.publish(&mut st);
         }
@@ -1467,8 +1494,11 @@ mod tests {
         let report = json!({"type": "retry_fallback_applied", "from": "fake/primary:high", "to": "fake/backup:high", "role": "default", "reason": "usage limit"});
         // A message after the reports: once it shows, the reports before it are handled.
         let sync = json!({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "sync"}]}});
-        // OMP switches the model (a bare `model_changed`), then reports the fallback.
-        fake.set(|s| s.model = ("fake".into(), "backup".into()));
+        // OMP switches the model during a turn (a bare `model_changed`), then reports the fallback.
+        fake.set(|s| {
+            s.streaming = true;
+            s.model = ("fake".into(), "backup".into());
+        });
         fake.push(json!({"type": "model_changed"}));
         fake.push(report.clone());
         fake.wait_for(&session, |s| s.model.as_deref() == Some("fake/backup"))
@@ -1480,8 +1510,11 @@ mod tests {
         fake.push(sync);
         fake.wait_for(&session, |s| s.recent.iter().any(|e| e.text == "sync"))
             .await;
-        // OMP restores the requested model.
-        fake.set(|s| s.model = ("fake".into(), "primary".into()));
+        // OMP restores the requested model; the turn ends.
+        fake.set(|s| {
+            s.streaming = false;
+            s.model = ("fake".into(), "primary".into());
+        });
         fake.push(json!({"type": "model_changed"}));
         fake.wait_for(&session, |s| s.model.as_deref() == Some("fake/primary"))
             .await;
@@ -1503,6 +1536,7 @@ mod tests {
                     | SessionEvent::FallbackRecovered { .. }
                     | SessionEvent::ModelChanged { .. }
                     | SessionEvent::QuotaBlocked { .. }
+                    | SessionEvent::ModelUnexpected { .. }
             ) {
                 kinds.push(event);
             }
@@ -1585,6 +1619,42 @@ mod tests {
         assert_eq!(record.how, "clean");
         assert_eq!(record.session_id, Some(id));
         assert!(!session.alive());
+    }
+
+    /// A turn that ends on a model nobody asked for and OMP never reported as a fallback is
+    /// reported once, urgent for the owner (DESIGN 6.1); a model the hub asked for is not.
+    #[tokio::test]
+    async fn an_unreported_model_is_reported_once() {
+        let fake = Fake::start();
+        let session = started(&fake).await;
+        let mut events = session.subscribe();
+        let sync = |text: &str| json!({"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}});
+        fake.set(|s| s.model = ("fake".into(), "other".into()));
+        fake.push(json!({"type": "model_changed"}));
+        fake.wait_for(&session, |s| s.model.as_deref() == Some("fake/other"))
+            .await;
+        fake.push(json!({"type": "model_changed"}));
+        fake.push(sync("one"));
+        fake.wait_for(&session, |s| s.recent.iter().any(|e| e.text == "one"))
+            .await;
+        assert_eq!(
+            session.set_model("fake/backup").await.unwrap(),
+            "fake/backup"
+        );
+        fake.push(json!({"type": "model_changed"}));
+        fake.push(sync("two"));
+        fake.wait_for(&session, |s| s.recent.iter().any(|e| e.text == "two"))
+            .await;
+        let mut unexpected = Vec::new();
+        while let Ok((_, event)) = events.try_recv() {
+            if let SessionEvent::ModelUnexpected { model, requested } = event {
+                unexpected.push((model, requested));
+            }
+        }
+        assert_eq!(
+            unexpected,
+            [("fake/other".to_string(), "fake/primary".to_string())]
+        );
     }
 
     #[tokio::test]

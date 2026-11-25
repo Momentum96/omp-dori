@@ -55,6 +55,8 @@ pub(crate) struct Env<R: Runtime> {
     pub(crate) omp: Arc<Omp>,
     /// Whether the quota gate holds new session starts now (OJ-08).
     pub(crate) gate_held: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Whether the bridge link in OMP's extension folder is current (DESIGN 4.2, 12.2 C19).
+    pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     pub(crate) events: Events,
     pub(crate) store: Store,
     pub(crate) state_dir: PathBuf,
@@ -79,7 +81,10 @@ pub(crate) struct View {
     pub(crate) phase: Phase,
     pub(crate) reason: Option<String>,
     pub(crate) session: Option<Snapshot>,
+    /// Pending entries that start a turn (urgent or the owner's).
     pub(crate) waiting: usize,
+    /// Pending quiet notes; by design they wait for the next wake.
+    pub(crate) notes: usize,
     pub(crate) sent: usize,
     pub(crate) in_doubt: usize,
 }
@@ -442,6 +447,7 @@ impl<R: Runtime> Lead<R> {
                 "the quota gate holds new session starts; `cataly quota lift` lifts it".into(),
             );
         }
+        (self.env.bridge_link)()?;
         let live = usize::from(self.current().is_some_and(|s| s.alive()));
         if live >= usize::try_from(config.sessions.cap).unwrap_or(usize::MAX) {
             return Err(format!(
@@ -903,6 +909,12 @@ impl<R: Runtime> Lead<R> {
                         .with("role", "lead")
                         .with("model", model),
                 ),
+                SessionEvent::ModelUnexpected { model, requested } => self.emit(
+                    Emit::new(EventKind::ModelUnexpected, Severity::Warning, true, "lead")
+                        .with("role", "lead")
+                        .with("model", model)
+                        .with("requested", requested),
+                ),
                 SessionEvent::SpendOffer { title, count } => self.emit(
                     Emit::new(EventKind::SpendOffer, Severity::Warning, true, "lead")
                         .with("role", "lead")
@@ -1096,11 +1108,18 @@ impl<R: Runtime> Lead<R> {
         let (phase, reason) = self.phase().clone();
         let entries = self.mailbox.list().await.unwrap_or_default();
         let count = |s: &str| entries.iter().filter(|(l, _)| l.state == s).count();
+        let pending = |wakes: bool| {
+            entries
+                .iter()
+                .filter(|(l, _)| l.state == "pending" && l.wakes == wakes)
+                .count()
+        };
         View {
             phase,
             reason,
             session: self.current().map(|s| (*s.snapshot()).clone()),
-            waiting: count("pending"),
+            waiting: pending(true),
+            notes: pending(false),
             sent: count("sent"),
             in_doubt: count("in_doubt"),
         }

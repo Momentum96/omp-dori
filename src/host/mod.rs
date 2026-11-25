@@ -5,6 +5,7 @@
 //! `Runtime::start` returns a session handle implementing [`Control`]; the terminal runtime of
 //! milestone 6 implements the same two traits over the bridge connection instead of rpc-ui.
 
+pub(crate) mod bridge;
 pub(crate) mod dialogs;
 pub(crate) mod headless;
 pub(crate) mod inbox;
@@ -158,6 +159,11 @@ pub(crate) enum SessionEvent {
     /// OMP restored the requested model.
     FallbackRecovered {
         model: String,
+    },
+    /// A turn ended on a model that is neither the requested one nor a fallback OMP reported.
+    ModelUnexpected {
+        model: String,
+        requested: String,
     },
     /// A spend offer was cancelled (DESIGN 9.2).
     SpendOffer {

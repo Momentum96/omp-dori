@@ -602,6 +602,7 @@ checked on crates.io on 2026-11-25.
 | reqwest (`rustls-no-provider`, `json`, no defaults) | MIT OR Apache-2.0 | Connection pooling, TLS wiring, redirect and timeout policy. Kept on measurement terms: if replacing it with `hyper-util` directly saves over 1 MiB of binary or resident memory in milestone 1, `relay::http` is rewritten on hyper. |
 | ring (as the rustls crypto provider, also used directly) | Apache-2.0 AND ISC | Already in the tree for TLS, so it also supplies SHA-256, secure random tokens and nonces, ed25519 release-signature verification and AES-GCM for Discord voice transport. Replaces sha2, getrandom and ed25519-dalek. |
 | tokio-tungstenite (rustls) | MIT | WebSocket framing for the Discord Gateway, Slack Socket Mode and the realtime model |
+| futures-util (`sink`, no defaults) | MIT OR Apache-2.0 | The stream and sink traits of the WebSocket stream; adds no weight because tokio-tungstenite already depends on it |
 | toml | MIT OR Apache-2.0 | A full TOML parser for the owner-edited config |
 | jiff | Unlicense OR MIT | IANA time zones, DST gaps and repeats (WS req. 52), ISO instants |
 | regex | MIT OR Apache-2.0 | A linear-time engine for owner-supplied patterns: shell rules, stream filters, secret patterns, spend phrases |

@@ -401,3 +401,85 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   (refusal, owner press, local answer race, recommended after the quiet time).
 - `tests/contract_discord.rs` (`CATALY_CONTRACT_OMP=1`): checks 1, 2 and 7 with stock OMP, the wake
   latency, RSS and catch-up measurements.
+
+# Milestone 2 slice 2c: bridge, lead records, digest and unanswered watch, guidance, forms
+
+## Decisions closing the slice (FinishM2c)
+
+- **Unexpected model (DESIGN 6.1).** The session raises `ModelUnexpected` once per model when a
+  turn is over (idle readback) on a model that is neither the expected one nor the fallback OMP
+  reported. The expected model is the start model, or the one the hub asked for with `set_model`.
+  Judging only at the turn's end avoids a false alarm when OMP's `retry_fallback_applied` arrives
+  after the readback that first shows the new model (observed in the unit fake). The lead emits
+  `session.model_unexpected`, urgent, and the lead hears it. Unit test
+  `an_unreported_model_is_reported_once`; the stock-OMP fallback contract case asserts none is raised
+  for a reported fallback.
+- **Held rooms reach the lead (DESIGN 9.3, COORD-13).** `relay.held` is routed to the lead once, as
+  a quiet note (it rides with the next wake): the owner is told in the room, only he can release it,
+  and a session that just left a hand-off unconfirmed gets no extra prompt for it. Why the in-doubt
+  test broke when the hold was routed: the lead's batch written while the fake session confirmed
+  nothing (the urgent in-doubt notice, which the quiet note joins) must end, confirmed or in doubt
+  after 30 s, before the next batch goes; the test waited only 30 s for the released message's
+  answer after the release. It now waits 70 s (the 30 s confirmation window plus margin, as the hold
+  wait already does) and asserts that the lead's inbox holds the held-room note exactly once.
+- **Digest and unanswered settings stay under `[discord]`, not `[jobs.<name>]` (deviation from
+  DESIGN 6.1).** `away`, `others`, `others_alert` and `others_drop` are per-relay facts: `others` must
+  be a subset of that relay's watched channels and is validated against them, the digest fires on the
+  relay's own owner message, not on a schedule, and the unanswered watch reads that relay's rooms. A
+  `[jobs.*]` instance would need a relay reference and a trigger kind the scheduler does not have;
+  Telegram and Slack (milestone 4) carry the same four keys in their own sections.
+- **Bridge tool activation.** OMP 19.1.1 offers a tool an extension registers after load either as a
+  top-level tool or, with its default `tools.commands`, as a command mounted in `bash` and listed in
+  the system prompt; the contract case saw the second. Both are accepted.
+
+## OMP surfaces checked against its documentation (19.1.1)
+
+- **No flush before hello on a resumed session (EXT-35, rule 7).** The extension API has no flush;
+  `extensions.md` says `appendEntry` "follows normal session persistence, so it does not force an
+  empty session onto disk". The bridge therefore sends the hello with the ID OMP reports at
+  `session_start`. For the headless lead the identity is still proven: the hub resumes only after
+  `omp session lease` shows the session free, and `get_state` must report the same ID and file
+  (HOST req. 27, slice 2a).
+- **Background-job completion facts (EXT-16) are not built.** EXT-16 is not in milestone 2's scope
+  (plan, milestone 2 bridge list); it serves lane evidence. OMP documents what it needs:
+  `ctx.getAsyncJobSnapshot()` (read-only async-job snapshot) and the `tool_execution_*` events.
+
+## Lint fixes
+
+- Four functions over 100 lines were split (`cli::execute`: `bridge`, `job_hold`; `hub::serve`:
+  `open`, `stream_cwd`; `post_card`: `mark_question`, `post_parts`, `first_message` returns the ID;
+  `store::lead::write`: `question_ask`, `question_settle`); panicking JSON indexing in the question
+  panel became map inserts; the rest were mechanical (`map_or_default`, `write!`).
+
+## Contract fix: the start recap is a note, not unsettled work (FixContractDiscord)
+
+- **All three `contract_discord` cases timed out in `settled()`, before the first owner message.**
+  Evidence at the timeout (`lead inbox --json`, now printed by the test's panic): one pending entry,
+  sender `cataly`, preview `[recap] Cataly's records now (read them before acting on re…`. The lead
+  was live and idle, the bridge connected, nothing sent or in doubt. It was neither suspect: no room
+  was held (`discord status` showed `held: 0`) and no model event was raised (the session read back
+  `fake/primary`, the requested model). It is the recap `hub::bridge` queues when the lead's bridge
+  says hello on a fresh session (EVR req. 48).
+- **The note is right; the settle check was wrong.** The recap is a quiet note by design: EVR req. 48
+  adds it to the lead's context, it does not start a turn, and a note "waits for the next one"
+  (glossary, Delivery). The test read `lead status` `waiting`, which counted every pending entry,
+  wake or note, so a lead with only a note waiting looked unsettled forever, and the view gave no way
+  to tell the two apart. `lead status` now reports `waiting` (pending entries that
+  start a turn: urgent or the owner's) and `notes` (pending quiet notes) apart, and every inbox entry
+  carries `wakes`; `cataly lead inbox` shows a pending note as `note`. Every test that waits for
+  `waiting == 0` now means "nothing that should wake the lead is pending", which is what it asked.
+- `discord_requests_against_stock_omp` now asserts the start recap is the one note waiting
+  (`wakes: false`, `notes: 1`) and that the inbox is empty after the first wake: the recap went out
+  with it.
+
+## Tests
+
+- `tests/contract_session.rs` `bridge_in_stock_omp`: stock OMP with an isolated agent directory and
+  the bridge linked by `cataly bridge install`. A probe extension loads the installed bridge through
+  a counting proxy of the extension API: an ordinary session registers exactly `session_start` and
+  `session_switch`, no tool and no entry. Through the real link, a socket listener at `CATALY_SOCKET`
+  sees no connection, no request carries the guidance or the tool, and no session holds the marker.
+  `bridge_accepted_lead_in_stock_omp`: the hub's lead connects, the request carries the guidance and
+  the tool, and the session file holds the marker. `tests/support/model.rs` now records request
+  bodies.
+- `tests/contract_discord.rs` `rss_with_discord_lead_and_owner_jobs`: the RSS measurement below.

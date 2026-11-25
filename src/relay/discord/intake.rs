@@ -340,7 +340,7 @@ pub(crate) struct Intake<T: Runtime> {
     turn_ended: AtomicBool,
     typed: Mutex<Option<Instant>>,
     pub(super) cards: Cards,
-    events: Events,
+    pub(super) events: Events,
 }
 
 fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -890,7 +890,12 @@ impl<T: Runtime> Intake<T> {
         parent: Option<Snowflake>,
     ) -> Option<Arrived> {
         let (message, _) = types::ids(raw)?;
-        match types::gate(raw, self.owner) {
+        let gate = types::gate(raw, self.owner);
+        if self.settings.others.contains(&room) {
+            self.track_others(raw, room, message, gate == Gate::Pass)
+                .await;
+        }
+        match gate {
             Gate::Pass => {
                 let _ = self
                     .write(RelayWrite::Pass {
@@ -1138,7 +1143,21 @@ impl<T: Runtime> Intake<T> {
                     self.pipeline.taken(row).await?;
                     return Ok(Step::Done);
                 }
-                self.pipeline.hand_off(row, &inbound, read_at).await
+                let inbound = self.ledger_answer(row, inbound).await;
+                let previous = self
+                    .store
+                    .read(|r| r.meta("owner_last_ms"))
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<i64>().ok());
+                let step = self.pipeline.hand_off(row, &inbound, read_at).await;
+                if let Some(previous) = previous
+                    && now_ms() - previous >= crate::jobs::duration_ms(self.settings.away)
+                {
+                    self.digest(previous);
+                }
+                step
             }
         }
     }

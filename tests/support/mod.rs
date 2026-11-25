@@ -91,7 +91,15 @@ impl TestHub {
         cmd
     }
 
+    /// Starts the hub process after linking the bridge into the sandbox's OMP agent directory
+    /// (DESIGN 12.2 C19: sessions start only with the link in place).
     pub fn spawn_hub(&self) -> Child {
+        let linked = self.command(&["bridge", "install"]).output().unwrap();
+        assert!(
+            linked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
         self.command(&["hub"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

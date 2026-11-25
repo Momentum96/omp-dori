@@ -70,17 +70,25 @@ fn hub(fake: &FakeDiscord, model: &FakeModel, discord_extra: &str) -> TestHub {
 }
 
 fn settled(hub: &TestHub) -> Value {
-    hub.until(WAIT, || {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
         let lead = hub.json(&["lead", "status", "--json"]);
         let discord = hub.json(&["discord", "status", "--json"]);
-        (lead["phase"] == "live"
+        if lead["phase"] == "live"
             && lead["session"]["status"] == "idle"
             && lead["sent"] == 0
             && lead["waiting"] == 0
             && discord["healthy"] == true
-            && discord["counts"]["answers_waiting"] == 0)
-            .then_some(discord)
-    })
+            && discord["counts"]["answers_waiting"] == 0
+        {
+            return discord;
+        }
+        if std::time::Instant::now() >= deadline {
+            let inbox = hub.json(&["lead", "inbox", "--json"]);
+            panic!("not settled within {WAIT:?}: lead {lead}\ndiscord {discord}\ninbox {inbox}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn reference(c: &support::discord::Seen) -> Option<String> {
@@ -101,6 +109,19 @@ fn discord_requests_against_stock_omp() {
     let mut hub = hub(&fake, &model, "");
     hub.start();
     settled(&hub);
+    // The recap the bridge's start queues is a quiet note: it waits (not counted as waiting) and
+    // goes out with the first wake.
+    let notes = hub.until(WAIT, || {
+        let inbox = hub.json(&["lead", "inbox", "--json"]);
+        (!inbox.as_array()?.is_empty()).then_some(inbox)
+    });
+    assert_eq!(notes.as_array().unwrap().len(), 1, "{notes}");
+    assert_eq!(notes[0]["wakes"], false, "{notes}");
+    assert!(
+        notes[0]["preview"].as_str().unwrap().starts_with("[recap]"),
+        "{notes}"
+    );
+    assert_eq!(hub.json(&["lead", "status", "--json"])["notes"], 1);
     let mut id = 800_000_000_000_000_100u64;
     let wakes = 40;
     for n in 0..wakes {
@@ -110,6 +131,14 @@ fn discord_requests_against_stock_omp() {
         assert_eq!(reference(&created[n]), Some(id.to_string()));
         assert_eq!(created[n].body["content"], "ok");
         settled(&hub);
+        if n == 0 {
+            let inbox = hub.json(&["lead", "inbox", "--json"]);
+            assert_eq!(
+                inbox,
+                serde_json::json!([]),
+                "the recap went out with the first wake"
+            );
+        }
     }
     let s = settled(&hub);
     assert_eq!(s["counts"]["owed_settled"], wakes, "{s}");
@@ -190,5 +219,62 @@ fn ask_tool_answered_from_discord() {
         lead["session"]["dialogs"].as_array().unwrap().is_empty(),
         "{lead}"
     );
+    assert!(hub.stop().success());
+}
+
+/// Measurement (DESIGN 2.3): hub RSS with Discord connected, the lead attached and every owner job
+/// kind live (`github` and `pr` on the fake `gh`, `quota` on stock OMP, `backup` on a local tree,
+/// `health`, `items`, `pressure`), idle 10 s after one answered request.
+#[test]
+fn rss_with_discord_lead_and_owner_jobs() {
+    if !enabled() {
+        return;
+    }
+    let fake = FakeDiscord::start();
+    let model = FakeModel::start();
+    let probe = TestHub::new("");
+    let gh = probe.install_fake("gh");
+    let tree = probe.root.join("tree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&tree)
+        .env("HOME", &probe.root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .unwrap();
+    assert!(git.success());
+    let watched = probe.private_file("watched", "x");
+    let jobs = format!(
+        "\n[jobs.gh]\nkind = \"github\"\ngh = \"{gh}\"\nnotifications = false\nlogin = \"me\"\n\
+         repos = [{{ repo = \"o/r\", authors = [\"me\"] }}]\n\
+         [jobs.pr]\nkind = \"pr\"\ngh = \"{gh}\"\nlogin = \"me\"\n\
+         [jobs.q]\nkind = \"quota\"\n\
+         [jobs.bk]\nkind = \"backup\"\ndir = \"{}\"\nname = \"Backup\"\nemail = \"b@example.org\"\n\
+         [jobs.h]\nkind = \"health\"\nfiles = [{{ path = \"{}\", max_age = \"1h\" }}]\n\
+         [jobs.mail]\nkind = \"items\"\nargv = [\"echo\", \"one\"]\n\
+         [jobs.host]\nkind = \"pressure\"\n",
+        tree.display(),
+        watched.display(),
+        gh = gh.display()
+    );
+    let mut hub = hub(&fake, &model, &jobs);
+    hub.start();
+    settled(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_300,
+        OWNER,
+        "hello",
+    ));
+    fake.wait_creates(1, WAIT);
+    settled(&hub);
+    std::thread::sleep(Duration::from_secs(10));
+    let listed = hub.json(&["job", "list", "--json"]).to_string();
+    for name in ["gh", "pr", "q", "bk", "h", "mail", "host"] {
+        assert!(listed.contains(&format!("\"{name}\"")), "{listed}");
+    }
+    let stats = hub.json(&["stats", "--json"]);
+    eprintln!("MEASURE rss_discord_lead_owner_jobs={}", stats["rss_bytes"]);
     assert!(hub.stop().success());
 }

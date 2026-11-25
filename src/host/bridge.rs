@@ -1,0 +1,188 @@
+//! The bridge registry (DESIGN 8 "Bridge link", EXT req. 2-5): single-use launch tokens issued to
+//! the hub's own OMP children, the reconnect key of each accepted connection, and what the hub knows
+//! about each session's bridge. Roles are assigned here, never claimed by the bridge.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+use serde::Serialize;
+
+use super::Role;
+use crate::sys::now_ms;
+
+/// A launch token is good for one hello within this time of the launch.
+const TOKEN_LIFE_MS: i64 = 10 * 60 * 1000;
+/// Tokens kept at most (a hub starts few sessions).
+const TOKENS_MAX: usize = 64;
+/// Tool answers kept per hub for repeated call IDs (EXT req. 18).
+const ANSWERS_MAX: usize = 256;
+
+/// What the hub shows about one session's bridge.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub(crate) struct LinkView {
+    pub(crate) connected: bool,
+    pub(crate) session: Option<String>,
+    pub(crate) since_ms: Option<i64>,
+    pub(crate) last_seq: u64,
+    pub(crate) dropped: u64,
+}
+
+struct Issued {
+    handle: String,
+    role: Role,
+    at_ms: i64,
+}
+
+struct Link {
+    key: String,
+    role: Role,
+    view: LinkView,
+}
+
+#[derive(Default)]
+struct Inner {
+    tokens: HashMap<String, Issued>,
+    links: HashMap<String, Link>,
+    answers: VecDeque<(String, String)>,
+}
+
+/// Launch tokens and accepted bridge connections of this hub run.
+#[derive(Default)]
+pub(crate) struct Links(Mutex<Inner>);
+
+impl std::fmt::Debug for Links {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Links")
+    }
+}
+
+impl Links {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records the token handed to a session's OMP child before it is spawned.
+    pub(crate) fn issue(&self, token: &str, handle: &str, role: Role) {
+        let now = now_ms();
+        let mut inner = self.lock();
+        inner.tokens.retain(|_, t| now - t.at_ms < TOKEN_LIFE_MS);
+        if inner.tokens.len() >= TOKENS_MAX {
+            return;
+        }
+        inner.tokens.insert(
+            token.to_string(),
+            Issued {
+                handle: handle.to_string(),
+                role,
+                at_ms: now,
+            },
+        );
+    }
+
+    /// Uses a token: the session it was issued for, once (EXT req. 5).
+    pub(crate) fn redeem(&self, token: &str) -> Option<(String, Role)> {
+        let issued = self.lock().tokens.remove(token)?;
+        (now_ms() - issued.at_ms < TOKEN_LIFE_MS).then_some((issued.handle, issued.role))
+    }
+
+    /// The session a reconnect key belongs to.
+    pub(crate) fn by_key(&self, key: &str) -> Option<(String, Role)> {
+        self.lock()
+            .links
+            .iter()
+            .find(|(_, l)| !key.is_empty() && l.key == key)
+            .map(|(h, l)| (h.clone(), l.role))
+    }
+
+    /// An accepted connection; replaces an earlier one of the same session.
+    pub(crate) fn connect(&self, handle: &str, role: Role, key: &str, session: &str) {
+        self.lock().links.insert(
+            handle.to_string(),
+            Link {
+                key: key.to_string(),
+                role,
+                view: LinkView {
+                    connected: true,
+                    session: Some(session.to_string()).filter(|s| !s.is_empty()),
+                    since_ms: Some(now_ms()),
+                    last_seq: 0,
+                    dropped: 0,
+                },
+            },
+        );
+    }
+
+    /// The connection with `key` closed; a newer connection of the session is left alone.
+    pub(crate) fn disconnect(&self, handle: &str, key: &str) {
+        if let Some(link) = self.lock().links.get_mut(handle)
+            && link.key == key
+        {
+            link.view.connected = false;
+            link.view.since_ms = Some(now_ms());
+        }
+    }
+
+    /// Notes an event: its number, a new session ID, events the bridge had to drop.
+    pub(crate) fn observe(&self, handle: &str, seq: u64, session: Option<&str>, dropped: u64) {
+        if let Some(link) = self.lock().links.get_mut(handle) {
+            link.view.last_seq = link.view.last_seq.max(seq);
+            link.view.dropped += dropped;
+            if let Some(s) = session.filter(|s| !s.is_empty()) {
+                link.view.session = Some(s.to_string());
+            }
+        }
+    }
+
+    pub(crate) fn view(&self, handle: &str) -> LinkView {
+        self.lock()
+            .links
+            .get(handle)
+            .map_or_default(|l| l.view.clone())
+    }
+
+    /// The answer already given to a tool call ID, so a retry does nothing twice (EXT req. 18).
+    pub(crate) fn answered(&self, call: &str) -> Option<String> {
+        self.lock()
+            .answers
+            .iter()
+            .find(|(c, _)| c == call)
+            .map(|(_, a)| a.clone())
+    }
+
+    pub(crate) fn remember(&self, call: &str, answer: &str) {
+        let mut inner = self.lock();
+        if inner.answers.len() >= ANSWERS_MAX {
+            inner.answers.pop_front();
+        }
+        inner
+            .answers
+            .push_back((call.to_string(), answer.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_single_use_and_keys_find_their_session() {
+        let links = Links::default();
+        links.issue("t1", "h1", Role::Lead);
+        assert_eq!(links.redeem("t1"), Some(("h1".into(), Role::Lead)));
+        assert_eq!(links.redeem("t1"), None);
+        assert_eq!(links.redeem("nope"), None);
+        links.connect("h1", Role::Lead, "k1", "s1");
+        assert_eq!(links.by_key("k1"), Some(("h1".into(), Role::Lead)));
+        assert_eq!(links.by_key(""), None);
+        links.observe("h1", 7, Some("s2"), 3);
+        let v = links.view("h1");
+        assert!(v.connected && v.last_seq == 7 && v.dropped == 3);
+        assert_eq!(v.session.as_deref(), Some("s2"));
+        links.disconnect("h1", "old");
+        assert!(links.view("h1").connected);
+        links.disconnect("h1", "k1");
+        assert!(!links.view("h1").connected);
+        links.remember("c1", "done");
+        assert_eq!(links.answered("c1").as_deref(), Some("done"));
+    }
+}

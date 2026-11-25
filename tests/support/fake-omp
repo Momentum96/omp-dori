@@ -32,6 +32,10 @@ turn() {
     echo '{"type":"agent_start"}'
     if [ -f "$dir/ask" ] && printf '%s' "$msg" | grep -q ASK; then
         asked=$2
+        if [ -f "$dir/form2" ]; then
+            echo '{"type":"extension_ui_request","id":"d2","method":"form","html":"<form><p>Release</p><fieldset><legend>Pick a color</legend><label><input type=\"radio\" name=\"color\" value=\"Red\"> Red</label><label><input type=\"radio\" name=\"color\" value=\"Blue\" checked> Blue</label></fieldset><label>Note <input type=\"text\" name=\"note\" maxlength=\"4\" required></label></form>"}'
+            return
+        fi
         echo '{"type":"extension_ui_request","id":"d1","method":"form","html":"<form><fieldset><legend>Pick a color</legend><label><input type=\"radio\" name=\"color\" value=\"Red\"> Red</label><label><input type=\"radio\" name=\"color\" value=\"Blue\" checked> Blue</label></fieldset></form>"}'
         return
     fi

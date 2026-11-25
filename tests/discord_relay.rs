@@ -344,10 +344,15 @@ fn unconfirmed_hand_offs_resend_once_or_hold_the_room() {
             .iter()
             .any(|r| r.contains("800000000000000043"))
     );
+    // The lead is told of the held room once (DESIGN 9.3, COORD-13), as a quiet note.
+    let inbox = hub.json(&["lead", "inbox", "--json"]).to_string();
+    assert_eq!(inbox.matches("[event relay.held]").count(), 1, "{inbox}");
     assert!(hub.cli(&["discord", "release", CH]).status.success());
     hub.fixture("omp", "noentry", None);
     hub.until(WAIT, || (status(&hub)["counts"]["held"] == 0).then_some(()));
-    fake.wait(WAIT, |f| {
+    // The lead's batch written while the session still confirmed nothing (the in-doubt notice,
+    // with the quiet note) must end, confirmed or in doubt after 30 s, before the next one goes.
+    fake.wait(Duration::from_secs(70), |f| {
         f.creates()
             .into_iter()
             .find(|c| reference(c).as_deref() == Some("800000000000000043"))
@@ -564,5 +569,212 @@ fn recommended_choice_is_used_after_the_quiet_time() {
             .contains("recommended choice \"Blue\" was used")
     );
     assert_eq!(fake.bot_messages(CH)[0]["author"]["id"], BOT);
+    assert!(hub.stop().success());
+}
+
+/// The callbacks seen so far, once there are at least `n`.
+fn callbacks(fake: &FakeDiscord, n: usize) -> Vec<support::discord::Seen> {
+    fake.wait(WAIT, |f| {
+        let c = f.calls("POST", "/callback");
+        (c.len() >= n).then_some(c)
+    })
+}
+
+/// DISC-OUT req. 63, 72 with Discord's own components: a select for the choice, a modal for the
+/// text (its length checked), Submit; someone else is refused. Nobody types JSON.
+#[test]
+fn several_fields_use_a_select_a_modal_and_submit() {
+    let fake = FakeDiscord::start();
+    let mut hub = relay_hub(&fake, &["ask", "form2"], "");
+    hub.start();
+    ready(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_071,
+        OWNER,
+        "please ASK me",
+    ));
+    let q = question(&fake);
+    let qid = q["id"].as_str().unwrap().to_string();
+    assert!(!q["content"].as_str().unwrap().contains("JSON"), "{q}");
+    let id = |row: usize, n: usize| {
+        q["components"][row]["components"][n]["custom_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (select, fill, submit) = (id(0, 0), id(1, 0), id(1, 1));
+    assert_eq!(q["components"][0]["components"][0]["type"], 3);
+    fake.interact(
+        OTHER,
+        CH,
+        &qid,
+        3,
+        &json!({"component_type": 3, "custom_id": select, "values": ["0"]}),
+    );
+    assert_eq!(callbacks(&fake, 1)[0].body["data"]["flags"], 64, "refused");
+    fake.interact(
+        OWNER,
+        CH,
+        &qid,
+        3,
+        &json!({"component_type": 3, "custom_id": select, "values": ["0"]}),
+    );
+    assert_eq!(callbacks(&fake, 2)[1].body["type"], 6);
+    fake.press(OWNER, CH, &qid, &fill);
+    let modal = callbacks(&fake, 3)[2].body.clone();
+    assert_eq!(modal["type"], 9, "{modal}");
+    assert_eq!(
+        modal["data"]["components"][0]["components"][0]["max_length"],
+        4
+    );
+    let note = |value: &str| {
+        json!({"custom_id": modal["data"]["custom_id"], "components": [{"type": 1, "components": [
+            {"type": 4, "custom_id": "i1", "value": value}]}]})
+    };
+    fake.interact(OWNER, CH, &qid, 5, &note("too long"));
+    let refused = callbacks(&fake, 4)[3].body.clone();
+    assert!(
+        refused["data"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("characters"),
+        "{refused}"
+    );
+    fake.interact(OWNER, CH, &qid, 5, &note("ship"));
+    assert_eq!(callbacks(&fake, 5)[4].body["type"], 6);
+    fake.press(OWNER, CH, &qid, &submit);
+    let answer = fake.wait(WAIT, |f| {
+        f.creates()
+            .into_iter()
+            .find(|c| reference(c).as_deref() == Some("800000000000000071"))
+    });
+    assert_eq!(answer.body["content"], "picked Red");
+    assert!(hub.stop().success());
+}
+
+/// Acceptance check 10: the owner's first message after the away time brings a digest to the lead
+/// as one urgent event.
+#[test]
+fn owner_return_brings_one_digest_to_the_lead() {
+    let fake = FakeDiscord::start();
+    let mut hub = relay_hub(&fake, &[], "away = \"2s\"\n");
+    hub.start();
+    ready(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_081,
+        OWNER,
+        "first",
+    ));
+    fake.wait(WAIT, |f| {
+        f.creates()
+            .into_iter()
+            .find(|c| reference(c).as_deref() == Some("800000000000000081"))
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_082,
+        OWNER,
+        "back again",
+    ));
+    let digest = hub.until(WAIT, || {
+        hub.events()
+            .into_iter()
+            .find(|e| e["kind"] == "owner.digest")
+    });
+    assert_eq!(digest["urgent"], true, "{digest}");
+    assert!(
+        digest["body"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("Room {CH}")),
+        "{digest}"
+    );
+    hub.until(WAIT, || {
+        let text = std::fs::read_to_string(session_file(&hub)).unwrap_or_default();
+        text.contains("[event owner.digest]").then_some(())
+    });
+    let digests = hub
+        .events()
+        .iter()
+        .filter(|e| e["kind"] == "owner.digest")
+        .count();
+    assert_eq!(digests, 1);
+    assert!(hub.stop().success());
+}
+
+/// OJ-22: a message from someone else unanswered past the alert age is reported to the lead once.
+#[test]
+fn unanswered_messages_from_others_are_reported_once() {
+    let fake = FakeDiscord::start();
+    let mut hub = relay_hub(
+        &fake,
+        &[],
+        &format!("others = [\"{CH}\"]\nothers_alert = \"2s\"\n"),
+    );
+    hub.start();
+    ready(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        // A message ID of now, so its age starts at zero (OJ req. 53 drop age is 24 h).
+        (u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            - 1_420_070_400_000)
+            << 22,
+        OTHER,
+        "can you look at this?",
+    ));
+    let seen = hub.until(WAIT, || {
+        hub.events()
+            .into_iter()
+            .find(|e| e["kind"] == "owner.unanswered")
+    });
+    assert!(
+        seen["text"].as_str().unwrap().contains("can you look"),
+        "{seen}"
+    );
+    hub.until(WAIT, || {
+        let text = std::fs::read_to_string(session_file(&hub)).unwrap_or_default();
+        text.contains("[event owner.unanswered]").then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        hub.events()
+            .iter()
+            .filter(|e| e["kind"] == "owner.unanswered")
+            .count(),
+        1
+    );
+    assert!(hub.stop().success());
+}
+
+/// DESIGN 12.2 C8: an owner message still owed 60 s after admission brings the idle lead a
+/// reminder carrying the request's tag.
+#[test]
+fn owed_messages_bring_a_reminder_after_a_minute() {
+    let fake = FakeDiscord::start();
+    let mut hub = relay_hub(&fake, &[], "");
+    hub.fixture("omp", "answer.json", Some("\"\""));
+    hub.start();
+    ready(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_095,
+        OWNER,
+        "anyone there?",
+    ));
+    hub.until(Duration::from_secs(100), || {
+        let text = std::fs::read_to_string(session_file(&hub)).unwrap_or_default();
+        text.contains("[reminder]").then_some(())
+    });
+    let text = std::fs::read_to_string(session_file(&hub)).unwrap();
+    assert!(text.contains(&format!("[discord {CH}/800000000000000095]")));
     assert!(hub.stop().success());
 }

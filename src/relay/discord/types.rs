@@ -208,7 +208,7 @@ pub(crate) fn normalise(raw: &Value, parent: Option<Snowflake>) -> Result<Inboun
     })
 }
 
-/// A button press (component interaction), checked for shape.
+/// A component interaction (button press or select) or a modal submit, checked for shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Press {
     pub(crate) id: String,
@@ -219,18 +219,63 @@ pub(crate) struct Press {
     pub(crate) custom_id: String,
     pub(crate) user: Option<Snowflake>,
     pub(crate) user_is_bot: bool,
+    /// A select's chosen values (at most 25).
+    pub(crate) values: Vec<String>,
+    /// A modal's text inputs as (custom ID, value), at most 25.
+    pub(crate) inputs: Vec<(String, String)>,
 }
 
 impl Press {
-    /// A button press of the expected shape, or `None`.
+    /// An interaction of the expected shape, or `None`.
     pub(crate) fn parse(raw: &Value) -> Option<Self> {
-        if raw.get("type").and_then(Value::as_u64) != Some(3) {
-            return None;
-        }
         let data = raw.get("data")?;
-        if data.get("component_type").and_then(Value::as_u64) != Some(2) {
-            return None;
-        }
+        let modal = match raw.get("type").and_then(Value::as_u64) {
+            Some(3)
+                if matches!(
+                    data.get("component_type").and_then(Value::as_u64),
+                    Some(2 | 3)
+                ) =>
+            {
+                false
+            }
+            Some(5) => true,
+            _ => return None,
+        };
+        let values = data
+            .get("values")
+            .and_then(Value::as_array)
+            .map_or_default(|a| {
+                a.iter()
+                    .take(25)
+                    .filter_map(Value::as_str)
+                    .map(|v| v.chars().take(100).collect())
+                    .collect()
+            });
+        let inputs = if modal {
+            data.get("components")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row.get("components").and_then(Value::as_array))
+                .flatten()
+                .chain(
+                    data.get("components")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c.get("component")),
+                )
+                .filter_map(|c| {
+                    Some((
+                        text_of(c, "custom_id")?.to_string(),
+                        text_of(c, "value")?.chars().take(4000).collect(),
+                    ))
+                })
+                .take(25)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let token = text_of(raw, "token")?;
         let token_ok = !token.is_empty()
             && token.len() <= TOKEN_MAX
@@ -254,6 +299,8 @@ impl Press {
             custom_id: text_of(data, "custom_id")?.chars().take(100).collect(),
             user: id_of(user.and_then(|u| u.get("id"))),
             user_is_bot: flag("bot") || flag("system"),
+            values,
+            inputs,
         })
     }
 
