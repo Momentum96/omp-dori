@@ -357,6 +357,73 @@ fn wait_lead(hub: &TestHub, pred: impl Fn(&Value) -> bool) -> Value {
     })
 }
 
+/// Every saved-reset auto-redeem key of OMP 19.1.1.
+const RESET_KEYS: [&str; 5] = [
+    "codexResets.autoRedeem5h",
+    "codexResets.autoRedeemWeekly",
+    "claudeResets.autoRedeem5h",
+    "claudeResets.autoRedeemWeekly",
+    "claudeResets.autoRedeemFable",
+];
+
+/// A test extension that writes each key's effective value and the layer that supplied it, read
+/// through OMP's public settings registry, to `CATALY_PROBE_OUT` when it loads.
+const SETTINGS_PROBE: &str = r#"import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { writeFileSync } from "node:fs";
+export default function (pi: any) {
+  const out: Record<string, unknown> = {};
+  for (const key of JSON.parse(process.env.CATALY_PROBE_KEYS ?? "[]")) {
+    const handle = lookup(key);
+    out[key] = handle ? [handle.get(pi.pi.settings), handle.provenance(pi.pi.settings)] : null;
+  }
+  writeFileSync(process.env.CATALY_PROBE_OUT ?? "", JSON.stringify(out));
+}
+"#;
+
+/// The reset keys as a running stock OMP session sees them with `overlay`, in a profile whose
+/// global config says `yes` to every one of them (the owner's worst case).
+fn effective_settings(sandbox: &Sandbox, overlay: &Path) -> Value {
+    let agent = sandbox.root.join("probe-agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    std::fs::copy(
+        sandbox.root.join("agent/models.yml"),
+        agent.join("models.yml"),
+    )
+    .unwrap();
+    let mut global = String::new();
+    for section in ["codexResets", "claudeResets"] {
+        global.push_str(&format!("{section}:\n"));
+        for key in RESET_KEYS
+            .iter()
+            .filter_map(|k| k.strip_prefix(section)?.strip_prefix('.'))
+        {
+            global.push_str(&format!("  {key}: yes\n"));
+        }
+    }
+    std::fs::write(agent.join("config.yml"), global).unwrap();
+    let probe = sandbox.root.join("settings-probe.ts");
+    std::fs::write(&probe, SETTINGS_PROBE).unwrap();
+    let out = sandbox.root.join("settings-probe.json");
+    let _ = std::fs::remove_file(&out);
+    let keys = PathBuf::from(serde_json::to_string(&RESET_KEYS).unwrap());
+    let omp = sandbox.omp_with(
+        false,
+        &[
+            format!("--config={}", overlay.display()),
+            "-e".into(),
+            probe.display().to_string(),
+            "--no-session".into(),
+        ],
+        &[
+            ("PI_CODING_AGENT_DIR", agent),
+            ("CATALY_PROBE_OUT", out.clone()),
+            ("CATALY_PROBE_KEYS", keys),
+        ],
+    );
+    omp.close();
+    serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap()
+}
+
 /// Acceptance check 12 with stock OMP, and the measurements of slice 2a.
 #[test]
 fn lead_end_to_end_and_resume() {
@@ -406,7 +473,14 @@ fn lead_end_to_end_and_resume() {
     )
     .unwrap();
     assert_eq!(overlay["retry"]["modelFallback"], true);
-    assert_eq!(overlay["codexResets"]["autoRedeem"], "no");
+    let effective = effective_settings(&sandbox, &hub.state().join("omp-overlay.yml"));
+    for key in RESET_KEYS {
+        assert_eq!(
+            effective[key],
+            json!(["no", "overlay"]),
+            "{key} over a global yes: {effective}"
+        );
+    }
     assert_eq!(
         overlay["goal"]["enabled"], false,
         "the lead holds no standing goal (OPC-36)"

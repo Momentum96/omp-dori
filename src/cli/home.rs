@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::Failure;
 use super::args::Parsed;
+use crate::jobs::owner::backup::{private, valid_repo};
 use crate::sys::command::{KILL_GRACE, Output, Spec};
 use crate::sys::paths::Paths;
 
@@ -112,33 +113,16 @@ async fn gh_json(rest: &[&str]) -> Result<Result<Value, String>, String> {
         .map_err(|_| format!("gh {} did not answer JSON", rest.join(" ")))
 }
 
-fn valid_repo(repo: &str) -> bool {
-    let part = |s: &str| {
-        !s.is_empty()
-            && s.len() <= 100
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-            && !s.starts_with('.')
-    };
-    repo.split_once('/')
-        .is_some_and(|(o, n)| part(o) && part(n))
-}
-
 /// The repository's visibility; a public one is refused (decision 16).
 async fn visibility(repo: &str) -> Result<Visibility, String> {
-    match gh_json(&["api", &format!("repos/{repo}")]).await? {
-        Ok(v) => match v.get("private").and_then(Value::as_bool) {
-            Some(true) => Ok(Visibility::Private),
-            Some(false) => Err(format!(
-                "{repo} is public; the home backup never goes to a public repository. Make it \
-                 private or name another with --backup-repo"
-            )),
-            None => Err(format!("gh did not say whether {repo} is private")),
-        },
-        Err(stderr) if stderr.contains("404") || stderr.contains("Not Found") => {
-            Ok(Visibility::Absent)
-        }
-        Err(stderr) => Err(format!("gh could not read {repo}: {}", first_line(&stderr))),
+    let answer = gh_json(&["api", &format!("repos/{repo}")]).await?;
+    match private(repo, answer.as_ref().map_err(String::as_str))? {
+        Some(true) => Ok(Visibility::Private),
+        Some(false) => Err(format!(
+            "{repo} is public; the home backup never goes to a public repository. Make it \
+             private or name another with --backup-repo"
+        )),
+        None => Ok(Visibility::Absent),
     }
 }
 
@@ -317,19 +301,5 @@ impl Home {
             text.push('\n');
         }
         crate::sys::fs::write_atomic(&path, text.as_bytes()).map_err(|e| e.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn repository_names() {
-        assert!(valid_repo("someone/cataly-home"));
-        assert!(!valid_repo("someone"));
-        assert!(!valid_repo("a/b/c"));
-        assert!(!valid_repo("../x"));
-        assert!(!valid_repo("a/ b"));
     }
 }

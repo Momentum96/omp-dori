@@ -3,10 +3,11 @@
 //!
 //! The overlays (one for the lead, one for lanes) are written once per hub run, owner-only. They pin
 //! `ask.timeout: 0` (questions never time out), goal mode on with continuation in rpc mode for lanes
-//! and off for the lead, the saved-reset auto-redeem key to `no` (OJ-13), and OMP's own
-//! model fallback on with `cooldown-expiry` revert (decision 7, OJ-10/11). `retry.fallbackOn` and
-//! `retry.fallbackChains` appear only when the owner set them in Cataly's `[fallback]` section; Cataly
-//! never invents a chain. JSON is valid YAML, so the overlay is written as JSON.
+//! and off for the lead, every per-window saved-reset auto-redeem key to `no` (OJ-13; the five keys
+//! OMP 19.1.1 defines, see [`NO_REDEEM`]), and OMP's own model fallback on with `cooldown-expiry`
+//! revert (decision 7, OJ-10/11). `retry.fallbackOn` and `retry.fallbackChains` appear only when the
+//! owner set them in Cataly's `[fallback]` section; Cataly never invents a chain. JSON is valid YAML,
+//! so the overlay is written as JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -118,6 +119,18 @@ pub(crate) fn overlay_path(state: &Path, lane: bool) -> PathBuf {
     })
 }
 
+/// Every saved-reset auto-redeem key of OMP 19.1.1 (`unset | yes | no`, default `unset`), one per
+/// provider and reset window. They replaced `codexResets.autoRedeem`, which OMP migrates into the two
+/// Codex keys only; without the Claude keys here, an owner's global `yes` would spend saved Claude
+/// resets silently in every hosted session. Each is pinned to `no` (DESIGN 9.2).
+pub(crate) const NO_REDEEM: [(&str, &str); 5] = [
+    ("codexResets", "autoRedeem5h"),
+    ("codexResets", "autoRedeemWeekly"),
+    ("claudeResets", "autoRedeem5h"),
+    ("claudeResets", "autoRedeemWeekly"),
+    ("claudeResets", "autoRedeemFable"),
+];
+
 /// The overlay's settings for a lane (`lane`) or the lead.
 pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
     let mut retry = Map::new();
@@ -129,12 +142,22 @@ pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
     if !fallback.chains.is_empty() {
         retry.insert("fallbackChains".into(), json!(fallback.chains));
     }
-    json!({
-        "ask": { "timeout": 0 },
-        "goal": { "enabled": lane, "continuationModes": ["interactive", "rpc"] },
-        "codexResets": { "autoRedeem": "no" },
-        "retry": retry,
-    })
+    let mut root = Map::new();
+    root.insert("ask".into(), json!({ "timeout": 0 }));
+    root.insert(
+        "goal".into(),
+        json!({ "enabled": lane, "continuationModes": ["interactive", "rpc"] }),
+    );
+    for (section, key) in NO_REDEEM {
+        if let Value::Object(keys) = root
+            .entry(section)
+            .or_insert_with(|| Value::Object(Map::new()))
+        {
+            keys.insert(key.into(), json!("no"));
+        }
+    }
+    root.insert("retry".into(), Value::Object(retry));
+    Value::Object(root)
 }
 
 /// Writes the overlay file of a session kind (mode 0600, atomically) and returns its path.
@@ -196,7 +219,19 @@ mod tests {
             true
         );
         assert_eq!(plain["ask"]["timeout"], 0);
-        assert_eq!(plain["codexResets"]["autoRedeem"], "no");
+        for (section, key) in [
+            ("codexResets", "autoRedeem5h"),
+            ("codexResets", "autoRedeemWeekly"),
+            ("claudeResets", "autoRedeem5h"),
+            ("claudeResets", "autoRedeemWeekly"),
+            ("claudeResets", "autoRedeemFable"),
+        ] {
+            assert_eq!(plain[section][key], "no", "{section}.{key}");
+        }
+        assert!(
+            plain["codexResets"].get("autoRedeem").is_none(),
+            "the replaced key is gone"
+        );
         assert_eq!(plain["retry"]["modelFallback"], true);
         assert_eq!(plain["retry"]["fallbackRevertPolicy"], "cooldown-expiry");
         assert!(plain["retry"].get("fallbackChains").is_none());

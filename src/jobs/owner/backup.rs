@@ -2,7 +2,9 @@
 //! change, scan what is staged with the built-in token shapes and the owner's patterns, refuse files
 //! over the size limit, and only then commit with the configured identity and push to the configured
 //! branch. Never force-pushes, rewrites history or pulls. A refusal unstages everything and alerts
-//! once per distinct set of files, naming files and rule but never the matched text.
+//! once per distinct set of files, naming files and rule but never the matched text. The Cataly home
+//! backup also reads the remote repository's visibility before every push and refuses unless GitHub
+//! says it is private (decision 16): a repository made public after setup gets nothing more.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,12 +13,76 @@ use super::Tick;
 use crate::config::owner::Backup;
 use crate::jobs::event::{Emit, EventKind, Severity, one_line};
 use crate::sys::secrets;
+use serde_json::Value;
 
 const LOCAL: Duration = Duration::from_secs(60);
 const PUSH: Duration = Duration::from_secs(300);
 const GIT_CAP: u64 = 4 * 1024 * 1024;
 const SCAN: &str = "scan";
 const PUSHED: &str = "push";
+const GH: Duration = Duration::from_secs(60);
+const GH_CAP: u64 = 1024 * 1024;
+
+/// `owner/name` as GitHub allows it.
+pub(crate) fn valid_repo(repo: &str) -> bool {
+    let part = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 100
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            && !s.starts_with('.')
+    };
+    repo.split_once('/')
+        .is_some_and(|(o, n)| part(o) && part(n))
+}
+
+/// What `gh api repos/<repo>` said, as its JSON or its error text: `Some(true)` private,
+/// `Some(false)` public, `None` absent (decision 16).
+pub(crate) fn private(repo: &str, answer: Result<&Value, &str>) -> Result<Option<bool>, String> {
+    match answer {
+        Ok(v) => v
+            .get("private")
+            .and_then(Value::as_bool)
+            .map(Some)
+            .ok_or_else(|| format!("gh did not say whether {repo} is private")),
+        Err(stderr) if stderr.contains("404") || stderr.contains("Not Found") => Ok(None),
+        Err(stderr) => Err(format!(
+            "gh could not read {repo}: {}",
+            secrets::mask(
+                stderr
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+            )
+        )),
+    }
+}
+
+/// Where a remote URL points: a GitHub repository, a path on this machine, or elsewhere.
+#[derive(Debug, PartialEq, Eq)]
+enum Place {
+    GitHub(String),
+    Local,
+    Elsewhere,
+}
+
+fn place(url: &str) -> Place {
+    if url.starts_with('/') || url.starts_with("file://") {
+        return Place::Local;
+    }
+    let path = url.strip_prefix("git@github.com:").or_else(|| {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("ssh://"))?;
+        let (host, path) = rest.split_once('/')?;
+        let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+        host.eq_ignore_ascii_case("github.com").then_some(path)
+    });
+    match path.map(|p| p.trim_end_matches('/').trim_end_matches(".git")) {
+        Some(repo) if valid_repo(repo) => Place::GitHub(repo.to_string()),
+        _ => Place::Elsewhere,
+    }
+}
 
 struct Git<'t, 'a> {
     t: &'t Tick<'a>,
@@ -267,6 +333,9 @@ async fn own_files_not_ignored(
 
 /// Pushes HEAD to the configured branch. Never forced.
 async fn push(git: &Git<'_, '_>, b: &Backup) -> Result<(), String> {
+    if b.include_cataly {
+        remote_is_private(git, b).await?;
+    }
     let target = format!("HEAD:refs/heads/{}", b.branch);
     let done = git
         .run(&["push", "--quiet", &b.remote, &target], PUSH)
@@ -276,6 +345,80 @@ async fn push(git: &Git<'_, '_>, b: &Backup) -> Result<(), String> {
     } else {
         Err(super::said(&done))
     }
+}
+
+/// One git read that may find nothing.
+async fn git_value(git: &Git<'_, '_>, args: &[&str]) -> Result<Option<String>, String> {
+    let done = git.run(args, LOCAL).await?;
+    Ok(done
+        .success()
+        .then(|| String::from_utf8_lossy(&done.stdout).trim().to_string())
+        .filter(|v| !v.is_empty()))
+}
+
+/// Decision 16, before every push of the Cataly home: the push URL as configured and as git expands
+/// it must each be a GitHub repository that reads back private, or a path on this machine. Anything
+/// else, a public or missing repository, or a visibility that cannot be read, refuses the push.
+async fn remote_is_private(git: &Git<'_, '_>, b: &Backup) -> Result<(), String> {
+    let pushurl = format!("remote.{}.pushurl", b.remote);
+    let url = format!("remote.{}.url", b.remote);
+    let configured = match git_value(git, &["config", "--get", &pushurl]).await? {
+        Some(found) => found,
+        None => git_value(git, &["config", "--get", &url])
+            .await?
+            .unwrap_or_else(|| b.remote.clone()),
+    };
+    let expanded = git_value(git, &["remote", "get-url", "--push", &b.remote])
+        .await?
+        .unwrap_or_else(|| configured.clone());
+    let mut urls = vec![configured, expanded];
+    urls.dedup();
+    for url in urls {
+        let repo = match place(&url) {
+            Place::Local => continue,
+            Place::GitHub(repo) => repo,
+            Place::Elsewhere => {
+                return Err(format!(
+                    "refused: the remote {} is not a GitHub repository whose visibility can be read",
+                    b.remote
+                ));
+            }
+        };
+        let argv: Vec<String> = ["gh", "api", &format!("repos/{repo}")]
+            .iter()
+            .map(|w| (*w).to_string())
+            .collect();
+        let done = git
+            .t
+            .command(&argv, None, &super::GH_ENV, GH, GH_CAP)
+            .await?;
+        if done.timed_out {
+            return Err(format!(
+                "refused: gh did not say within 60 s whether {repo} is private"
+            ));
+        }
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        let json = done
+            .success()
+            .then(|| serde_json::from_slice::<Value>(&done.stdout).ok())
+            .flatten();
+        let answer = match (&json, done.success()) {
+            (Some(v), _) => Ok(v),
+            (None, true) => Err("gh printed no JSON"),
+            (None, false) => Err(stderr.as_ref()),
+        };
+        match private(&repo, answer) {
+            Ok(Some(true)) => {}
+            Ok(Some(false)) => {
+                return Err(format!(
+                    "refused: {repo} is public; the home backup never pushes to a public repository"
+                ));
+            }
+            Ok(None) => return Err(format!("refused: GitHub does not show {repo}")),
+            Err(e) => return Err(format!("refused: {e}")),
+        }
+    }
+    Ok(())
 }
 
 fn apply(t: &mut Tick<'_>, found: Found) {
@@ -327,6 +470,50 @@ mod tests {
     use crate::jobs::tests::ctx_with;
     use std::path::Path;
     use std::process::Command;
+
+    use super::{Place, place, private, valid_repo};
+    use serde_json::json;
+
+    #[test]
+    fn repository_names() {
+        assert!(valid_repo("someone/cataly-home"));
+        assert!(!valid_repo("someone"));
+        assert!(!valid_repo("a/b/c"));
+        assert!(!valid_repo("../x"));
+        assert!(!valid_repo("a/ b"));
+    }
+
+    /// Safety finding 8: which remotes are read as GitHub repositories before a home push.
+    #[test]
+    fn remote_places_and_visibility_answers() {
+        let gh = |r: &str| Place::GitHub(r.to_string());
+        assert_eq!(
+            place("https://github.com/o/cataly-home.git"),
+            gh("o/cataly-home")
+        );
+        assert_eq!(place("https://x:t@github.com/o/n"), gh("o/n"));
+        assert_eq!(place("git@github.com:o/n.git"), gh("o/n"));
+        assert_eq!(place("ssh://git@github.com/o/n.git"), gh("o/n"));
+        assert_eq!(place("/srv/bare.git"), Place::Local);
+        assert_eq!(place("file:///srv/bare.git"), Place::Local);
+        assert_eq!(place("https://gitlab.com/o/n.git"), Place::Elsewhere);
+        assert_eq!(
+            place("https://github.com.evil.example/o/n"),
+            Place::Elsewhere
+        );
+        assert_eq!(place("origin"), Place::Elsewhere);
+        assert_eq!(
+            private("o/n", Ok(&json!({ "private": true }))),
+            Ok(Some(true))
+        );
+        assert_eq!(
+            private("o/n", Ok(&json!({ "private": false }))),
+            Ok(Some(false))
+        );
+        assert!(private("o/n", Ok(&json!({}))).is_err());
+        assert_eq!(private("o/n", Err("gh: Not Found (HTTP 404)")), Ok(None));
+        assert!(private("o/n", Err("gh: HTTP 502")).is_err());
+    }
 
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
