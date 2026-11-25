@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Nightly: the contract test against the latest stock OMP release (IR-38).
+    # Nightly: the contract tests against the latest stock OMP release (IR-38).
     - cron: "17 3 * * *"
   workflow_dispatch:
   # The release workflow runs the full CI on the tagged commit (IR req. 42).
@@ -31,17 +31,50 @@ jobs:
           - target: darwin-arm64
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Two feature sets, each tested and built in release: about twice the single-set time.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
       - name: Format
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      # The voice build adds the `cataly-voice` workspace crate; `--workspace` also lints and tests its
+      # own targets, which a build of the root package alone leaves out.
+      - name: Clippy (voice)
+        run: cargo clippy --locked --workspace --all-targets --features voice -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
+      # The later test steps run even when an earlier one failed, so one run shows every failure.
+      - name: Test (voice)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --no-fail-fast --workspace --features voice
+      - name: Bridge tests (Bun)
+        if: ${{ !cancelled() }}
+        working-directory: extension
+        run: bun test
+      # Runs once `extension/package.json` defines a `typecheck` script.
+      - name: Bridge type check (Bun)
+        if: ${{ !cancelled() && hashFiles('extension/package.json') != '' }}
+        working-directory: extension
+        shell: bash
+        run: |
+          if bun -e 'process.exit(require("./package.json").scripts?.typecheck ? 0 : 1)'; then
+            bun run typecheck
+          else
+            echo "extension/package.json defines no typecheck script"
+          fi
+      - name: Release build (voice)
+        run: cargo build --locked --release --features voice
+      - name: Binary size (voice)
+        shell: bash
+        run: |
+          echo "release binary bytes with voice: $(wc -c < target/release/cataly | tr -d ' ')"
       - name: Release build
         run: cargo build --locked --release
       - name: Binary size and idle memory
@@ -63,9 +96,21 @@ jobs:
           kill -TERM "$P"
           wait "$P"
 
-  nightly-omp:
-    name: contract against latest OMP (${{ matrix.target }})
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+  deny:
+    name: cargo deny
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+
+  # Every contract binary against stock OMP: pull requests, pushes and release calls use the pinned
+  # OMP 19.1.1; the nightly run (and a manual dispatch) uses the latest OMP release (IR-38).
+  contract:
+    name: contract against OMP (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
@@ -75,22 +120,30 @@ jobs:
           - target: darwin-arm64
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Install the latest stock OMP release, checked against SHA256SUMS.txt
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
+      - name: Install stock OMP, checked against SHA256SUMS.txt
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           asset="omp-${{ matrix.target }}"
           dir="$RUNNER_TEMP/omp"
           mkdir -p "$dir"
-          tag=$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)
-          echo "latest OMP release: $tag"
+          if [ "$LATEST" = true ]; then
+            tag=$(gh release view --repo can1357/oh-my-pi --json tagName --jq .tagName)
+          else
+            tag=v19.1.1
+          fi
+          echo "OMP release: $tag"
           gh release download "$tag" --repo can1357/oh-my-pi --dir "$dir" \
             --pattern "$asset" --pattern SHA256SUMS.txt
           cd "$dir"
@@ -100,7 +153,9 @@ jobs:
           chmod 755 "$asset"
           "./$asset" --version
           echo "CATALY_CONTRACT_OMP_PATH=$dir/$asset" >> "$GITHUB_ENV"
-      - name: Contract test
+      # Every contract binary (`contract*`), in release as they are run by hand; one failing binary
+      # does not hide the others.
+      - name: Contract tests
         env:
           CATALY_CONTRACT_OMP: "1"
-        run: cargo test --locked --test contract -- --nocapture
+        run: cargo test --locked --release --no-fail-fast --test 'contract*' -- --nocapture

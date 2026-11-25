@@ -720,7 +720,11 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             && let Some(at) = read_at
             && matches!(receipt.state, ReceiptState::Sent | ReceiptState::Delivered)
         {
-            *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(at);
+            let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
+            *wake = Some(at);
+            // The turn may have started while the delivery's records committed, its event seen
+            // before this wake was set.
+            self.settle_wake(&mut wake);
         }
         self.apply(
             &row.room,
@@ -837,6 +841,11 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             return;
         }
         let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
+        self.settle_wake(&mut wake);
+    }
+
+    /// Records the wake latency once the lead's turn started at or after the wake.
+    fn settle_wake(&self, wake: &mut Option<Instant>) {
         let Some(at) = *wake else {
             return;
         };

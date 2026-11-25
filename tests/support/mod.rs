@@ -25,6 +25,10 @@ pub mod telegram;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 
+/// The test admission floors `TestHub::write_config` adds.
+pub const ADMISSION: &str = "\n[jobs.test-admission]\nkind = \"pressure\"\nenabled = false\n\
+    min_free_memory = 0\nmin_free_disk_gb = 0\nmax_sessions = 0\n";
+
 /// A hub sandbox: short root under /tmp (socket paths have a 103-byte limit on macOS).
 pub struct TestHub {
     pub root: PathBuf,
@@ -66,7 +70,11 @@ impl TestHub {
         self.root.join("state/cataly")
     }
 
-    /// Writes the config file with mode 0600, replacing it.
+    /// Writes the config file with mode 0600, replacing it. Unless the text names its own pressure
+    /// job, a disabled one is added whose floors (memory, disk, sessions) are 0: session-start
+    /// admission reads its floors from the pressure job, and without one the product defaults
+    /// (50 GB free disk among them) would make tests depend on the host. The default refusal is
+    /// `pressure::tests::the_default_rule_refuses_a_small_disk`.
     pub fn write_config(&self, text: &str) {
         let path = self.config_path();
         let _ = std::fs::remove_file(&path);
@@ -77,12 +85,21 @@ impl TestHub {
             .open(&path)
             .unwrap();
         f.write_all(text.as_bytes()).unwrap();
+        if !text.contains("kind = \"pressure\"") {
+            f.write_all(ADMISSION.as_bytes()).unwrap();
+        }
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(BIN);
-        cmd.args(args)
-            .env_clear()
+        let mut cmd = self.sandboxed(BIN);
+        cmd.args(args);
+        cmd
+    }
+
+    /// `program` with the sandbox's environment.
+    fn sandboxed(&self, program: &str) -> Command {
+        let mut cmd = Command::new(program);
+        cmd.env_clear()
             .env("PATH", path_without_omp())
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
@@ -118,10 +135,15 @@ impl TestHub {
     }
 
     /// Starts the hub process after linking the bridge into the sandbox's OMP agent directory
-    /// (DESIGN 12.2 C19: sessions start only with the link in place).
+    /// (DESIGN 12.2 C19: sessions start only with the link in place). A killed test runs no `Drop`,
+    /// so the hub is started by a shell that leaves a poller behind and execs it (same PID): the
+    /// poller sends the hub TERM once this test process is gone, and ends with the hub.
     pub fn spawn_hub(&self) -> Child {
         self.link_bridge();
-        self.command(&["hub"])
+        let watch = "t=$PPID h=$$; (while kill -0 $t && kill -0 $h; do sleep 1; done; kill -TERM $h) \
+                     >/dev/null 2>&1 & exec \"$0\" \"$@\"";
+        self.sandboxed("/bin/sh")
+            .args(["-c", watch, BIN, "hub"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -267,14 +289,17 @@ impl TestHub {
             .expect("job listed")
     }
 
-    /// Copies `tests/support/fake-<name>` to `<root>/bin/<name>` with its empty data directory
-    /// `<root>/bin/<name>-data`; returns the executable's path.
+    /// Copies `tests/support/fake-<name>` to `<root>/bin/<name>` with its data directory
+    /// `<root>/bin/<name>-data`, which holds only `owner`: this test process's PID, which work a fake
+    /// leaves running (the Tern stand-in's blocks) must not outlive. Returns the executable's path.
     pub fn install_fake(&self, name: &str) -> PathBuf {
         let source = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/support")
             .join(format!("fake-{name}"));
         let bin = self.root.join("bin");
-        std::fs::create_dir_all(bin.join(format!("{name}-data"))).unwrap();
+        let data = bin.join(format!("{name}-data"));
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("owner"), std::process::id().to_string()).unwrap();
         let target = bin.join(name);
         std::fs::copy(&source, &target).unwrap();
         std::fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o700))
@@ -325,12 +350,90 @@ impl TestHub {
             .map(|e| e["kind"].as_str().unwrap().to_string())
             .collect()
     }
+
+    /// The process groups the Tern stand-in recorded for its blocks: each wrapper's and its
+    /// program's.
+    fn block_groups(&self) -> Vec<u32> {
+        let Ok(entries) = std::fs::read_dir(self.root.join("bin/tern-data")) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let block = p
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("block-"));
+                block && p.extension().is_some_and(|x| x == "pid" || x == "omp")
+            })
+            .filter_map(|p| std::fs::read_to_string(p).ok()?.trim().parse().ok())
+            .collect()
+    }
+
+    /// Every process whose command line names this sandbox, as `PID command line`.
+    fn sandbox_processes(&self) -> Vec<(u32, String)> {
+        let mark = format!("{}/", self.root.display());
+        let Ok(out) = Command::new("ps").args(["-A", "-o", "pid=,args="]).output() else {
+            eprintln!("ps did not run: processes of {mark} not checked");
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains(&mark))
+            .filter_map(|l| {
+                let (pid, args) = l.trim_start().split_once(' ')?;
+                Some((pid.parse().ok()?, args.trim().to_string()))
+            })
+            .collect()
+    }
+
+    /// Ends the Tern stand-in's blocks (TERM to each recorded process group, KILL after 5 s); then
+    /// whatever still runs with this sandbox on its command line 2 s later is killed and returned.
+    fn end_blocks(&self) -> Vec<String> {
+        let groups = self.block_groups();
+        let signal = |sig: &str| {
+            for g in &groups {
+                let _ = Command::new("kill")
+                    .args([sig, "--", &format!("-{g}"), &g.to_string()])
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        };
+        let alive = |g: &u32| {
+            Command::new("kill")
+                .args(["-0", "--", &format!("-{g}")])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        signal("-TERM");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while groups.iter().any(alive) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        signal("-KILL");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let left = self.sandbox_processes();
+            if left.is_empty() || Instant::now() >= deadline {
+                for (pid, _) in &left {
+                    let _ = Command::new("kill")
+                        .args(["-KILL", &pid.to_string()])
+                        .status();
+                }
+                return left.into_iter().map(|(p, a)| format!("{p} {a}")).collect();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 /// Stops a still-running hub with TERM first so it closes its OMP children (a KILL would orphan them
-/// with the sandbox as their home), then KILL after 10 s; then removes the whole sandbox, including
-/// any OMP agent directory under it. Runs on test failure too, and then first prints the end of the
-/// hub log, so a failure on CI shows what the hub did.
+/// with the sandbox as their home), then KILL after 10 s; ends the Tern stand-in's blocks, which
+/// outlive a hub as Tern's do; then removes the whole sandbox, including any OMP agent directory
+/// under it. Runs on test failure too, and then first prints the end of the hub log, so a failure on
+/// CI shows what the hub did. A process still running with the sandbox on its command line fails the
+/// test (it is killed first).
 impl Drop for TestHub {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -344,6 +447,7 @@ impl Drop for TestHub {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let left = self.end_blocks();
         if std::thread::panicking() {
             let log =
                 std::fs::read_to_string(self.state().join("logs/hub.log")).unwrap_or_default();
@@ -356,6 +460,14 @@ impl Drop for TestHub {
             );
         }
         let _ = std::fs::remove_dir_all(&self.root);
+        if !left.is_empty() {
+            let text = format!("left running after the hub was dropped (killed): {left:?}");
+            if std::thread::panicking() {
+                eprintln!("{text}");
+            } else {
+                panic!("{text}");
+            }
+        }
     }
 }
 

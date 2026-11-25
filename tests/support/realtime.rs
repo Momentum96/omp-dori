@@ -57,6 +57,9 @@ pub struct Script {
     pub greet_ms: u32,
     /// Function calls emitted in one delegation on the first owner turn.
     pub tools: Vec<(String, String)>,
+    /// Spacing in ms between the calls of that delegation and before its completion (0: all at
+    /// once), so a call can be answered while its response is still running.
+    pub call_gap_ms: u32,
     /// An error event right after `session.started`.
     pub fail_after_start: Option<String>,
     /// Never send `session.started`.
@@ -424,6 +427,8 @@ pub struct Fake {
     seconds: f64,
     opened_at: Option<Instant>,
     awaiting: Vec<String>,
+    /// Events held back until their time (`Script::call_gap_ms`).
+    later: Vec<(Instant, Value)>,
 }
 
 fn tone(ms: u32) -> Vec<i16> {
@@ -447,6 +452,7 @@ impl Fake {
             seconds: 0.0,
             opened_at: None,
             awaiting: Vec::new(),
+            later: Vec::new(),
         }
     }
 
@@ -456,6 +462,17 @@ impl Fake {
 
     fn emit(&mut self, v: Value) {
         self.out.push(Out::Event(v));
+    }
+
+    /// Emits the `n`th event of a spaced sequence: at once without spacing, else at its time.
+    fn emit_nth(&mut self, n: u32, v: Value) {
+        match self.script.call_gap_ms * n {
+            0 => self.emit(v),
+            ms => {
+                let at = Instant::now() + Duration::from_millis(u64::from(ms));
+                self.later.push((at, v));
+            }
+        }
     }
 
     fn speak(&mut self, text: &str, ms: u32) {
@@ -533,16 +550,20 @@ impl Fake {
             );
             self.emit(json!({"type": "response.event", "delegation_id": "d1",
                 "event": {"type": "response.created", "response": {"id": "r1"}}}));
+            let mut n = 0;
             for (i, (name, args)) in self.script.tools.clone().iter().enumerate() {
                 let call = format!("call_{i}");
                 self.awaiting.push(call.clone());
-                self.emit(
+                self.emit_nth(
+                    n,
                     json!({"type": "response.event", "delegation_id": "d1", "event": {
                     "type": "response.output_item.done", "item": {"type": "function_call",
                     "call_id": call, "name": name, "arguments": args}}}),
                 );
+                n += 1;
             }
-            self.emit(
+            self.emit_nth(
+                n,
                 json!({"type": "response.event", "delegation_id": "d1", "event": {
                 "type": "response.completed", "response": {"id": "r1", "output": [],
                 "usage": {"input_tokens": 1000, "input_tokens_details": {"cached_tokens": 200},
@@ -618,6 +639,16 @@ impl Fake {
     }
 
     fn tick(&mut self, now: Instant) {
+        let due: Vec<Value> = {
+            let (due, later) = std::mem::take(&mut self.later)
+                .into_iter()
+                .partition(|(at, _)| *at <= now);
+            self.later = later;
+            due.into_iter().map(|(_, v)| v).collect()
+        };
+        for v in due {
+            self.emit(v);
+        }
         if self.started
             && let Some(at) = self.opened_at
             && now.duration_since(at).as_millis() % 1000 < 20

@@ -1083,3 +1083,159 @@ Review findings Safety 1, 3, 4, 5, 6 and Design 3, 12, 13.
   "blocked by user policy", and the cell's output never appears.
 - `tests/lanes.rs` `onboarding_consent_is_stored_and_writes_wait`: after onboarding ends, rule 0
   still refuses the lead's `cataly lead send` (it was allowed before rule 0 covered the lead).
+
+# CI covers the voice build (CiVoice, 2026-11-25)
+
+## What CI runs
+
+- Each build job (linux-x64, darwin-arm64) keeps the default-feature steps and adds clippy and
+  tests with `--workspace --features voice`. `--workspace` matters: without it Cargo builds the
+  `cataly-voice` crate only as a dependency, so its own tests (`crates/voice/tests/transports.rs`)
+  and unit tests were never linted or run. The voice release build's size is printed beside the
+  default one; the idle-memory figure stays on the default build.
+- Tests run with `--no-fail-fast`, and the voice and Bun test steps run even when an earlier test
+  step failed, so one run shows every failure on a platform.
+- The bridge tests run with `bun test` in `extension/`, Bun 1.4.0 from `oven-sh/setup-bun` pinned
+  by commit.
+- The nightly job (and a manual dispatch) runs every contract binary, `--test 'contract*'`, in
+  release, instead of `contract` alone: `contract_tern` and the other stock-OMP suites had never run
+  on CI.
+- The job timeout is 90 minutes: two feature sets, each tested and built in release.
+
+## First run (45598912381): two macOS failures
+
+- `tern::a_tern_lead_resumes_in_tern_whatever_the_config_says`, both feature sets: "lead starts
+  fresh: the transcript … did not verify for an exact resume". The test plays the bridge and
+  reported the transcript under `TestHub::state()` as spelled (`/tmp/…`), while the hub hands OMP
+  the real state directory (`/private/tmp/…` on macOS, since the FixMacos change) and the exact
+  resume check refuses any other spelling. The test was wrong, not the hub: OMP reports the path
+  under the directory it was given. The fixture now writes and reports the transcript below the
+  canonical state directory.
+- `cataly-voice` `check8_transports_agree` (first run of the crate's tests on CI): "continued once,
+  after every call", 2 continuations instead of 1. **A real bug in the session:** after a tool
+  answer it asked the backend to continue (`response.create`) as soon as no call was open, even
+  while the backend's response was still running and could still name more calls. When the first
+  call was answered before the later calls of the same response arrived, the backend got a
+  continuation per gap. The session now continues only when every call is answered and the
+  response has completed; calls answered while it runs are continued once, at its completion. The
+  fake realtime server's new `call_gap_ms` spaces the calls and the completion, and `pass_outcomes`
+  (checks 4 and 8, both transports) uses 300 ms: before the fix that run gave 4 continuations on
+  Linux over both transports, after it 1.
+
+## Second run: contract suites on CI (dispatch 45603874106) and main's admission default
+
+- `contract_tern::tern_lead_in_stock_omp` failed on macOS against stock OMP 19.2.0: the test read
+  the session's memory and CPU from `/proc`, which macOS lacks. Off Linux it now reads
+  `ps -o rss=,time=` (`time` is `[h:]m:s.cc` there; Linux's `ps` gives whole seconds only, so Linux
+  keeps `/proc`).
+- Main at a0a20c9 made the admission rule without a pressure job the pressure job's defaults,
+  50 GB free disk among them (LANE-08; the product default stays). The runners have about 12 GB
+  free, so every lane start in `tests/coord.rs` was held ("free disk 12 GB below 50 GB").
+  `TestHub::write_config`, the one place every test config passes through, now adds a disabled
+  pressure job `test-admission` with memory, disk and session floors 0, unless the test names its
+  own pressure job; no test depends on the host's free disk or memory. The default refusal is
+  checked once, on a faked reading of 12 GB: `pressure::tests::the_default_rule_refuses_a_small_disk`.
+- `relays::telegram_and_slack_requests_are_answered_in_place_with_seen_marks` failed on macOS:
+  `slack_wake_latency` empty although the Slack request was answered. **A real race in the
+  pipeline:** the wake time was set only after `deliver_live` returned (the Slack arrival commits
+  first), and the lead's turn-start event, read meanwhile, found no wake and was dropped; no later
+  turn start came, so the wake was never recorded. Setting the wake now settles it at once when the
+  lead's turn already started at or after it (`Pipeline::settle_wake`, under the same lock as the
+  event path, so it is recorded once).
+- `contract_tern::tern_lane_held_while_working_in_stock_omp` timed out on Linux (OMP 19.2.0) waiting
+  for the kickoff to show working under an active goal; it passed alone here against the same
+  release. Its wait now names what it last saw. Three copies of the `contract_tern` binary at once
+  here: two passed, one failed `tern_lead_in_stock_omp` (`lead stop` refused) and
+  `tern_lane_lost_and_restored_in_stock_omp` ("goal not set: the bridge did not answer goal within
+  10 s") in its first 25 s, while three stock OMPs started together: these are the load-dependent
+  cases, not fixed here.
+- Under load the stock-OMP tern cases fail at the lane's goal: the hub's `goal` command through
+  the bridge (OMP `sessionModes.set`) gets no answer within the 10 s command bound
+  (`host::tern` `COMMAND_WAIT`), the lane is held by the hub, and the kickoff is never sent
+  (CI dispatch 45609104039, macOS; the same reason in the local three-copy run). Not fixed here:
+  why OMP's mode change takes over 10 s while several TUIs start is still open.
+
+## Scope added from the design review
+
+- `release.yml` builds with `--features voice` on both targets (coordinator decision: releases
+  ship with voice).
+- The contract job runs every contract binary on pull requests, pushes and release calls against
+  pinned stock OMP 19.1.1, and nightly (or on dispatch) against the latest release; Bun is set up
+  in it. The Tern runtime cases use the test's Tern stand-in, so nothing is skipped.
+- A `cargo deny check` job (EmbarkStudios/cargo-deny-action pinned by commit), and a bridge
+  type-check step that runs `bun run typecheck` once `extension/package.json` defines it.
+
+## Local runs
+
+- A `CARGO_TARGET_DIR` shared with another checkout is unsafe for the hub's integration tests:
+  they run `target/debug/cataly`, which a concurrent build of the other checkout can replace with a
+  binary built without `voice`. Two local runs of `tests/voice_hub.rs` failed in every case that
+  way and passed with the same code once nothing else built [inference from the pattern; the
+  replaced binary was not captured].
+- `tests/install.rs` builds its release variants once into `target/install-variants` and reuses
+  them by version alone. After a change to the bridge, the cached V1 variant carries the old
+  bridge, and `restart_holds_while_a_session_is_busy` fails with "the bridge … is not this
+  version's" (seen here once); delete that folder after such a change. CI starts without it.
+
+## Tern commands lost under load: the bridge dropped them (root cause)
+
+- The open question above is answered: OMP's mode change was never slow. Reproduced with 16 busy
+  shell loops on the 16-core host and three copies of `contract_tern` running the lane cases
+  (three of six failed with "goal not set: the bridge did not answer goal within 10 s"). A trace in
+  the bridge (timestamps of every socket read, line, command start and end, and an event-loop stall
+  monitor; removed after the run) showed, in every failure, the `goal` command in the **same socket
+  read** as the hello answer, and no command start for it at all. No event-loop stall, no "busy"
+  refusal.
+- Why: the hub wakes the start when it binds the hello (`Port::attach`), before it writes the hello
+  answer, and the lane's goal follows a store write later; the bridge reads both lines when it is
+  slow to read. `receive()` ran each command only when `this.tern` was set, and `connect()` sets it
+  in the continuation of the hello request, one microtask after the read's line loop; so a command
+  read with the hello answer was dropped without a reply, and the hub waited out its 10 s bound.
+  In the cases that passed, the goal came 20-40 ms after the hello answer, in a read of its own.
+- Fix: every command goes on the bridge's command chain, and the chain decides by `this.tern` when it
+  runs, after `connect()` applied the hello answer (`extension/cataly.ts` `receive`). Bridge test
+  "a command in the same read as the hello answer runs once the answer is applied" sends both in one
+  read; it failed before the change (no reply) and passes after.
+- The 10 s command bound stays: with the fix, under the same load with nine stock OMPs at once, all
+  six lane goals came in the same read as the hello answer and OMP took 104-247 ms to enter goal
+  mode, pause and resume 0-4 ms, with no "busy" refusal (saved modes were already restored) and no
+  event-loop stall over 0.6 s except the test's own SIGSTOP. All nine cases (three copies of
+  `tern_lane_held_while_working`, `tern_lane_lost_and_restored`, `tern_lead`) passed.
+- `tern_lead_in_stock_omp` stopped the lead right after the tenth wake reached the model, while that
+  turn could still run, and `lead stop` refuses a working lead; it now waits for the lead to settle
+  first and prints the CLI's output on failure. Which of the two causes produced the earlier
+  "`lead stop` refused" is not known [its output was not printed].
+
+## Test processes outlived their tests
+
+- Earlier runs left 22 Tern stand-in wrappers (`python3 -c 'import pty …'`, re-parented to init),
+  each with a stock OMP from a `/tmp/cy-*` sandbox, about 2.9 GB. A Tern block outlives the hub by
+  design (lanes keep running across a hub restart), and nothing ended the stand-in's blocks: a
+  lane test that failed stopped its hub in `Drop` and deleted the sandbox under the running OMP;
+  `nohup` made OMP ignore the hang-up of its terminal, and `tern close` killed only the wrapper.
+  The fake OMP's TUI mode (`exec sleep 600`) leaked the same way for ten minutes per block.
+- The stand-in's block wrapper (Python, in `fake-tern`) now runs in its own process group and
+  records its program's PID (`block-<id>.omp`; the program leads its own session and group, as
+  `pty.fork` makes it). The program gets the parent-death signal SIGKILL on Linux, so it dies with
+  the wrapper. On TERM, INT or HUP the wrapper ends the program's group (TERM, KILL after 3 s) and
+  exits; when the program exits it kills what is left of that group.
+- A parent-death signal cannot tie the wrapper to its test: its parent is the stand-in script,
+  which exits as soon as it printed the block ID. The wrapper therefore polls (every 0.5 s, on
+  Linux and macOS) the test process that installed the stand-in, whose PID `TestHub::install_fake`
+  writes to `<name>-data/owner`, and ends its block once that process is gone. So a block also
+  survives a hub restart within its test, as a real Tern block does.
+- A test killed with SIGKILL runs no `Drop` and its hub would run on. `TestHub::spawn_hub` starts
+  the hub through `/bin/sh`, which leaves a poller (`kill -0` on the test process and the hub every
+  second) and then execs the hub, so the hub keeps the PID tests read; the poller sends the hub
+  TERM once the test process is gone and exits with the hub.
+- `TestHub`'s `Drop` (normal end, panic, failed assertion) stops the hub as before, then sends TERM
+  to every recorded block process group, KILL after 5 s; then it lists processes whose command
+  line names the sandbox (`ps -A -o pid=,args=`), waits up to 2 s for them to go, kills those that
+  stay and fails the test naming them (when the test is already failing, it prints them).
+  `tests/tern.rs` checks both: `a_block_ends_when_its_owner_is_gone` and
+  `a_process_left_in_the_sandbox_fails_the_test`.
+- Shown here: `contract_tern` (stock OMP) SIGKILLed together with its cargo while five stand-in
+  blocks ran (five wrappers, five TUI OMPs, one headless OMP, five hubs and their pollers): 3 s
+  later no process naming those sandboxes and no hub of this checkout ran; the same for
+  `tests/tern.rs` (two blocks, fake OMP). Every wrapper and program PID the two runs recorded (16)
+  was gone. Both suites pass in full with the leak check on.

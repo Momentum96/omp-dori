@@ -96,7 +96,7 @@ jobs:
             ( cd "$dir"
               RUSTFLAGS="--remap-path-prefix=$dir=/cataly --remap-path-prefix=$CARGO_HOME_REMAP=/cargo --remap-path-prefix=$rustc_sysroot=/rustc" \
                 CARGO_TARGET_DIR="$dir/target" \
-                cargo build --locked --release --target ${{ matrix.triple }} --config 'profile.release.incremental=false' )
+                cargo build --locked --release --features voice --target ${{ matrix.triple }} --config 'profile.release.incremental=false' )
             cp "$dir/target/${{ matrix.triple }}/release/cataly" "$RUNNER_TEMP/cataly-$n"
           done
           cmp "$RUNNER_TEMP/cataly-1" "$RUNNER_TEMP/cataly-2"

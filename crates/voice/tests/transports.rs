@@ -329,6 +329,8 @@ async fn pass_outcomes(t: Transport) -> Vec<String> {
     let args = |r: &str| format!(r#"{{"request":"{r}","high_risk":false}}"#);
     let script = Script {
         reply_ms: 300,
+        // The first call is answered before the later ones arrive and the response completes.
+        call_gap_ms: 300,
         tools: vec![
             ("pass_to_lead".into(), args("check the build")),
             ("pass_to_lead".into(), args("rerun the tests")),

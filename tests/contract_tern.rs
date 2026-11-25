@@ -145,6 +145,7 @@ fn report(label: &str, hub: &TestHub, runs: &[(Duration, Duration)]) {
 
 /// Resident memory (KiB) and CPU time (ms, user + system) of a process, from `/proc` (10 ms
 /// resolution).
+#[cfg(target_os = "linux")]
 fn usage(pid: u64) -> (u64, u64) {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
     let rss = status
@@ -162,6 +163,26 @@ fn usage(pid: u64) -> (u64, u64) {
         .collect();
     let ticks: u64 = fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap();
     (rss, ticks * 10)
+}
+
+/// Resident memory (KiB) and CPU time (ms, user + system) of a process, from `ps`: macOS has no
+/// `/proc`, and its `time` column reads `[h:]m:s.cc` (10 ms resolution).
+#[cfg(not(target_os = "linux"))]
+fn usage(pid: u64) -> (u64, u64) {
+    let out = Command::new("ps")
+        .args(["-o", "rss=,time=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    let mut words = text.split_whitespace();
+    let rss = words.next().unwrap().parse().unwrap();
+    let time = words.next().unwrap();
+    let (whole, frac) = time.split_once('.').unwrap_or((time, "0"));
+    let secs = whole
+        .split(':')
+        .fold(0u64, |acc, p| acc * 60 + p.parse::<u64>().unwrap());
+    let frac_ms: u64 = format!("{frac:0<3}")[..3].parse().unwrap();
+    (rss, secs * 1000 + frac_ms)
 }
 
 /// The block's screen output so far (the stand-in keeps one file per block), without terminal
@@ -241,7 +262,10 @@ fn tern_lead_in_stock_omp() {
     // The bridge's cost: the same session resumed in the stand-in, the same typed workload, with
     // the bridge active (hub-hosted tern lead) and with OMP's extensions off.
     let file = PathBuf::from(live["session"]["session_file"].as_str().unwrap());
-    assert!(hub.cli(&["lead", "stop"]).status.success());
+    // The last wake's turn may still run, and `lead stop` refuses a working lead.
+    settled(&hub);
+    let out = hub.cli(&["lead", "stop"]);
+    assert!(out.status.success(), "{out:?}");
     let input = typing(&hub);
     assert!(hub.cli(&["lead", "start"]).status.success());
     let mut input = input.join().unwrap();
@@ -607,14 +631,23 @@ fn tern_lane_held_while_working_in_stock_omp() {
             .unwrap()
     };
     // The kickoff turn runs the long `bash` call under an active goal.
-    hub.until(WAIT, || {
+    let deadline = Instant::now() + WAIT;
+    loop {
         let asked = model
             .bodies()
             .iter()
             .any(|b| b.to_string().contains("[lane busy-1]"));
         let r = read();
-        (asked && r["status"] == "working" && r["goal"]["status"] == "active").then_some(())
-    });
+        if asked && r["status"] == "working" && r["goal"]["status"] == "active" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "kickoff not seen working under an active goal: asked {asked}, read {r}, lane {}",
+            state()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(state()["state"], "running");
     let asked = Instant::now();
