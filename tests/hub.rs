@@ -271,3 +271,68 @@ fn owner_only_files_and_directories() {
     assert_eq!(mode(hub.root.join("run/cataly")), 0o700);
     hub.stop();
 }
+
+/// `cataly setup --fallback-on --fallback-chain`: previewed without a write, validated, then applied
+/// against the preview's hash; the hub's config parser takes the result (decision 7).
+#[test]
+fn setup_sets_the_fallback_chain() {
+    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n");
+    let before = std::fs::read_to_string(hub.config_path()).unwrap();
+    // The atomic replace refuses a config directory others can enter.
+    let dir = hub.config_path().parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    for bad in [
+        ["--fallback-on", "sometimes"],
+        ["--fallback-chain", "no-provider"],
+    ] {
+        let out = hub.cli(&["setup", bad[0], bad[1]]);
+        assert!(!out.status.success(), "{bad:?} refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(bad[0]),
+            "{bad:?}: the error names the flag"
+        );
+    }
+    let args = [
+        "setup",
+        "--fallback-on",
+        "usage-limit",
+        "--fallback-chain",
+        "fake/backup, other/model",
+        "--json",
+    ];
+    let preview = hub.json(&args);
+    assert_eq!(preview["action"], "update");
+    assert_eq!(preview["valid"], true);
+    assert_eq!(std::fs::read_to_string(hub.config_path()).unwrap(), before);
+    let chain = preview["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["setting"] == "fallback.chains.default")
+        .unwrap()
+        .clone();
+    assert_eq!(chain["value"], "fake/backup,other/model");
+    assert_eq!(
+        chain["source"],
+        "this file, when the hub starts (no hub is running)"
+    );
+    let expect = preview["before"].as_str().unwrap().to_string();
+    let mut apply = args.to_vec();
+    apply.extend(["--apply", "--expect", &expect]);
+    assert_eq!(hub.json(&apply)["applied"], true);
+    let text = std::fs::read_to_string(hub.config_path()).unwrap();
+    assert!(
+        text.contains("[fallback]\non = \"usage-limit\"\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("[fallback.chains]\ndefault = [\"fake/backup\", \"other/model\"]\n"),
+        "{text}"
+    );
+    let check = hub.cli(&["config", "check"]);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}

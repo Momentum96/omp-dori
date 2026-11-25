@@ -321,7 +321,7 @@ async fn apply(
         .collect();
     let records = ctx.stream.append(events).await?;
     #[cfg(test)]
-    super::fault::point("after_event_append");
+    crate::sys::fault::point("after_event_append");
     if delete_own {
         remove_outputs(
             facts.stdout_path.as_deref(),

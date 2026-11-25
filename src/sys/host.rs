@@ -1,6 +1,7 @@
 //! Host readers: memory, load, disk and the hub's own resident memory, for Linux and macOS
 //! (HOST req. 101). macOS values come from one bounded `sysctl` or `ps` call each; parsers are pure
-//! functions so both platforms' formats are tested everywhere.
+//! functions, and the macOS ones are tested everywhere. Container headroom reads cgroups, so it and
+//! its parsers exist on Linux only.
 
 use std::fmt;
 use std::path::Path;
@@ -76,6 +77,7 @@ fn cores() -> usize {
 }
 
 /// Parses `/proc/meminfo`: `MemTotal` and `MemAvailable`, in KiB.
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_meminfo(text: &str) -> Result<(u64, u64), HostError> {
     let field = |name: &str| {
         text.lines()
@@ -107,21 +109,25 @@ pub(crate) fn parse_loadavg(text: &str) -> Result<(f64, f64, f64), HostError> {
 }
 
 /// Parses the cgroup v2 path from `/proc/self/cgroup` (`0::/path`).
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_cgroup_path(text: &str) -> Option<&str> {
     text.lines().find_map(|l| l.strip_prefix("0::"))
 }
 
 /// Parses `memory.max`; `max` means no limit.
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_cgroup_limit(text: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
 /// v1 limits at or above this mean "no limit".
+#[cfg(target_os = "linux")]
 const V1_UNLIMITED: u64 = 1 << 60;
 
 /// Headroom in per cent of `limit` (LANE req. 19): limit minus usage plus clean reclaimable page
 /// cache. Reclaimable is file cache minus shared, mapped, dirty and writeback pages, never below zero
 /// or above usage. `v2` selects the `memory.stat` field names.
+#[cfg(target_os = "linux")]
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn headroom_percent(limit: u64, usage: u64, stat: &str, v2: bool) -> f64 {
     let field = |name: &str| {
@@ -162,72 +168,67 @@ pub(crate) fn headroom_percent(limit: u64, usage: u64, stat: &str, v2: bool) -> 
 }
 
 /// A cgroup limit value; `max` and v1's huge sentinel mean no limit.
+#[cfg(target_os = "linux")]
 fn limit_value(text: &str) -> Option<u64> {
     parse_cgroup_limit(text).filter(|n| *n < V1_UNLIMITED)
 }
 
 /// Container memory headroom in per cent: the smallest over every visible cgroup level, hard and
-/// soft (high) limits alike. `Ok(None)` when no limit applies (and on macOS); an error when a path
-/// contains `..` or a control file cannot be read.
+/// soft (high) limits alike. `Ok(None)` when no limit applies; an error when a path contains `..`
+/// or a control file cannot be read. Linux only: cgroups do not exist elsewhere.
+#[cfg(target_os = "linux")]
 pub(crate) fn headroom() -> Result<Option<f64>, HostError> {
-    #[cfg(target_os = "linux")]
-    {
-        let text = std::fs::read_to_string("/proc/self/cgroup")
-            .map_err(|e| HostError::Read(format!("/proc/self/cgroup: {e}")))?;
-        let (root, rel, v2) = match parse_cgroup_path(&text) {
-            Some(rel) => ("/sys/fs/cgroup".to_string(), rel.to_string(), true),
-            None => match text.lines().find_map(|l| {
-                let mut parts = l.splitn(3, ':');
-                let (_, controllers, path) = (parts.next()?, parts.next()?, parts.next()?);
-                controllers
-                    .split(',')
-                    .any(|c| c == "memory")
-                    .then(|| path.to_string())
-            }) {
-                Some(rel) => ("/sys/fs/cgroup/memory".to_string(), rel, false),
-                None => return Ok(None),
-            },
-        };
-        if rel.split('/').any(|p| p == "..") {
-            return Err(HostError::Parse("cgroup path"));
-        }
-        let root = std::path::PathBuf::from(root);
-        let (limits, usage_file): (&[&str], &str) = if v2 {
-            (&["memory.max", "memory.high"], "memory.current")
-        } else {
-            (
-                &["memory.limit_in_bytes", "memory.soft_limit_in_bytes"],
-                "memory.usage_in_bytes",
-            )
-        };
-        let read = |p: &std::path::Path| match std::fs::read_to_string(p) {
-            Ok(t) => Ok(Some(t)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(HostError::Read(format!("{}: {e}", p.display()))),
-        };
-        let mut dir = Some(root.join(rel.trim_start_matches('/')));
-        let mut lowest: Option<f64> = None;
-        while let Some(d) = dir.filter(|d| d.starts_with(&root)) {
-            for name in limits {
-                let Some(limit) = read(&d.join(name))?.as_deref().and_then(limit_value) else {
-                    continue;
-                };
-                let usage = read(&d.join(usage_file))?
-                    .and_then(|t| t.trim().parse::<u64>().ok())
-                    .ok_or(HostError::Parse("cgroup usage"))?;
-                let stat =
-                    read(&d.join("memory.stat"))?.ok_or(HostError::Parse("cgroup memory.stat"))?;
-                let share = headroom_percent(limit, usage, &stat, v2);
-                lowest = Some(lowest.map_or(share, |l: f64| l.min(share)));
-            }
-            dir = d.parent().map(std::path::Path::to_path_buf);
-        }
-        Ok(lowest)
+    let text = std::fs::read_to_string("/proc/self/cgroup")
+        .map_err(|e| HostError::Read(format!("/proc/self/cgroup: {e}")))?;
+    let (root, rel, v2) = match parse_cgroup_path(&text) {
+        Some(rel) => ("/sys/fs/cgroup".to_string(), rel.to_string(), true),
+        None => match text.lines().find_map(|l| {
+            let mut parts = l.splitn(3, ':');
+            let (_, controllers, path) = (parts.next()?, parts.next()?, parts.next()?);
+            controllers
+                .split(',')
+                .any(|c| c == "memory")
+                .then(|| path.to_string())
+        }) {
+            Some(rel) => ("/sys/fs/cgroup/memory".to_string(), rel, false),
+            None => return Ok(None),
+        },
+    };
+    if rel.split('/').any(|p| p == "..") {
+        return Err(HostError::Parse("cgroup path"));
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok(None)
+    let root = std::path::PathBuf::from(root);
+    let (limits, usage_file): (&[&str], &str) = if v2 {
+        (&["memory.max", "memory.high"], "memory.current")
+    } else {
+        (
+            &["memory.limit_in_bytes", "memory.soft_limit_in_bytes"],
+            "memory.usage_in_bytes",
+        )
+    };
+    let read = |p: &std::path::Path| match std::fs::read_to_string(p) {
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(HostError::Read(format!("{}: {e}", p.display()))),
+    };
+    let mut dir = Some(root.join(rel.trim_start_matches('/')));
+    let mut lowest: Option<f64> = None;
+    while let Some(d) = dir.filter(|d| d.starts_with(&root)) {
+        for name in limits {
+            let Some(limit) = read(&d.join(name))?.as_deref().and_then(limit_value) else {
+                continue;
+            };
+            let usage = read(&d.join(usage_file))?
+                .and_then(|t| t.trim().parse::<u64>().ok())
+                .ok_or(HostError::Parse("cgroup usage"))?;
+            let stat =
+                read(&d.join("memory.stat"))?.ok_or(HostError::Parse("cgroup memory.stat"))?;
+            let share = headroom_percent(limit, usage, &stat, v2);
+            lowest = Some(lowest.map_or(share, |l: f64| l.min(share)));
+        }
+        dir = d.parent().map(std::path::Path::to_path_buf);
     }
+    Ok(lowest)
 }
 
 /// Parses `ps -o rss=` output in KiB.
@@ -393,6 +394,7 @@ pub(crate) use platform::{load, memory, self_rss};
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_linux_formats() {
         let meminfo = "MemTotal:       16000000 kB\nMemFree:  1 kB\nMemAvailable:    8000000 kB\n";
@@ -402,15 +404,19 @@ mod tests {
         );
         assert!(parse_meminfo("MemTotal: 1 kB\n").is_err());
         assert_eq!(
-            parse_loadavg("0.50 1.25 2.00 1/300 4242\n").unwrap(),
-            (0.5, 1.25, 2.0)
-        );
-        assert_eq!(
             parse_cgroup_path("0::/user.slice/x.scope\n"),
             Some("/user.slice/x.scope")
         );
         assert_eq!(parse_cgroup_limit("max\n"), None);
         assert_eq!(parse_cgroup_limit("1048576\n"), Some(1_048_576));
+    }
+
+    #[test]
+    fn parses_load_averages() {
+        assert_eq!(
+            parse_loadavg("0.50 1.25 2.00 1/300 4242\n").unwrap(),
+            (0.5, 1.25, 2.0)
+        );
     }
 
     #[test]

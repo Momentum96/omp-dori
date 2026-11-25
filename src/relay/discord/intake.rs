@@ -889,10 +889,8 @@ impl<T: Runtime> Intake<T> {
             // Debug builds only: the crash test of acceptance check 4 stops here, after the arrival
             // commit and before the hand-off.
             #[cfg(debug_assertions)]
-            if arrived == Arrived::Queued
-                && std::env::var("CATALY_FAULT").as_deref() == Ok("relay_after_arrival")
-            {
-                std::process::abort();
+            if arrived == Arrived::Queued {
+                crate::sys::fault::point("relay_after_arrival");
             }
             if arrived == Arrived::Queued {
                 self.reads

@@ -726,3 +726,79 @@ positions, so an envelope missed while disconnected is caught up from history.
   ignored, over the unit tests and every integration binary); each contract binary passed alone in
   release with `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1, `contract_session` 5,
   `contract_discord` 3, `contract_lanes` 2, `contract_relays` 1); `bun test extension/` 6 passed.
+
+# After the first CI run: macOS lint, a flaky lane test, decision 15, fallback setup
+
+## macOS lint (CI run 45562347823)
+
+- Clippy on macOS failed on dead Linux-only helpers. The cgroup and `/proc/meminfo` parsers,
+  `V1_UNLIMITED`, `headroom_percent`, `limit_value` and `headroom()` itself are now
+  `cfg(target_os = "linux")`; their unit test runs on Linux, the load-average test everywhere.
+  `jobs::owner::pressure` reads container headroom through a Linux-only function; elsewhere it is
+  `NoLimit` (a `const fn`), and `Headroom::Percent` exists on Linux only, so no wrapped `Result` is
+  left on macOS.
+- Checked locally with `cargo clippy --target x86_64-apple-darwin --all-targets -- -D warnings`:
+  the target's std was added to the user's rustup toolchain (nothing system-wide); the C parts of
+  the bundled SQLite and `ring` cannot be compiled here without a macOS SDK, so the check ran with a
+  stand-in C compiler that writes empty objects (`CC_x86_64_apple_darwin`, in `/tmp`, not in this
+  repository). Clippy links nothing, so the Rust lint result is the real one; linking and tests on
+  macOS remain CI's.
+
+## The flaky held-lane test
+
+`pause_resume_and_a_held_lane_that_turns` failed on the CI runner waiting for the second
+"held lane active" alert. Reproduced here: 2 of 20 parallel runs failed under 16 busy loops.
+**Root cause, a real ordering bug:** the lane watch decides that an active stretch is over from the
+session's snapshot at a turn-end event, but every turn-end event marks the snapshot stale (status
+unknown) and only the readback it queues can show the session idle, and that readback emits no event.
+When the readback landed after the watch had handled the last turn-end event (a slow machine), the
+stretch was never closed and the next turn of the held lane was never reported. The watch now waits,
+bounded by the rpc response time, for the first fresh snapshot after the event
+(`lanes::life::idle_after_readback`). After the fix: 60 of 60 runs passed (three rounds of 20 in
+parallel under 16 busy loops).
+
+## Decision 15: the early wake
+
+- `host::inbox::Mailbox::wake_early`: an owner request (with a request ID, no once-only identity)
+  that goes to the lead alone, when the store would admit it (`admits_at_once`, a read), is written
+  to OMP while the `AdmitSend` commit runs. Its delivery ID is `inbox::wake_id(target, request ID)`,
+  so its marker is known without a record. Anything else (lanes, hub notes, batches carrying other
+  rows, CLI sends without a request ID) commits first as before.
+- `relay::pipeline`: the relay's hand-off record commits alongside the lead's wake. A message not
+  read live in this hub run goes through `Lead::written_earlier` first: its marker in the current or
+  previous lead transcript means delivered (the hand-off is recorded and finished, so the answer is
+  still posted); not found with a lead of this hub run means not delivered; no lead yet defers the
+  room (`Step::Deferred`, tried next round; later messages of the room wait behind it); a
+  transcript that cannot be searched holds the room in doubt. A wake written whose record then fails
+  to commit is in doubt, never resent.
+- Crash points (debug builds, `CATALY_FAULT`): `wake_before_commit` (nothing written or committed),
+  `wake_after_write` (written; the commit is held back so it cannot land), `wake_after_commit`.
+  The points now share one helper, `sys::fault`, with the earlier `relay_after_arrival`,
+  `lane_after_close_intent` and the unit tests' `after_event_append`.
+- Not covered by the early path: a message queued while no lead runs now waits in the relay queue
+  rather than in the lead's inbox until the lead is up; an owner stop leaves new live messages in
+  the inbox as before.
+
+## Fallback setup
+
+`cataly setup --fallback-on <any|usage-limit|except-usage-limit> --fallback-chain
+<provider/id,...>` writes `[fallback] on` and `[fallback.chains] default` with the same snapshot,
+preview, validation, `--apply --expect` and source report as the other settings; the lead's
+guidance tells the owner how. The overlay carrying it is written once per hub run, so a change
+applies from the next hub start, which the guidance says. Only the `default` chain is managed by
+setup; other roles stay hand-edited.
+
+## Tests
+
+- `tests/discord_relay.rs` `crash_at_each_wake_point_delivers_once`: a crash at each point, then a
+  restart: one user entry in the lead's transcript, the room not held, the queue finished, at most
+  one answer (the answer is checked when nothing was written before the crash).
+- `tests/hub.rs` `setup_sets_the_fallback_chain`: refusals name the flag, the preview writes
+  nothing, apply against the preview's hash, `config check` accepts the result.
+- Closing runs: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean on Linux,
+  and the same clippy with `--target x86_64-apple-darwin` (as above); the full `cargo test
+  --no-fail-fast` passed twice in a row after the last code change (283 passed, 5 ignored, over the
+  unit tests and every integration binary); each contract binary passed alone in release with
+  `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1, `contract_session` 5,
+  `contract_discord` 3, `contract_lanes` 2, `contract_relays` 1); `bun test` in `extension/` 6
+  passed.

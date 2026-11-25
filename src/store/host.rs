@@ -636,6 +636,34 @@ impl Reads {
             )
             .optional()
     }
+
+    /// Whether an owner message with this request ID would be stored now and its batch recorded
+    /// under `delivery`: the ID left no receipt, the receipt store has room, and no delivery has
+    /// that ID (decision 15: the wake writes before its commit lands, so it decides first).
+    pub(crate) fn admits_at_once(
+        &self,
+        target: &str,
+        request_id: &str,
+        delivery: &str,
+    ) -> rusqlite::Result<bool> {
+        self.0.query_row(
+            "SELECT NOT EXISTS (SELECT 1 FROM receipts WHERE target = ?1 AND request_id = ?2) \
+             AND (SELECT COUNT(*) FROM receipts WHERE target = ?1) < ?3 \
+             AND NOT EXISTS (SELECT 1 FROM deliveries WHERE id = ?4)",
+            params![target, request_id, RECEIPT_CAP, delivery],
+            |r| r.get(0),
+        )
+    }
+
+    /// The transcripts of a role's newest `limit` session records, newest first.
+    pub(crate) fn session_files(&self, role: &str, limit: u32) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.0.prepare(
+            "SELECT session_file FROM sessions WHERE role = ?1 AND session_file IS NOT NULL \
+             GROUP BY session_file ORDER BY MAX(started_ms) DESC LIMIT ?2",
+        )?;
+        stmt.query_map(params![role, limit], |r| r.get(0))?
+            .collect()
+    }
 }
 
 /// A stored receipt: the inbox row it stored, if it stored one.

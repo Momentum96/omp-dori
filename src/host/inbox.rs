@@ -133,6 +133,15 @@ pub(crate) fn marker(delivery_id: &str) -> String {
     format!("[cataly:{delivery_id}]")
 }
 
+/// The delivery ID of an owner request's early wake (decision 15), derived from the target and the
+/// request ID: a recovery can look for its marker in the transcript without any record of it.
+pub(crate) fn wake_id(target: &str, request_id: &str) -> String {
+    digest(&format!("wake\0{target}"), request_id)
+        .chars()
+        .take(16)
+        .collect()
+}
+
 fn clock(ms: i64) -> String {
     jiff::Timestamp::from_millisecond(ms)
         .map_or_else(|_| String::new(), |t| t.strftime("%H:%M UTC").to_string())
@@ -230,6 +239,8 @@ struct Batch {
     timing: Timing,
     /// It also carries the message being admitted.
     extra: bool,
+    /// It carries only that message, under its early-wake ID ([`wake_id`]).
+    early: bool,
 }
 
 impl Mailbox {
@@ -245,9 +256,10 @@ impl Mailbox {
     }
 
     /// Stores a message and delivers what may go now (COORD req. 15, 24). When the target can take
-    /// it at once, the message and the batch that carries it are stored in one commit before the
-    /// batch is written: one durable commit on the wake path (DESIGN 2.3, 7.2). Otherwise it is
-    /// stored and the inbox is flushed as usual. `Err` is a refusal; nothing was stored.
+    /// it at once, the message and the batch that carries it are stored in one commit (DESIGN 2.3,
+    /// 7.2); an owner request to the lead that goes alone is written while that commit runs
+    /// (decision 15, [`Mailbox::wake_early`]), anything else after it. Otherwise it is stored and
+    /// the inbox is flushed as usual. `Err` is a refusal; nothing was stored.
     pub(crate) async fn deliver<S: Control>(
         &self,
         req: &Message,
@@ -261,10 +273,15 @@ impl Mailbox {
             .read(move |r| r.sent_deliveries(&target))
             .await
             .is_ok_and(|sent| sent.is_empty());
+        let early = req
+            .request_id
+            .as_deref()
+            .filter(|_| self.target == LEAD && req.identity.is_none())
+            .map(|rid| wake_id(&self.target, rid));
         let live = session.filter(|s| s.alive());
         let batch = match live {
             Some(s) if clear => self
-                .batch(s, quota_blocked, Some(req))
+                .batch(s, quota_blocked, Some(req), early.as_deref())
                 .await
                 .map_err(|e| e.to_string())?
                 .filter(|b| b.extra),
@@ -283,6 +300,21 @@ impl Mailbox {
             };
             return Ok((receipt, stored, self.stored_anyway(notes)));
         };
+        if batch.early {
+            let (target, rid, id) = (
+                self.target.clone(),
+                req.request_id.clone().unwrap_or_default(),
+                batch.delivery.id.clone(),
+            );
+            let at_once = self
+                .store
+                .read(move |r| r.admits_at_once(&target, &rid, &id))
+                .await
+                .unwrap_or(false);
+            if at_once {
+                return self.wake_early(req, admit, batch, session).await;
+            }
+        }
         let Batch {
             delivery,
             inbox,
@@ -309,6 +341,93 @@ impl Mailbox {
         let note = self.write(session, id, outgoing).await;
         let notes = self.stored_anyway(note.map(|n| n.into_iter().collect()));
         Ok((receipt, stored, notes))
+    }
+
+    /// The early wake (decision 15): the prompt goes to OMP at once and the commit of the message
+    /// and its batch runs alongside, so the wake does not wait for the fsync. It is taken only when
+    /// the store would admit the message and the batch carries nothing else, under the ID
+    /// [`wake_id`] derives from the request ID. A crash before the commit lands leaves the request
+    /// unrecorded in the inbox, and the relay's recovery looks for that marker in the transcript
+    /// before any resend (`Lead::written_earlier`); after the commit, the ordinary confirmation
+    /// applies. Written with no record is never repeated: the receipt is in doubt (DESIGN 9.3).
+    async fn wake_early<S: Control>(
+        &self,
+        req: &Message,
+        admit: Admit,
+        batch: Batch,
+        session: &S,
+    ) -> Result<(Receipt, Option<i64>, Vec<Note>), String> {
+        let Batch {
+            delivery,
+            inbox,
+            timing,
+            ..
+        } = batch;
+        let (id, mut outgoing) = outgoing(&delivery, timing);
+        #[cfg(debug_assertions)]
+        crate::sys::fault::point("wake_before_commit");
+        let commit = async {
+            // The crash test after the write needs a commit that has not landed.
+            #[cfg(debug_assertions)]
+            if crate::sys::fault::named("wake_after_write") {
+                std::future::pending::<()>().await;
+            }
+            self.store
+                .host(HostWrite::AdmitSend {
+                    admit,
+                    delivery,
+                    inbox,
+                })
+                .await
+        };
+        let write = async {
+            outgoing.fresh = session.refresh().await.is_ok();
+            let outcome = session.deliver(outgoing).await;
+            #[cfg(debug_assertions)]
+            crate::sys::fault::point("wake_after_write");
+            outcome
+        };
+        let (done, outcome) = tokio::join!(commit, write);
+        #[cfg(debug_assertions)]
+        crate::sys::fault::point("wake_after_commit");
+        let admitted = match done {
+            Ok(done) => self.admitted(req.request_id.clone(), done).await,
+            Err(e) => Err(e.to_string()),
+        };
+        let reached = matches!(
+            outcome,
+            DeliverOutcome::Delivered { .. } | DeliverOutcome::InDoubt(_)
+        );
+        match admitted {
+            Ok((receipt, Some(stored))) => {
+                let note = self.conclude(&id, outcome).await;
+                let notes = self.stored_anyway(note.map(|n| n.into_iter().collect()));
+                Ok((receipt, Some(stored), notes))
+            }
+            // Nothing reached OMP: the store's answer stands.
+            other if !reached => other.map(|(receipt, _)| (receipt, None, Vec::new())),
+            other => {
+                let why =
+                    other.map_or_else(|e| e, |_| "its request ID has an earlier receipt".into());
+                crate::log::warn(
+                    "wake written without its record",
+                    &[("target", &self.target), ("error", &why)],
+                );
+                Ok((
+                    Receipt {
+                        request_id: req.request_id.clone(),
+                        inbox_id: None,
+                        state: ReceiptState::InDoubt,
+                        delivery_id: Some(id),
+                        reason: Some(format!(
+                            "written to the session, but its record was not stored ({why})"
+                        )),
+                    },
+                    None,
+                    Vec::new(),
+                ))
+            }
+        }
     }
 
     /// A store failure after the message was stored is logged, not reported as a refusal: the
@@ -645,7 +764,7 @@ impl Mailbox {
             inbox,
             timing,
             ..
-        }) = self.batch(session, quota_blocked, None).await?
+        }) = self.batch(session, quota_blocked, None, None).await?
         else {
             return Ok(None);
         };
@@ -660,12 +779,13 @@ impl Mailbox {
     }
 
     /// The batch of pending rows, and `extra` (a message being admitted), that may go to `session`
-    /// now; `None` when nothing may go.
+    /// now; `None` when nothing may go. A batch of `extra` alone takes the `early` ID when given.
     async fn batch<S: Control>(
         &self,
         session: &S,
         quota_blocked: bool,
         extra: Option<&Message>,
+        early: Option<&str>,
     ) -> Result<Option<Batch>, StoreError> {
         let snapshot = session.snapshot();
         let (Some(session_id), Some(file)) = (&snapshot.session_id, &snapshot.session_file) else {
@@ -701,7 +821,8 @@ impl Mailbox {
             .map(|r| (r.sender.as_str(), r.created_ms, r.text.as_str()))
             .chain(extra.map(|m| (m.sender.as_str(), now, m.text.as_str())))
             .collect();
-        let id = super::random_hex(8);
+        let early = early.filter(|_| rows.is_empty() && extra.is_some());
+        let id = early.map_or_else(|| super::random_hex(8), str::to_string);
         let text = batch_text(&id, &parts);
         Ok(Some(Batch {
             delivery: DeliveryRow {
@@ -721,6 +842,7 @@ impl Mailbox {
             inbox: rows.iter().map(|r| r.id).collect(),
             timing,
             extra: extra.is_some(),
+            early: early.is_some(),
         }))
     }
 
@@ -732,10 +854,19 @@ impl Mailbox {
         delivery: Delivery,
     ) -> Result<Option<Note>, StoreError> {
         let outcome = session.deliver(delivery).await;
+        self.conclude(&id, outcome).await
+    }
+
+    /// Settles what came of writing the recorded batch `id`.
+    async fn conclude(
+        &self,
+        id: &str,
+        outcome: DeliverOutcome,
+    ) -> Result<Option<Note>, StoreError> {
         match outcome {
             DeliverOutcome::Delivered { written, .. } => Ok(Some(Note::Sent { written })),
             DeliverOutcome::NotReady(status) => {
-                self.resolve(&id, "superseded", Some(format!("not ready: {status:?}")))
+                self.resolve(id, "superseded", Some(format!("not ready: {status:?}")))
                     .await?;
                 Ok(None)
             }
@@ -744,10 +875,10 @@ impl Mailbox {
                     "delivery refused by the session",
                     &[("target", &self.target), ("reason", &reason)],
                 );
-                self.resolve(&id, "superseded", Some(reason)).await?;
+                self.resolve(id, "superseded", Some(reason)).await?;
                 Ok(None)
             }
-            DeliverOutcome::InDoubt(reason) => self.in_doubt(&id, reason).await.map(Some),
+            DeliverOutcome::InDoubt(reason) => self.in_doubt(id, reason).await.map(Some),
         }
     }
 }

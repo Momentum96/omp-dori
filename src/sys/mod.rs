@@ -13,6 +13,23 @@ pub(crate) mod peer;
 pub(crate) mod secrets;
 pub(crate) mod stall;
 
+/// Debug builds only: crash points between durable steps, named by `CATALY_FAULT`, for the crash
+/// tests. Release builds hold neither the points nor their names.
+#[cfg(debug_assertions)]
+pub(crate) mod fault {
+    /// Whether `CATALY_FAULT` names this point.
+    pub(crate) fn named(point: &str) -> bool {
+        std::env::var("CATALY_FAULT").is_ok_and(|v| v == point)
+    }
+
+    /// Aborts the process, with no clean-up, when `CATALY_FAULT` names this point.
+    pub(crate) fn point(point: &str) {
+        if named(point) {
+            std::process::abort();
+        }
+    }
+}
+
 use std::fmt;
 
 /// The one decision class every error carries (DESIGN 9.5).

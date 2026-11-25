@@ -1096,6 +1096,46 @@ impl<R: Runtime> Lead<R> {
         })
     }
 
+    /// Decision 15 recovery: whether an owner request that an earlier hub run may have written
+    /// to the lead before its record landed ([`inbox::wake_id`]) reached the lead's transcript.
+    /// `Some(true)` when a user entry of the current or the previous lead transcript carries its
+    /// marker; `Some(false)` when neither does and a lead started by this hub runs (the process an
+    /// earlier run wrote to has let go of its session, so its file is final); `None` while no lead
+    /// runs yet. A transcript that cannot be searched is an error: the caller fails closed.
+    pub(crate) async fn written_earlier(&self, request_id: &str) -> Result<Option<bool>, String> {
+        let Some(current) = self
+            .current()
+            .filter(|s| s.alive())
+            .and_then(|s| s.snapshot().session_file.clone())
+        else {
+            return Ok(None);
+        };
+        let earlier = self
+            .env
+            .store
+            .read(|r| r.session_files("lead", 2))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut files = vec![current];
+        for file in earlier {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        let marker = inbox::marker(&inbox::wake_id(LEAD, request_id));
+        for file in files {
+            match transcript::search(PathBuf::from(&file), marker.clone()).await {
+                Ok(transcript::Found::Yes) => return Ok(Some(true)),
+                Ok(transcript::Found::No | transcript::Found::Missing) => {}
+                Ok(transcript::Found::OutOfTime) => {
+                    return Err(format!("the search of {file} ran out of time"));
+                }
+                Err(e) => return Err(format!("{file}: {e}")),
+            }
+        }
+        Ok(Some(false))
+    }
+
     /// Follows the events of whichever lead session runs, across restarts.
     pub(crate) fn follow(&self) -> broadcast::Receiver<SessionEvent> {
         self.followers.subscribe()

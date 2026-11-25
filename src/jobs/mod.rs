@@ -687,17 +687,6 @@ fn log_failure(what: &str, job: &str, error: &JobsError) {
     );
 }
 
-/// Test-only crash points between durable steps.
-#[cfg(test)]
-pub(crate) mod fault {
-    /// Aborts the process when `CATALY_FAULT` names this point.
-    pub(crate) fn point(name: &str) {
-        if std::env::var("CATALY_FAULT").is_ok_and(|v| v == name) {
-            std::process::abort();
-        }
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

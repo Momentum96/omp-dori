@@ -15,7 +15,7 @@ pub(crate) const THINKING: [&str; 8] = [
     "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
 ];
 /// `retry.fallbackOn` values.
-const FALLBACK_ON: [&str; 3] = ["any", "usage-limit", "except-usage-limit"];
+pub(crate) const FALLBACK_ON: [&str; 3] = ["any", "usage-limit", "except-usage-limit"];
 /// Flags the hub sets itself or that would change what the hub controls (HOST req. 18-19).
 const RESERVED_FLAGS: [&str; 24] = [
     "mode",

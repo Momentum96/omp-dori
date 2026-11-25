@@ -302,3 +302,34 @@ backlog caused it is refuted. The store still grows with every pass (the event l
 planner event); the SQLite page caches filling with it remain the likely cause [inference, not
 measured]. The whole curve sits about 0.5 MiB above slice 3b's, the same step as the hub's base.
 macOS figures are not measured.
+
+## Decision 15: early wake (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Commands: `cargo build --release`; each contract binary alone with `CATALY_CONTRACT_OMP=1 cargo test
+--release --test <binary> -- --nocapture --test-threads=1` (figures from the `MEASURE` lines, one run
+each). The owner request to the lead is now written while its inbox, delivery and hand-off records
+commit; nothing else on the path changed.
+
+| Measure | Before | Now | Target |
+| --- | --- | --- | --- |
+| Wake, hub part, Discord owner requests: `deliver` call to `prompt` line written (`hub_wake`, 41 wakes) | p50 9.6 ms, p95 13.2 ms (slice 2c) | p50 2.4 ms, p90 10.0 ms, p95 16.9 ms, p99 18.2 ms, max 49.5 ms | p50 ≤ 5 ms, p99 ≤ 25 ms |
+| Wake end to end, Discord: Gateway frame read to `agent_start` (41 wakes) | p50 38.1 ms, p95 52.3 ms (slice 2c); p50 35.7 ms, p95 46.2 ms (milestone 4) | p50 33.2 ms, p90 52.1 ms, p95 52.3 ms, p99 53.4 ms, max 81.5 ms | p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Wake end to end, Telegram: poll response read to `agent_start` (21 wakes) | p50 42.2 ms, p95 47.3 ms | p50 26.2 ms, p90 39.3 ms, p95 46.9 ms, max 53.1 ms | as Discord |
+| Wake end to end, Slack: Socket Mode frame read to `agent_start` (21 wakes) | p50 32.9 ms, p95 40.6 ms | p50 27.6 ms, p90 54.2 ms, p95 59.7 ms, max 140 ms | as Discord |
+| Wake, hub part, `cataly lead send` without a request ID (`contract_session`, 40 wakes; commits first as before) | p50 8.5-8.7 ms | p50 8.7 ms, p99 10.6 ms | p50 ≤ 5 ms |
+| Store commit (`synchronous=FULL`, every commit of that run) | p50 8.0-8.2 ms | p50 8.3 ms, p99 10.5 ms | none set |
+| Hub RSS, Discord connected and the lead attached, after the run (OMP excluded) | 15.83 MiB (milestone 4) | 15.67 MiB (16,433,152 bytes) | ≤ 30 MiB idle |
+| Hub RSS, three relays connected, idle after 42 requests | 17.85 MiB | 17.71 MiB (18,567,168 bytes) | ≤ 30 MiB idle |
+| Release binary | 13,080,312 bytes | 13,145,944 bytes | none set |
+
+The hub part now meets its p50 target for owner requests: what is left of it is the readback HOST
+req. 50 requires and the write itself. The p90-p99 tail (10-18 ms) fits wakes that took the
+commit-first path, most likely because the previous wake's delivery was not yet confirmed from the
+transcript when the next request came, so the message was stored and sent by the flush, with its
+commits [inference, not broken down]. End to end, Discord gained 3-5 ms at p50 rather than the
+16 ms the two commits taken off the path would suggest; the arrival commit before the hand-off
+(DISC-IN req. 49) is still on the path, and the rest of the intake before `Lead::deliver` (about
+20 ms at p50: the round's reads, the lead's inbox lock, which a flush after the previous turn may
+hold through its own commit) was not broken down. Telegram gained 16 ms at p50, Slack 5 ms; single
+runs, so these are indications, not a controlled comparison. The DESIGN 2.3 budgets stand; the
+hub-part row now says which deliveries take the early path. macOS figures are not measured.

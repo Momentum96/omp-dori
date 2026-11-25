@@ -104,7 +104,7 @@ Targets are budgets for review, not promises; each is measured before anything i
 | Added by all owner jobs | < 5 MiB | Benchmark with every owner job enabled (OJ requirement 14). |
 | Added during a voice call | ≤ 25 MiB | Voice benchmark with recorded audio (milestone 5). |
 | Hub start to control socket answering | ≤ 150 ms | Timestamp at process start versus first successful `status` in CI. OMP probe runs after, off this path. |
-| Wake, hub part: relay frame read to `prompt` line written to OMP stdin | p50 ≤ 5 ms, p99 ≤ 25 ms (includes the durable commit of the arrival queue) | The hub stamps each request at frame read, commit, write and `agent_start`; the last 1,000 samples form a histogram served by `cataly stats latency`. |
+| Wake, hub part: relay frame read to `prompt` line written to OMP stdin | p50 ≤ 5 ms, p99 ≤ 25 ms. An owner request to the lead is written while its durable commit runs (decision 15), so the fsync is off this path; other deliveries (lane messages, hub notes, requests without a request ID) still commit first | The hub stamps each request at frame read, commit, write and `agent_start`; the last 1,000 samples form a histogram served by `cataly stats latency`. |
 | Wake, end to end: relay frame read to OMP `agent_start` | p50 ≤ 150 ms, p95 ≤ 300 ms on the CI runner | Contract suite scenario: fake Discord Gateway, stock OMP, loopback fake model. |
 | CLI round trip (`cataly status`) | p50 ≤ 20 ms | CI benchmark, 100 calls. |
 | Bridge cost in an ordinary (non-Cataly) OMP session | < 5 ms added start-up | Contract suite: OMP start with and without the extension link (EXT problems section). |
@@ -407,8 +407,9 @@ relay destinations, or kept locally. Messenger posts never mention anyone and pa
   command sent to it; it batches commands that arrive together into one transaction. Reads use a small pool
   of read-only connections (WAL readers never block the writer).
 - **Durability.** `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`, `busy_timeout=0` (no other writer
-  exists). FULL costs one fsync per commit; the wake budget in 2.3 includes it. If measurement shows the commit
-  dominating the wake, the first remedy is batching, not weaker durability.
+  exists). FULL costs one fsync per commit. The owner's wake does not wait for it: decision 15 writes an owner
+  request to the lead while its arrival, delivery and hand-off records commit, and recovery reads the lead's
+  transcript before any resend (9.3). Weaker durability stays ruled out.
 - **Owner-only files.** State and config directories 0700, files 0600; symlinks, foreign owners and loose modes
   are refused (HOST-37).
 - **Bounds.** Every growing table has a retention rule from its spec (7 days of delivered hand-offs, 512 receipts
@@ -517,6 +518,11 @@ resets, buying credits and paid overage stay refused, in code:
 - Hub notices in doubt are never resent; the lead is told once and may confirm or release (COORD-13).
   Lead-to-lane messages in doubt fence the lane's inbox until the lead releases it (EVR req. 62).
 - A message found in another session's file is "misdelivered": never resent, owner told once.
+- **Early wake (decision 15).** An owner request that goes to the lead alone is written before its records
+  commit, under a delivery marker derived from its request ID. A message not read live in this hub run
+  (restart, catch-up, a hand-off made again) is looked up in the current and previous lead transcripts before
+  any send: found means delivered; a transcript that cannot be searched holds the room; with no lead running
+  yet it waits. Written with a record that then fails to commit is in doubt, never resent.
 - Remote approvals (off by default) deny on any doubt: a card that cannot be posted, an unacknowledged press,
   or a run that ended.
 

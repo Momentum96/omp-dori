@@ -13,12 +13,13 @@ use serde_json::{Value, json};
 use super::args::Parsed;
 use super::{CALL_TIMEOUT, Failure, out};
 use crate::config::{self, sha256_hex};
+use crate::omp::transcript::model_selector;
 use crate::proto::{Status, method};
 use crate::sys::fs::{create_atomic, read_private, write_atomic};
 use crate::sys::paths::Paths;
 
 /// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 12] = [
+const MANAGED: [(&str, &str, &str); 14] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
@@ -31,6 +32,8 @@ const MANAGED: [(&str, &str, &str); 12] = [
     ("slack", "token_file", "--slack-token-file"),
     ("slack", "role", "--slack-role"),
     ("slack", "owner", "--slack-owner"),
+    ("fallback", "on", "--fallback-on"),
+    ("fallback.chains", "default", "--fallback-chain"),
 ];
 const CONFIG_MAX: u64 = 1024 * 1024;
 
@@ -102,7 +105,7 @@ fn snapshot(path: &Path) -> Result<Snapshot, String> {
     })
 }
 
-/// Why a managed owner or room value is not valid, if it is not.
+/// Why a managed owner, room or fallback value is not valid, if it is not.
 fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
     let int = v.parse::<i64>().ok();
     let ok = match (section, key) {
@@ -112,6 +115,10 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         ("telegram", "topic") => int.is_some_and(|n| n > 0),
         ("slack", "owner") => v.starts_with(['U', 'W']) && crate::config::relays::slack_id(v),
         ("slack", "role") => matches!(v, "app" | "member"),
+        ("fallback", _) => config::session::FALLBACK_ON.contains(&v),
+        ("fallback.chains", _) => {
+            !comma_list(v).is_empty() && comma_list(v).iter().all(|m| model_selector(m))
+        }
         _ => true,
     };
     (!ok).then_some(match (section, key) {
@@ -120,8 +127,20 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         ("telegram", "group") => "expected the group's Telegram chat ID (a negative number)",
         ("telegram", _) => "expected the forum topic's ID (a positive number)",
         ("slack", "owner") => "expected the owner's Slack member ID, such as U0123ABCD",
+        ("fallback", _) => "expected any, usage-limit or except-usage-limit",
+        ("fallback.chains", _) => {
+            "expected the models to fall back to, in order, as provider/id separated by commas"
+        }
         _ => "expected app or member",
     })
+}
+
+/// The items of a comma-separated value, in order.
+fn comma_list(v: &str) -> Vec<&str> {
+    v.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// A TOML basic string.
@@ -196,10 +215,12 @@ fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec
     let parsed = config::parse(text).ok();
     let defaults = config::Config::default();
     let in_file = |section: &str, key: &str| {
-        toml::from_str::<toml::Table>(text)
-            .ok()
-            .and_then(|t| t.get(section)?.get(key).map(|_| ()))
-            .is_some()
+        let table = toml::from_str::<toml::Table>(text).ok();
+        let mut at = table.as_ref();
+        for part in section.split('.') {
+            at = at.and_then(|t| t.get(part)?.as_table());
+        }
+        at.and_then(|t| t.get(key)).is_some()
     };
     let effective = match hub {
         Some(s) if s.config_digest.as_deref() == Some(digest) => {
@@ -288,6 +309,21 @@ fn value_of(
             None,
         ),
         ("telegram" | "slack", _) => relay_value(paths, config, section, key),
+        ("fallback", _) => (
+            config.fallback.on.clone().unwrap_or_else(|| "-".to_string()),
+            Some("when OMP falls back: any error, usage-limit or except-usage-limit; unset keeps OMP's own setting".to_string()),
+        ),
+        ("fallback.chains", _) => (
+            config
+                .fallback
+                .chains
+                .get("default")
+                .map_or_else(|| "-".to_string(), |c| c.join(",")),
+            Some(
+                "the models OMP may move to, in order, when the model in use runs out; never a reset, credits or overage"
+                    .to_string(),
+            ),
+        ),
         _ => {
             let path = crate::jobs::owner::health::token_path(config, &paths.config_file);
             let note = match read_private(&path, 4096) {
@@ -366,6 +402,43 @@ fn relay_value(
     }
 }
 
+/// Checks one managed value given on the command line and writes it into `text`.
+fn set_value(
+    text: &str,
+    (section, key, flag): (&str, &str, &str),
+    v: &str,
+) -> Result<String, Failure> {
+    if key == "log_level" && crate::log::Level::parse(v).is_none() {
+        return Err(Failure::Usage(format!(
+            "{flag}: expected error, warn, info or debug"
+        )));
+    }
+    if key == "token_file" && !Path::new(v).is_absolute() {
+        return Err(Failure::Usage(format!("{flag}: expected an absolute path")));
+    }
+    if let Some(why) = invalid(section, key, v.trim()) {
+        return Err(Failure::Usage(format!("{flag}: {why}")));
+    }
+    let list = |items: &[&str]| {
+        let quoted: Vec<String> = items.iter().map(|s| toml_string(s)).collect();
+        format!("[{}]", quoted.join(", "))
+    };
+    if key == "channels" {
+        let ids = comma_list(v);
+        let id = |s: &&str| crate::relay::discord::Snowflake::parse(s).is_some();
+        if ids.is_empty() || !ids.iter().all(id) {
+            return Err(Failure::Usage(format!(
+                "{flag}: expected Discord channel IDs separated by commas"
+            )));
+        }
+        return Ok(set_rendered(text, section, key, &list(&ids)));
+    }
+    if section == "fallback.chains" {
+        return Ok(set_rendered(text, section, key, &list(&comma_list(v))));
+    }
+    Ok(set_key(text, section, key, v.trim()))
+}
+
 pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
     let path = &paths.config_file;
     let before = snapshot(path).map_err(Failure::Refused)?;
@@ -384,34 +457,7 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
             _ => None,
         };
         if let Some(v) = value {
-            if key == "log_level" && crate::log::Level::parse(&v).is_none() {
-                return Err(Failure::Usage(format!(
-                    "{flag}: expected error, warn, info or debug"
-                )));
-            }
-            if key == "token_file" && !Path::new(&v).is_absolute() {
-                return Err(Failure::Usage(format!("{flag}: expected an absolute path")));
-            }
-            if let Some(why) = invalid(section, key, v.trim()) {
-                return Err(Failure::Usage(format!("{flag}: {why}")));
-            }
-            let id = |s: &str| crate::relay::discord::Snowflake::parse(s.trim()).is_some();
-            if key == "channels" {
-                let ids: Vec<&str> = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if ids.is_empty() || !ids.iter().all(|s| id(s)) {
-                    return Err(Failure::Usage(format!(
-                        "{flag}: expected Discord channel IDs separated by commas"
-                    )));
-                }
-                let list: Vec<String> = ids.iter().map(|s| toml_string(s)).collect();
-                text = set_rendered(&text, section, key, &format!("[{}]", list.join(", ")));
-                continue;
-            }
-            text = set_key(&text, section, key, v.trim());
+            text = set_value(&text, (section, key, flag), &v)?;
         }
     }
     let after = sha256_hex(text.as_bytes());

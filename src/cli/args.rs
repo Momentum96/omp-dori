@@ -132,6 +132,8 @@ pub(crate) const COMMANDS: [Spec; 44] = [
             "--slack-token-file",
             "--slack-role",
             "--slack-owner",
+            "--fallback-on",
+            "--fallback-chain",
             "--log-level",
         ],
         summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview)",

@@ -43,6 +43,8 @@ pub(crate) enum Step {
     Waiting,
     /// In doubt, failed or conflicting: the room is held.
     Held(String),
+    /// Not handed yet and to be tried again next round; later messages of its room wait behind it.
+    Deferred,
 }
 
 /// The pipeline of one relay.
@@ -119,7 +121,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             let room = row.room.clone();
             match handle(row).await {
                 Ok(Step::Done | Step::Waiting) => {}
-                Ok(Step::Held(_)) => {
+                Ok(Step::Held(_) | Step::Deferred) => {
                     blocked.insert(room);
                 }
                 Err(e) => {
@@ -417,21 +419,19 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             return self.hold(&row.room, &row.message, "failed", why).await;
         }
         let lane = route.and_then(Result::ok);
-        self.store
-            .relay(RelayWrite::Handed {
-                relay: R::NAME.into(),
-                room: row.room.clone(),
-                message: row.message.clone(),
-                seq: row.seq,
-                target: lane.clone().unwrap_or_else(|| inbox::LEAD.into()),
-                request_id: request_id.clone(),
-                digest,
-                owed: lane.is_none().then_some(owed),
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-        self.mark_seen(&row.room, &row.message);
+        let handed = RelayWrite::Handed {
+            relay: R::NAME.into(),
+            room: row.room.clone(),
+            message: row.message.clone(),
+            seq: row.seq,
+            target: lane.clone().unwrap_or_else(|| inbox::LEAD.into()),
+            request_id: request_id.clone(),
+            digest,
+            owed: lane.is_none().then_some(owed),
+        };
         if let Some(key) = lane {
+            self.store.relay(handed).await.map_err(|e| e.to_string())?;
+            self.mark_seen(&row.room, &row.message);
             let message = Message {
                 sender: "owner".into(),
                 text,
@@ -448,7 +448,46 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                 Err(refused) => self.hold(&row.room, &row.message, "failed", &refused).await,
             };
         }
-        self.to_lead(row, text, request_id, read_at).await
+        self.lead_hand_off(row, handed, text, request_id, read_at)
+            .await
+    }
+
+    /// The lead's part of a hand-off. Decision 15: the lead's wake can be written before any record
+    /// of it lands, so a message not read live in this run (a restart, a catch-up, a hand-off made
+    /// again) may already be in the lead's transcript, and the transcript decides before any send.
+    /// Otherwise the hand-off record commits alongside the wake instead of before it.
+    async fn lead_hand_off(
+        self: &Arc<Self>,
+        row: &QueueRow,
+        handed: RelayWrite,
+        text: String,
+        request_id: String,
+        read_at: Option<Instant>,
+    ) -> Result<Step, String> {
+        if read_at.is_none() {
+            match self.lead.written_earlier(&request_id).await {
+                Err(e) => {
+                    let why = format!("the lead's transcript could not be searched ({e})");
+                    return self.hold(&row.room, &row.message, "in_doubt", &why).await;
+                }
+                Ok(None) => return Ok(Step::Deferred),
+                Ok(Some(true)) => {
+                    self.store.relay(handed).await.map_err(|e| e.to_string())?;
+                    self.mark_seen(&row.room, &row.message);
+                    self.finish(&row.room, &row.message, Some("delivered"))
+                        .await?;
+                    return Ok(Step::Done);
+                }
+                Ok(Some(false)) => {}
+            }
+        }
+        self.mark_seen(&row.room, &row.message);
+        let (recorded, step) = tokio::join!(
+            self.store.relay(handed),
+            self.to_lead(row, text, request_id, read_at)
+        );
+        recorded.map_err(|e| e.to_string())?;
+        step
     }
 
     /// Delivers a handed-off owner message to the lead and records its receipt.

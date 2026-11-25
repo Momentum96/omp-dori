@@ -64,7 +64,12 @@ fn session_file(hub: &TestHub) -> PathBuf {
 
 /// User entries of the lead's session file that carry a Discord request.
 fn requests(hub: &TestHub) -> Vec<String> {
-    let text = std::fs::read_to_string(session_file(hub)).unwrap_or_default();
+    requests_in(&session_file(hub))
+}
+
+/// User entries of a session file that carry a Discord request.
+fn requests_in(file: &std::path::Path) -> Vec<String> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
     text.lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .filter(|e| e["message"]["role"] == "user")
@@ -264,6 +269,58 @@ fn crash_after_arrival_delivers_once() {
     assert_eq!(fake.creates().len(), 1, "answered once");
     assert_eq!(requests(&hub).len(), 1, "delivered once");
     assert!(hub.stop().success());
+}
+
+/// Decision 15: the lead's wake is written while its records commit. A crash at each point of that
+/// order (before the commit, after the prompt write with the commit held back, after the commit)
+/// leaves the message delivered exactly once after the restart: the lead's transcript decides
+/// before any send, and nothing is lost or held.
+#[test]
+fn crash_at_each_wake_point_delivers_once() {
+    for (n, point) in [
+        "wake_before_commit",
+        "wake_after_write",
+        "wake_after_commit",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fake = FakeDiscord::start();
+        let mut hub = relay_hub(&fake, &[], "");
+        hub.env.push(("CATALY_FAULT".into(), PathBuf::from(point)));
+        hub.start();
+        ready(&hub);
+        let file = session_file(&hub);
+        let id = 800_000_000_000_000_051 + n as u64;
+        fake.say(FakeDiscord::message(CH, id, OWNER, "exactly once"));
+        let exit = hub.wait_exit(WAIT);
+        assert!(!exit.success(), "{point}: the fault point ended the hub");
+        let before = requests_in(&file).len();
+        hub.env.clear();
+        hub.start();
+        ready(&hub);
+        assert_eq!(
+            session_file(&hub),
+            file,
+            "{point}: the lead resumed its session"
+        );
+        let position = id.to_string();
+        hub.until(WAIT, || {
+            (status(&hub)["rooms"][0]["position"] == position.as_str()).then_some(())
+        });
+        if point == "wake_before_commit" {
+            assert_eq!(before, 0, "nothing was written before the crash");
+            let creates = fake.wait_creates(1, WAIT);
+            assert_eq!(reference(&creates[0]), Some(id.to_string()));
+        } else {
+            assert_eq!(before, 1, "{point}: written before the crash");
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(requests(&hub).len(), 1, "{point}: delivered once");
+        assert_eq!(status(&hub)["counts"]["held"], 0, "{point}: no room held");
+        assert!(fake.creates().len() <= 1, "{point}: answered at most once");
+        assert!(hub.stop().success());
+    }
 }
 
 /// Check 4: the prompt was written but never confirmed; with the OMP process gone the message is

@@ -37,6 +37,21 @@ const GOING: [GoalStatus; 4] = [
     GoalStatus::Dropped,
 ];
 
+/// Whether the session is idle after a turn-end event. Every such event makes the snapshot stale
+/// and queues a readback, and only that readback can show the session idle; it emits no event of
+/// its own, so the answer waits for the next fresh snapshot (bounded by the rpc response time).
+/// A snapshot read at once could still be the stale one, and the end of the active stretch would
+/// then be missed for good.
+async fn idle_after_readback<S: Control>(session: &S) -> bool {
+    let mut states = session.states();
+    let fresh = tokio::time::timeout(
+        crate::omp::rpc::RESPONSE_TIMEOUT,
+        states.wait_for(|s| s.fresh || s.stop.is_some()),
+    )
+    .await;
+    matches!(fresh, Ok(Ok(s)) if s.status == Status::Idle)
+}
+
 /// Runs a goal operation; when OMP refuses it (no goal, already in that state), the readback
 /// decides. `Ok` only when the goal reads back in one of `ok`.
 async fn goal_to<S: Control>(
@@ -457,9 +472,7 @@ impl<R: Runtime> Lanes<R> {
             .save(&rec, Some(rev), Some(format!("close intent: {note}")))
             .await?;
         #[cfg(debug_assertions)]
-        if std::env::var("CATALY_FAULT").as_deref() == Ok("lane_after_close_intent") {
-            std::process::abort();
-        }
+        crate::sys::fault::point("lane_after_close_intent");
         self.finish_close(rec, rev).await
     }
 
@@ -736,8 +749,8 @@ impl<R: Runtime> Lanes<R> {
                 SessionEvent::TurnEnded { .. }
                 | SessionEvent::Quiet
                 | SessionEvent::Settled { .. } => {
+                    let idle = idle_after_readback(&*session).await;
                     let now = now_ms();
-                    let idle = session.snapshot().status == Status::Idle;
                     self.keep(&key, |r| {
                         r.watch.active_ms = now;
                         if idle {

@@ -18,7 +18,8 @@ pub(crate) enum Headroom {
     Unknown,
     /// No container limit applies.
     NoLimit,
-    /// Headroom under the limit, in per cent.
+    /// Headroom under the limit, in per cent (cgroups: Linux only).
+    #[cfg(target_os = "linux")]
     Percent(f64),
 }
 
@@ -44,10 +45,13 @@ pub(crate) fn admission(s: &Sample, p: &Pressure) -> Vec<String> {
         None => held.push("free memory unknown".into()),
     }
     match s.headroom {
+        #[cfg(target_os = "linux")]
         Headroom::Percent(h) if h < min => {
             held.push(format!("container headroom {h:.0}% below {min:.0}%"));
         }
-        Headroom::Percent(_) | Headroom::NoLimit => {}
+        #[cfg(target_os = "linux")]
+        Headroom::Percent(_) => {}
+        Headroom::NoLimit => {}
         Headroom::Unknown => held.push("container headroom unknown".into()),
     }
     #[allow(clippy::cast_precision_loss)]
@@ -91,14 +95,26 @@ pub(crate) async fn sample(disk_path: &Path) -> Sample {
     Sample {
         load_percent,
         memory_free_percent,
-        headroom: match host::headroom() {
-            Ok(Some(h)) => Headroom::Percent(h),
-            Ok(None) => Headroom::NoLimit,
-            Err(_) => Headroom::Unknown,
-        },
+        headroom: headroom(),
         disk_free_gb,
         sessions: Some(0),
     }
+}
+
+/// Container memory headroom (LANE req. 19); an unreadable cgroup is unknown, not "no limit".
+#[cfg(target_os = "linux")]
+fn headroom() -> Headroom {
+    match host::headroom() {
+        Ok(Some(h)) => Headroom::Percent(h),
+        Ok(None) => Headroom::NoLimit,
+        Err(_) => Headroom::Unknown,
+    }
+}
+
+/// Container memory headroom: cgroups exist on Linux only, so no container limit applies.
+#[cfg(not(target_os = "linux"))]
+const fn headroom() -> Headroom {
+    Headroom::NoLimit
 }
 
 fn disk_path(p: &Pressure) -> PathBuf {
@@ -204,10 +220,17 @@ mod tests {
         assert_eq!(admission(&unknown, &limits()).len(), 2);
         let full = Sample {
             sessions: Some(2),
-            headroom: Headroom::Percent(5.0),
             ..good()
         };
-        assert_eq!(admission(&full, &limits()).len(), 2);
+        assert_eq!(admission(&full, &limits()).len(), 1);
+        #[cfg(target_os = "linux")]
+        {
+            let low = Sample {
+                headroom: Headroom::Percent(5.0),
+                ..full
+            };
+            assert_eq!(admission(&low, &limits()).len(), 2);
+        }
     }
 
     #[tokio::test]
