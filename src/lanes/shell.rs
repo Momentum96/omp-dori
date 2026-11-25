@@ -2,8 +2,9 @@
 //! built-in rule 0 every session's shell obeys (the lead's, each lane's and their subagents'), and
 //! for lanes the snapshot taken at open, the verdict on one command and one-attempt grants. Rule 0
 //! cannot be granted: no `omp usage reset`, no `omp config set` of a reset setting, and no `cataly`
-//! verb beyond the read-only ones. It guards against mistakes, not against deliberate escape; the
-//! control socket's roles are the boundary (DESIGN 8).
+//! verb beyond the read-only ones. A line that only runs the session's own bridge tool as an OMP
+//! tool command (`cataly_lead`, `cataly_lane`; never the `cataly` CLI) passes. Rule 0 guards against
+//! mistakes, not against deliberate escape; the control socket's roles are the boundary (DESIGN 8).
 
 use std::collections::HashMap;
 
@@ -228,6 +229,33 @@ pub(crate) fn rule_zero(command: &str) -> bool {
     blocked_at(command, 0)
 }
 
+/// Whether `command` only runs the session's own bridge tool `tool` as a command of OMP's embedded
+/// shell (its tool commands, resolved before `PATH` and run in OMP's process): every segment's
+/// command word is exactly `tool`, with no redirection, substitution or expansion outside single
+/// quotes. Such a line runs nothing else, so the shell veto passes it; a path, a runner, an
+/// assignment or any other word in front is judged as usual. The Cataly CLI never qualifies.
+pub(crate) fn tool_only(command: &str, tool: &str) -> bool {
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (None, '\'' | '"') => quote = Some(c),
+            (Some('\''), _) => {}
+            (_, '\\') => {
+                chars.next();
+            }
+            (_, '$' | '`') | (None, '<' | '>' | '(' | ')') => return false,
+            _ => {}
+        }
+    }
+    let segments = segments(command);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|words| words.first().is_some_and(|w| w == tool))
+}
+
 /// The verdict on one command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Verdict {
@@ -431,6 +459,33 @@ mod tests {
             "ls $HOME && $PYTHON -m pip install x",
         ] {
             assert!(!rule_zero(cmd), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn only_the_sessions_own_tool_command_passes_as_a_tool_line() {
+        for cmd in [
+            "cataly_lead onboarding.start; cataly_lead requests",
+            "cataly_lane report --kind progress --text 'git push (done) $5' && cataly_lane --help",
+            "cataly_lead request.close --id 3 --text \"fixed (see #4)\"",
+        ] {
+            let tool = cmd.split(' ').next().unwrap_or_default();
+            assert!(tool_only(cmd, tool), "{cmd}");
+        }
+        for cmd in [
+            "cataly lead send hi",
+            "cataly onboarding.start",
+            "/usr/bin/cataly_lead requests",
+            "cataly_lead requests; cataly lead send hi",
+            "env cataly_lead requests",
+            "X=1 cataly_lead requests",
+            "cataly_lead requests > out",
+            "cataly_lead request.note --text \"$(rm -rf x)\"",
+            "cataly_lead requests `id`",
+            "cataly_lane report",
+            "",
+        ] {
+            assert!(!tool_only(cmd, "cataly_lead"), "{cmd}");
         }
     }
 }

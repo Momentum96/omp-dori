@@ -685,8 +685,10 @@ Third-party actions are pinned by commit hash; workflow permissions are read-onl
 Kept, in order of necessity (EXT "what must remain"): recognise a Cataly session (launch token or session
 marker entry) and stay inert otherwise, with no handlers beyond `session_start`/`session_switch` until accepted;
 one client connection with hello, heartbeat, reconnect and bounded buffer; forward events and snapshots; two
-tools registered after hello with schemas and descriptions supplied by the hub (`cataly` for the lead,
-`cataly_lane` for lanes; each takes an `op` and typed arguments, so new operations need no bridge release);
+tools registered after hello with schemas and descriptions supplied by the hub (`cataly_lead` for the lead,
+`cataly_lane` for lanes; each takes an `op` and typed arguments, so new operations need no bridge release; neither
+is named `cataly`, because OMP also offers a tool as a command of its embedded shell, where that name would hide the
+CLI from rule 0);
 fingerprints and background-job completion facts from the live branch; hooks that exist only inside OMP
 (shell veto, subagent-spawn veto, system-prompt append, model barrier, stop gate, tern form interception);
 session marker and resumed-transcript ownership; tern control commands. It holds no records, no credentials,

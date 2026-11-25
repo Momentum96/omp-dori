@@ -1,4 +1,4 @@
-//! The lead's `cataly` tool (DESIGN 10.6; WS-02, EVR-22 to EVR-25, EVR-28, OPC-79/80): one tool
+//! The lead's `cataly_lead` tool (DESIGN 10.6; WS-02, EVR-22 to EVR-25, EVR-28, OPC-79/80): one tool
 //! whose `op` names the operation, so new operations need no bridge release. The bridge forwards
 //! each call; every rule is applied here. The same module builds the recap (EVR req. 48-49).
 
@@ -15,13 +15,16 @@ use crate::sys::now_ms;
 const RECAP_MAX: usize = 8 * 1024;
 /// The owner notes are capped (OPC req. 55, COORD req. 51).
 pub(crate) const PROFILE_MAX: usize = crate::jobs::notes::MAX;
+/// The tool's name. It differs from the Cataly CLI's `cataly`, so OMP's tool command of that name
+/// never shadows the CLI in the lead's shell and rule 0 keeps judging only the CLI (DESIGN 9.2).
+pub(crate) const LEAD_TOOL: &str = "cataly_lead";
 
 /// The tool as the bridge registers it: name, description and JSON Schema from the hub.
 pub(crate) fn definition() -> Value {
     let text = |d: &str| json!({ "type": "string", "description": d });
     let int = |d: &str| json!({ "type": "integer", "description": d });
     json!({
-        "name": "cataly",
+        "name": LEAD_TOOL,
         "label": "Cataly",
         "description": "Cataly's records and watches. op is one of: requests (all?), request.add (title, source, thread?), \
     request.next (id, text), request.note (id, text), request.close (id, text); questions, question.ask (text, source, \

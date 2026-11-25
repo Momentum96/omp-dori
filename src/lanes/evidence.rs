@@ -16,7 +16,7 @@ const ITEMS_MAX: usize = 64;
 /// Tools that organise the lane rather than change anything (EVR req. 12).
 const ORGANISING: [&str; 11] = [
     "cataly_lane",
-    "cataly",
+    "cataly_lead",
     "ask",
     "todo",
     "todo_write",
@@ -98,12 +98,13 @@ pub(crate) fn file_item(cwd: &Path, path: &str) -> Result<(String, String), Stri
     ))
 }
 
-/// Whether a shell command the bridge saw runs the Cataly CLI: a word `cataly`, alone or ending a
-/// path, between blanks or shell separators. Such a call organises the lane (EVR req. 12).
+/// Whether a shell command the bridge saw runs the Cataly CLI (a word `cataly`, alone or ending a
+/// path) or a Cataly tool as an OMP tool command, between blanks or shell separators. Such a call
+/// organises the lane (EVR req. 12).
 fn runs_cataly(command: &str) -> bool {
     command
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
-        .any(|w| w == "cataly" || w.ends_with("/cataly"))
+        .any(|w| matches!(w, "cataly" | "cataly_lane" | "cataly_lead") || w.ends_with("/cataly"))
 }
 
 /// Tool evidence from the bridge's facts (EVR req. 10-13, EXT req. 21-23).

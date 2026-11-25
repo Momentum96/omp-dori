@@ -7,7 +7,8 @@
 //! hub end to end: the lead starts, a message is written and confirmed from the session file, the
 //! lead stops cleanly and resumes its session after a hub restart (acceptance check 12), and the
 //! fallback chain moves a usage-limited lead to the backup model (acceptance check 9). The bridge
-//! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead.
+//! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead. The lead's
+//! tool works as a direct call and as a `bash` tool command; the CLI and `eval` stay refused.
 
 #![allow(
     clippy::unwrap_used,
@@ -678,7 +679,7 @@ fn bridge_in_stock_omp() {
             "guidance in an ordinary session"
         );
         assert!(
-            !text.contains("\"name\":\"cataly\""),
+            !text.contains("\"name\":\"cataly_lead\""),
             "hub tool in an ordinary session"
         );
     }
@@ -772,7 +773,7 @@ fn bridge_accepted_lead_in_stock_omp() {
     assert!(last.contains("Cataly: your role"), "no guidance: {last}");
     // OMP offers an extension tool either as a top-level tool or, with its default
     // `tools.commands`, as a command mounted in `bash` and listed in the system prompt.
-    let top_level = last.contains("\"name\":\"cataly\"");
+    let top_level = last.contains("\"name\":\"cataly_lead\"");
     assert!(
         top_level || last.contains("Cataly's records and watches"),
         "no hub tool: {last}"
@@ -786,6 +787,97 @@ fn bridge_accepted_lead_in_stock_omp() {
     assert!(
         text.contains("\"customType\":\"cataly\""),
         "no session marker"
+    );
+    assert!(hub.stop().success());
+}
+
+/// The lead's tool name as the hub registers it.
+const LEAD_TOOL: &str = "cataly_lead";
+
+/// Every tool result the fake model was sent: call ID, tool name and content, in order.
+fn tool_results(model: &FakeModel) -> Vec<(String, String, String)> {
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for body in model.bodies() {
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        for (call, result) in messages.iter().zip(messages.iter().skip(1)) {
+            let call = &call["tool_calls"][0];
+            let id = result["tool_call_id"].as_str().unwrap_or_default();
+            if result["role"] == "tool" && !out.iter().any(|(seen, ..)| seen == id) {
+                let name = call["function"]["name"].as_str().unwrap_or_default();
+                out.push((id.into(), name.into(), result["content"].to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Sends the owner message that makes the fake model call `tool` with `args` once, and returns
+/// that call's result once the turn has settled.
+fn lead_calls(hub: &TestHub, model: &FakeModel, tool: &str, args: &Value) -> String {
+    let before = tool_results(model).len();
+    let text = format!("Run this.\nCALL {tool} {args}");
+    assert!(hub.cli(&["lead", "send", &text]).status.success());
+    let result = hub.until(Duration::from_secs(60), || {
+        let all = tool_results(model);
+        all.get(before..)?
+            .iter()
+            .find(|(_, name, _)| name == tool)
+            .map(|(.., content)| content.clone())
+    });
+    wait_lead(hub, |v| v["sent"] == 0 && v["waiting"] == 0);
+    eprintln!("lead {tool} {args}: {result}");
+    result
+}
+
+/// The owner's first run (OMP 19.1.1 offers the lead's tool as a command of its embedded shell):
+/// the lead records onboarding and reads requests through its tool both as a direct call and as a
+/// `bash` command line, while rule 0 still refuses the `cataly` CLI's `lead send` in its shell and
+/// OMP's user deny still refuses `eval`.
+#[test]
+fn lead_tool_works_as_a_call_and_as_a_shell_command_in_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let lead_box = Sandbox::new("leadtool");
+    let mut hub = lead_hub(&lead_box, "fake/primary", "");
+    hub.start();
+    wait_lead(&hub, |v| {
+        v["phase"] == "live" && v["bridge"]["connected"] == true
+    });
+    let model = &lead_box.model;
+    // The line the owner's lead ran, as a `bash` call of the tool's command.
+    let line = format!("{LEAD_TOOL} onboarding.start; {LEAD_TOOL} requests");
+    let shell = lead_calls(&hub, model, "bash", &json!({ "command": line }));
+    assert!(
+        shell.contains("Onboarding runs")
+            && (shell.contains("request-log") || shell.contains("next:")),
+        "{shell}"
+    );
+    assert!(
+        !shell.contains("rule 0") && !shell.contains("exited with code"),
+        "{shell}"
+    );
+    // The same records through a direct call.
+    let start = json!({ "op": "onboarding.start" });
+    let direct = lead_calls(&hub, model, LEAD_TOOL, &start);
+    assert!(direct.contains("Onboarding already runs"), "{direct}");
+    let direct = lead_calls(&hub, model, LEAD_TOOL, &json!({ "op": "requests" }));
+    assert!(
+        direct.contains("request-log") || direct.contains("next:"),
+        "{direct}"
+    );
+    // The CLI stays refused in the lead's shell, and the refusal names the tool to use.
+    let cli = json!({ "command": "cataly lead send hi" });
+    let refused = lead_calls(&hub, model, "bash", &cli);
+    assert!(
+        refused.contains("rule 0") && refused.contains(LEAD_TOOL),
+        "{refused}"
+    );
+    let cell = json!({ "language": "js", "code": "console.log('EVAL' + '-RAN')" });
+    let eval = lead_calls(&hub, model, "eval", &cell);
+    assert!(
+        eval.contains("blocked by user policy") && !eval.contains("EVAL-RAN"),
+        "{eval}"
     );
     assert!(hub.stop().success());
 }

@@ -1292,3 +1292,48 @@ Review findings Safety 1, 3, 4, 5, 6 and Design 3, 12, 13.
   the two targets' files do not collide when the publish job merges the artifacts. The publish job
   adds `LICENSE`; both are listed in `SHA256SUMS` and uploaded with the other assets. Neither name
   matches `cataly-<version>-<target>`, so `install.sh` and `cataly update` still find one binary.
+
+# The lead's tool in its shell (FixLeadTool, 2026-11-26)
+
+## What failed
+
+On the owner's first run the lead could not record onboarding. OMP 19.1.1 offers an extension
+tool as a command of its embedded shell (`tools.commands`, on by default; `tools/bash.md` "Tool
+commands", `custom-tools.md`): a mounted tool is resolved after the shell's builtins and in-process
+utilities and before `PATH`, and `runToolCli()` runs it in OMP's process, not as a subprocess. The
+lead's tool was named `cataly`, the CLI's name, so `cataly --help` in its shell printed the tool's
+op list, and `cataly onboarding.start; cataly requests` met the bridge's `bash` veto, where rule 0
+cannot tell the tool command from the CLI and refused it. `eval` (`tool.cataly(...)`) is denied by
+the overlay, by design. The lead told the owner it could record nothing.
+
+## Fix
+
+- The lead's tool is `cataly_lead` (`hub::tool::LEAD_TOOL`); lanes keep `cataly_lane`. Neither
+  can be the CLI, so rule 0 keeps matching only the real `cataly` binary, and the CLI is no longer
+  hidden behind the tool command in the lead's shell.
+- The hub's shell veto passes a `bash` line that only runs the session's own tool as a tool
+  command (`lanes::shell::tool_only`): every segment's command word is exactly that name, and no
+  redirection, substitution or expansion appears outside single quotes (OMP's own condition for a
+  tool-only line). A lane's report whose text matches a deny rule therefore passes; a path, a
+  runner, an assignment or any other command on the line is judged as before. A subagent has no
+  tool (the name would reach `PATH` there), so its lines are always judged.
+- Rule 0's refusal for the lead names `cataly_lead`; the lead's guidance says every op is called
+  through `cataly_lead`, directly or as `cataly_lead <op> --flag value` in bash, and that the
+  `cataly` CLI runs only its read-only verbs there. Lane evidence counts a `bash` call of either
+  tool command as organising, like the CLI.
+
+## Tests
+
+- Contract (`CATALY_CONTRACT_OMP=1`): `tests/contract_session.rs`
+  `lead_tool_works_as_a_call_and_as_a_shell_command_in_stock_omp`. The fake model calls the tool as
+  `bash` with the owner's line (`cataly_lead onboarding.start; cataly_lead requests`) and directly
+  (`onboarding.start` answers "already runs", `requests`); `cataly lead send hi` in the lead's
+  `bash` gets rule 0 naming `cataly_lead`; `eval` gets OMP's "blocked by user policy". With the
+  tool name set to `cataly` and run against main 7d53196, the first step fails with the owner's
+  rule-0 refusal. The fake model now gives each `CALL` its own call ID (`call_named_<n>`): the hub
+  answers a call ID once, so a second call reusing one got the first call's answer.
+- Rust unit `lanes::shell` `only_the_sessions_own_tool_command_passes_as_a_tool_line`;
+  `tests/lanes.rs` `shell_rules_block_and_grants_are_one_attempt` (a lane report matching a deny
+  rule passes as a tool line; with a second command or by path it does not) and
+  `onboarding_consent_is_stored_and_writes_wait` (the lead's tool line passes, the CLI's refusal
+  names `cataly_lead`).
