@@ -184,6 +184,9 @@ command name for all six commands; `get_state` fields including `model`, `sessio
   read `ready`, negotiate v2 when offered, and send `get_state`, `goal get`, `set_ask_dialog`,
   `get_session_lease`, `set_host_tools []`; end input; 20 s total. The result is a feature set
   (`goals`, `ask_dialog`, `lease_rpc`, `v2_chunks`, ...) cached in memory. Session starts never spawn a probe.
+  A failed probe (an OMP that starts slowly just after an update, for one) is retried by itself after 5 s,
+  15 s and 45 s, then every 5 minutes, until one works; `status`, health and the sessions refusal name the
+  next try, and the lead starts as soon as a probe works.
 - **Below minimum**: no session starts; health is red with found and required versions. Jobs that need no
   session keep running.
 - **Unknown newer version**: allowed. Health shows "untested above X" until the nightly contract run passes on

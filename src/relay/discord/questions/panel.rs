@@ -10,6 +10,7 @@ use serde_json::{Map, Value, json};
 
 use super::super::form::{Field, FieldKind, Limits};
 use super::super::types::Press;
+use super::typed::{self, Words};
 use super::{Card, Kind, State, neutral};
 use crate::host::Runtime;
 use crate::host::dialogs::Question;
@@ -236,7 +237,7 @@ pub(super) fn layout(stamp: &str, items: &[Item], mark: &str) -> Option<Vec<Valu
 }
 
 /// The modal for the text items in `ids`, filled with the answers so far.
-fn modal(stamp: &str, items: &[Item], ids: &[usize], draft: &[Val]) -> Value {
+fn modal(stamp: &str, items: &[Item], ids: &[usize], draft: &[Val], words: &Words) -> Value {
     let rows: Vec<Value> = ids
         .iter()
         .filter_map(|n| {
@@ -263,12 +264,7 @@ fn modal(stamp: &str, items: &[Item], ids: &[usize], draft: &[Val]) -> Value {
                 input.insert("min_length".into(), json!(min.min(TEXT_MAX)));
             }
             if limits.number {
-                let range = format!(
-                    "a number from {} to {}",
-                    limits.min.as_deref().unwrap_or("any"),
-                    limits.max.as_deref().unwrap_or("any")
-                );
-                input.insert("placeholder".into(), json!(cut(&range, 100)));
+                input.insert("placeholder".into(), json!(cut(&words.range(limits), 100)));
             }
             if let Some(Val::Text(t)) = draft.get(*n) {
                 input.insert("value".into(), json!(cut(t, TEXT_MAX)));
@@ -280,7 +276,7 @@ fn modal(stamp: &str, items: &[Item], ids: &[usize], draft: &[Val]) -> Value {
 }
 
 /// Checks each item and the required ones (DISC-OUT req. 72); every problem is named.
-fn problems(items: &[Item], draft: &[Val]) -> Vec<String> {
+fn problems(items: &[Item], draft: &[Val], words: &Words) -> Vec<String> {
     let mut out = Vec::new();
     for (item, val) in items.iter().zip(draft) {
         let name = neutral(label(item));
@@ -289,10 +285,10 @@ fn problems(items: &[Item], draft: &[Val]) -> Vec<String> {
                 Item::Choice { required: true, .. } | Item::Text { required: true, .. },
                 Val::Unset,
             ) => {
-                out.push(format!("{name} is required"));
+                out.push(words.required(&name));
             }
             (Item::Choice { required: true, .. }, Val::Picks(p)) if p.is_empty() => {
-                out.push(format!("{name} is required"));
+                out.push(words.required(&name));
             }
             (
                 Item::Text {
@@ -301,8 +297,8 @@ fn problems(items: &[Item], draft: &[Val]) -> Vec<String> {
                 Val::Text(t),
             ) => {
                 if *required && t.trim().is_empty() {
-                    out.push(format!("{name} is required"));
-                } else if let Err(e) = limits.check(&name, t) {
+                    out.push(words.required(&name));
+                } else if let Err(e) = words.check(&name, limits, t) {
                     out.push(e);
                 }
             }
@@ -312,9 +308,14 @@ fn problems(items: &[Item], draft: &[Val]) -> Vec<String> {
     out
 }
 
-/// The answer OMP takes for a draft, or the problems to show the owner.
-pub(super) fn answer(kind: &Kind, items: &[Item], draft: &[Val]) -> Result<Value, Vec<String>> {
-    let problems = problems(items, draft);
+/// The answer OMP takes for a draft, or the problems to show the owner in `words`' language.
+pub(super) fn answer(
+    kind: &Kind,
+    items: &[Item],
+    draft: &[Val],
+    words: &Words,
+) -> Result<Value, Vec<String>> {
+    let problems = problems(items, draft, words);
     if !problems.is_empty() {
         return Err(problems);
     }
@@ -408,6 +409,7 @@ impl<T: Runtime> Intake<T> {
                 .cards
                 .set(&card.dialog, n, Val::Picks(picks.unwrap_or_default()));
         }
+        let words = typed::words(self.language);
         if let Some(list) = action.strip_prefix("m:") {
             let wanted = ids(list);
             if wanted.is_empty()
@@ -420,7 +422,7 @@ impl<T: Runtime> Intake<T> {
                     .await;
             }
             let draft = self.cards.draft(&card.dialog);
-            self.reply(&press, modal(&card.stamp, &items, &wanted, &draft))
+            self.reply(&press, modal(&card.stamp, &items, &wanted, &draft, &words))
                 .await;
             return;
         }
@@ -436,7 +438,7 @@ impl<T: Runtime> Intake<T> {
                     .iter()
                     .find(|(id, _)| *id == format!("i{n}"))
                     .map_or_default(|(_, v)| v.clone());
-                match limits.check(&neutral(label), &given) {
+                match words.check(&neutral(label), limits, &given) {
                     Ok(()) => self.cards.set(
                         &card.dialog,
                         *n,
@@ -452,11 +454,7 @@ impl<T: Runtime> Intake<T> {
             if errors.is_empty() {
                 self.reply(&press, json!({"type": 6})).await;
             } else {
-                self.tell(
-                    &press,
-                    &format!("Not taken: {}. Use Fill in again.", errors.join("; ")),
-                )
-                .await;
+                self.tell(&press, &words.not_taken(&errors)).await;
             }
             return;
         }
@@ -468,11 +466,10 @@ impl<T: Runtime> Intake<T> {
         let Some(card) = self.cards.take(&card.dialog) else {
             return;
         };
-        match answer(&card.kind, &items, &card.draft) {
+        match answer(&card.kind, &items, &card.draft, &words) {
             Err(problems) => {
                 self.cards.reopen(&card.dialog);
-                self.tell(&press, &format!("Not submitted: {}.", problems.join("; ")))
-                    .await;
+                self.tell(&press, &words.not_submitted(&problems)).await;
             }
             Ok(value) => {
                 if !self.reply(&press, json!({"type": 6})).await {

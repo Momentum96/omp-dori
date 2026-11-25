@@ -527,7 +527,7 @@ fn typed_answer(card: &Card, text: &str, words: &typed::Words) -> Result<Value, 
             limits,
         } => {
             if *free {
-                limits.check(&neutral(field), text)?;
+                words.check(&neutral(field), limits, text)?;
                 return Ok(form_data(field, hidden, json!(text)));
             }
             let items: Vec<&str> = if *multi {
@@ -1268,7 +1268,7 @@ impl<T: Runtime> Intake<T> {
         let items = card.items.clone().unwrap_or_default();
         let draft = self.cards.draft(&card.dialog);
         let ready = !draft.contains(&panel::Val::Unset)
-            && panel::answer(&card.kind, &items, &draft).is_ok();
+            && panel::answer(&card.kind, &items, &draft, words).is_ok();
         if !ready {
             let name = items.get(n).map_or("", panel::label);
             self.correct(card, row, &words.recorded(name)).await;
@@ -1277,7 +1277,7 @@ impl<T: Runtime> Intake<T> {
         let Some(card) = self.cards.take(&card.dialog) else {
             return true;
         };
-        match panel::answer(&card.kind, &items, &card.draft) {
+        match panel::answer(&card.kind, &items, &card.draft, words) {
             Ok(value) => {
                 let done = format!("{}\n\n{}", card.body, words.answered);
                 self.submit_value(card, value, done).await;
@@ -1391,21 +1391,114 @@ mod tests {
         assert_eq!(rows[0]["components"][0]["custom_id"], "cy:s:s:0");
         assert_eq!(rows[1]["components"][0]["custom_id"], "cy:s:m:1-2");
         assert_eq!(rows[1]["components"][1]["custom_id"], "cy:s:go");
-        let missing = panel::answer(&c.kind, &items, &c.draft).unwrap_err();
-        assert!(
-            missing.iter().any(|p| p.contains("is required")),
-            "{missing:?}"
+        let (en, ko) = (
+            typed::words(Language::English),
+            typed::words(Language::Korean),
+        );
+        let both =
+            |c: &Card| [&en, &ko].map(|w| panel::answer(&c.kind, &items, &c.draft, w).unwrap_err());
+        assert_eq!(
+            both(&c),
+            [vec!["Note is required"], vec!["Note: 꼭 답해 주세요"]]
         );
         c.draft[1] = panel::Val::Text("toolong".into());
-        assert!(panel::answer(&c.kind, &items, &c.draft).unwrap_err()[0].contains("characters"));
+        assert_eq!(
+            both(&c),
+            [
+                vec!["Note takes 0 to 5 characters"],
+                vec!["Note: 0자에서 5자까지 써 주세요"]
+            ]
+        );
         c.draft[1] = panel::Val::Text("ship".into());
         c.draft[2] = panel::Val::Text("9".into());
-        assert!(panel::answer(&c.kind, &items, &c.draft).unwrap_err()[0].contains("from 1 to 3"));
+        assert_eq!(
+            both(&c),
+            [
+                vec!["Count takes a number from 1 to 3"],
+                vec!["Count: 1부터 3까지의 숫자로 답해 주세요"]
+            ]
+        );
+        c.draft[2] = panel::Val::Text("x".into());
+        let [en_problems, ko_problems] = both(&c);
+        assert_eq!(
+            [
+                en.not_submitted(&en_problems),
+                ko.not_submitted(&ko_problems)
+            ],
+            [
+                "Not submitted: Count takes a number.",
+                "제출하지 못했어요: Count: 숫자로 답해 주세요."
+            ]
+        );
         c.draft[2] = panel::Val::Text("2".into());
         c.draft[0] = panel::Val::Picks(vec![1]);
         assert_eq!(
-            panel::answer(&c.kind, &items, &c.draft).unwrap(),
+            panel::answer(&c.kind, &items, &c.draft, &ko).unwrap(),
             json!({"data": {"channel": "b", "note": "ship", "count": "2", "k": "v"}})
+        );
+    }
+
+    /// The modal's number placeholder and a refused Fill in follow `[hub] language`, open bounds
+    /// included.
+    #[test]
+    fn field_limit_texts_follow_the_owners_language() {
+        let (en, ko) = (
+            typed::words(Language::English),
+            typed::words(Language::Korean),
+        );
+        let limits = |min: Option<&str>, max: Option<&str>| super::super::form::Limits {
+            number: true,
+            min: min.map(String::from),
+            max: max.map(String::from),
+            ..Default::default()
+        };
+        let ranges = |w: &typed::Words| {
+            [
+                w.range(&limits(Some("1"), Some("3"))),
+                w.range(&limits(Some("2"), None)),
+                w.range(&limits(None, Some("9"))),
+                w.range(&limits(None, None)),
+            ]
+        };
+        assert_eq!(
+            ranges(&en),
+            [
+                "a number from 1 to 3",
+                "a number from 2 to any",
+                "a number from any to 9",
+                "a number from any to any"
+            ]
+        );
+        assert_eq!(
+            ranges(&ko),
+            [
+                "1부터 3까지의 숫자",
+                "2 이상의 숫자",
+                "9 이하의 숫자",
+                "숫자"
+            ]
+        );
+        let text = super::super::form::Limits {
+            min_len: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(
+            en.check("Name", &text, "a"),
+            Err("Name takes 2 to any number of characters".into())
+        );
+        assert_eq!(
+            ko.check("Name", &text, "a"),
+            Err("Name: 2자 이상 써 주세요".into())
+        );
+        assert_eq!(ko.check("Name", &text, "ab"), Ok(()));
+        let problems = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            en.not_taken(&problems),
+            "Not taken: a; b. Use Fill in again."
+        );
+        assert_eq!(
+            ko.not_taken(&problems),
+            "받지 못했어요: a; b. Fill in을 다시 눌러 주세요."
         );
     }
 
@@ -1428,11 +1521,11 @@ mod tests {
             *slot = panel::Val::Picks(vec![n % 2]);
         }
         assert!(
-            panel::answer(&c.kind, &items, &c.draft).is_err(),
+            panel::answer(&c.kind, &items, &c.draft, &typed::words(Language::English)).is_err(),
             "f unanswered"
         );
         c.draft[5] = panel::Val::Text("because".into());
-        let a = panel::answer(&c.kind, &items, &c.draft).unwrap();
+        let a = panel::answer(&c.kind, &items, &c.draft, &typed::words(Language::English)).unwrap();
         assert_eq!(
             a["answers"][1],
             json!({"id": "b", "selectedOptions": ["B"]})
@@ -1505,7 +1598,7 @@ mod tests {
         c.draft[1] = panel::Val::Picks(vec![1]);
         assert_eq!(typed::part_of(&c, None), Some(2), "the only open part");
         c.draft[2] = panel::Val::Text("because".into());
-        let a = panel::answer(&c.kind, c.items.as_deref().unwrap(), &c.draft).unwrap();
+        let a = panel::answer(&c.kind, c.items.as_deref().unwrap(), &c.draft, &en).unwrap();
         assert_eq!(a["answers"][2]["customInput"], "because");
         // A form's choice field takes only its options.
         let html = r#"<form><p>Release</p><fieldset><legend>Channel</legend><label><input type="radio" name="channel" value="s"> Stable</label><label><input type="radio" name="channel" value="b"> Beta</label></fieldset><label>Note <input type="text" name="note" maxlength="5"></label></form>"#;

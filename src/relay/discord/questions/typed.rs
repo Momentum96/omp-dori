@@ -1,7 +1,8 @@
-//! Typed answers to question cards (DISC-OUT req. 70-73): the texts around them in the owner's
-//! language (`[hub] language`), and a typed answer to one part of a card with several questions
-//! or fields.
+//! Typed answers to question cards (DISC-OUT req. 70-73): the texts around them and the field-limit
+//! messages (number ranges, text lengths, required fields) in the owner's language
+//! (`[hub] language`), and a typed answer to one part of a card with several questions or fields.
 
+use super::super::form::{Limits, Misfit};
 use super::panel::{Item, Val};
 use super::{Card, Kind, neutral, pick};
 use crate::config::Language;
@@ -21,6 +22,13 @@ pub(super) struct Words {
     retry: [&'static str; 2],
     number: [&'static str; 2],
     recorded: [&'static str; 2],
+    /// A required part left without an answer, around its name.
+    required: [&'static str; 2],
+    /// Fill in answers that were refused, around the problems.
+    not_taken: [&'static str; 2],
+    /// Submit refused, around the problems.
+    not_submitted: [&'static str; 2],
+    language: Language,
 }
 
 pub(super) const fn words(language: Language) -> Words {
@@ -37,6 +45,10 @@ pub(super) const fn words(language: Language) -> Words {
                 "",
                 "에 대한 답을 받았어요. 나머지를 채운 뒤 Submit을 눌러 주세요.",
             ],
+            required: ["", ": 꼭 답해 주세요"],
+            not_taken: ["받지 못했어요: ", ". Fill in을 다시 눌러 주세요."],
+            not_submitted: ["제출하지 못했어요: ", "."],
+            language,
         },
         Language::English => Words {
             hint: "Reply to this message with a number or your answer.",
@@ -47,6 +59,10 @@ pub(super) const fn words(language: Language) -> Words {
             retry: ["That answer was not taken: ", ". Please try again."],
             number: ["answer with a number from 1 to ", ""],
             recorded: ["Taken for ", "; fill in the rest, then press Submit."],
+            required: ["", " is required"],
+            not_taken: ["Not taken: ", ". Use Fill in again."],
+            not_submitted: ["Not submitted: ", "."],
+            language,
         },
     }
 }
@@ -62,6 +78,67 @@ impl Words {
 
     pub(super) fn recorded(&self, part: &str) -> String {
         format!("{}{}{}", self.recorded[0], neutral(part), self.recorded[1])
+    }
+
+    pub(super) fn required(&self, name: &str) -> String {
+        format!("{}{name}{}", self.required[0], self.required[1])
+    }
+
+    pub(super) fn not_taken(&self, problems: &[String]) -> String {
+        let [before, after] = self.not_taken;
+        format!("{before}{}{after}", problems.join("; "))
+    }
+
+    pub(super) fn not_submitted(&self, problems: &[String]) -> String {
+        let [before, after] = self.not_submitted;
+        format!("{before}{}{after}", problems.join("; "))
+    }
+
+    /// Checks `value` against a field's limits; a misfit names the field `name`.
+    pub(super) fn check(&self, name: &str, limits: &Limits, value: &str) -> Result<(), String> {
+        limits
+            .check(value)
+            .map_err(|misfit| self.misfit(name, limits, misfit))
+    }
+
+    fn misfit(&self, name: &str, limits: &Limits, misfit: Misfit) -> String {
+        let least = limits.min_len.unwrap_or(0);
+        match (self.language, misfit) {
+            (Language::English, Misfit::Length) => format!(
+                "{name} takes {least} to {} characters",
+                limits
+                    .max_len
+                    .map_or_else(|| "any number of".into(), |m| m.to_string())
+            ),
+            (Language::Korean, Misfit::Length) => match limits.max_len {
+                Some(most) => format!("{name}: {least}자에서 {most}자까지 써 주세요"),
+                None => format!("{name}: {least}자 이상 써 주세요"),
+            },
+            (Language::English, Misfit::NotNumber) => format!("{name} takes a number"),
+            (Language::Korean, Misfit::NotNumber) => format!("{name}: 숫자로 답해 주세요"),
+            (Language::English, Misfit::Range) => format!("{name} takes {}", self.range(limits)),
+            (Language::Korean, Misfit::Range) => {
+                format!("{name}: {}로 답해 주세요", self.range(limits))
+            }
+        }
+    }
+
+    /// The numbers a field takes, as its placeholder and in its misfit.
+    pub(super) fn range(&self, limits: &Limits) -> String {
+        let (min, max) = (limits.min.as_deref(), limits.max.as_deref());
+        match self.language {
+            Language::English => format!(
+                "a number from {} to {}",
+                min.unwrap_or("any"),
+                max.unwrap_or("any")
+            ),
+            Language::Korean => match (min, max) {
+                (Some(low), Some(high)) => format!("{low}부터 {high}까지의 숫자"),
+                (Some(low), None) => format!("{low} 이상의 숫자"),
+                (None, Some(high)) => format!("{high} 이하의 숫자"),
+                (None, None) => "숫자".into(),
+            },
+        }
     }
 }
 
@@ -105,7 +182,7 @@ pub(super) fn part_value(card: &Card, n: usize, text: &str, words: &Words) -> Re
             }
         }
         Some(Item::Text { label, limits, .. }) => {
-            limits.check(&neutral(label), text)?;
+            words.check(&neutral(label), limits, text)?;
             Ok(Val::Text(text.to_string()))
         }
         None => Err(words.which.into()),

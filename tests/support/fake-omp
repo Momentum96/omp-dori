@@ -21,6 +21,9 @@
 #                               tool sends, and the turn ends when it is answered: "picked <choice>";
 #                               with omp-data/approve a message containing APPROVE opens the approval
 #                               select stock OMP sends under always-ask, ended the same way.
+#   with omp-data/slow-start     the first rpc-ui start answers nothing until its input closes, then
+#                               exits 1 (a start slower than the probe allows, as after an OMP update
+#                               under load); the fixture is used up and later starts are normal.
 dir=$(cd "$(dirname "$0")" && pwd)/omp-data
 
 # One turn of the `turns` fixture for the command line $1 with ID $2.
@@ -87,6 +90,10 @@ finish_quiet() {
 }
 
 rpc() {
+    if mv "$dir/slow-start" "$dir/slow-start.used" 2>/dev/null; then
+        cat > /dev/null
+        exit 1
+    fi
     model=fake/primary
     sessions=
     resume=
