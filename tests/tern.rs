@@ -319,10 +319,12 @@ fn a_missing_tern_executable_refuses_starts_with_an_install_hint() {
     assert!(text.contains("install Tern"), "{text}");
 }
 
-/// A transcript OMP could resume: the session header in the lead's session directory.
+/// A transcript OMP could resume: the session header in the lead's session directory, spelled as
+/// OMP reports it, below the real state directory the hub hands it (`/tmp` is `/private/tmp` on
+/// macOS).
 fn lead_transcript(hub: &TestHub, work: &Path, id: &str) -> PathBuf {
-    let file = hub
-        .state()
+    let file = std::fs::canonicalize(hub.state())
+        .unwrap()
         .join("sessions/lead")
         .join(format!("2026-11-25T10-00-00-000Z_{id}.jsonl"));
     let header = json!({ "type": "session", "version": 3, "id": id,

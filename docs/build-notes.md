@@ -936,3 +936,49 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   declares `cmake_minimum_required` below 3.5, which the runners' CMake 4 refuses.
   `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` under `[env]`, so local builds and
   CI build it the same way (CMake 3.x ignores the variable).
+
+# CI covers the voice build (CiVoice, 2026-11-25)
+
+## What CI runs
+
+- Each build job (linux-x64, darwin-arm64) keeps the default-feature steps and adds clippy and
+  tests with `--workspace --features voice`. `--workspace` matters: without it Cargo builds the
+  `cataly-voice` crate only as a dependency, so its own tests (`crates/voice/tests/transports.rs`)
+  and unit tests were never linted or run. The voice release build's size is printed beside the
+  default one; the idle-memory figure stays on the default build.
+- Tests run with `--no-fail-fast`, and the voice and Bun test steps run even when an earlier test
+  step failed, so one run shows every failure on a platform.
+- The bridge tests run with `bun test` in `extension/`, Bun 1.4.0 from `oven-sh/setup-bun` pinned
+  by commit.
+- The nightly job (and a manual dispatch) runs every contract binary, `--test 'contract*'`, in
+  release, instead of `contract` alone: `contract_tern` and the other stock-OMP suites had never run
+  on CI.
+- The job timeout is 90 minutes: two feature sets, each tested and built in release.
+
+## First run (45598912381): two macOS failures
+
+- `tern::a_tern_lead_resumes_in_tern_whatever_the_config_says`, both feature sets: "lead starts
+  fresh: the transcript … did not verify for an exact resume". The test plays the bridge and
+  reported the transcript under `TestHub::state()` as spelled (`/tmp/…`), while the hub hands OMP
+  the real state directory (`/private/tmp/…` on macOS, since the FixMacos change) and the exact
+  resume check refuses any other spelling. The test was wrong, not the hub: OMP reports the path
+  under the directory it was given. The fixture now writes and reports the transcript below the
+  canonical state directory.
+- `cataly-voice` `check8_transports_agree` (first run of the crate's tests on CI): "continued once,
+  after every call", 2 continuations instead of 1. **A real bug in the session:** after a tool
+  answer it asked the backend to continue (`response.create`) as soon as no call was open, even
+  while the backend's response was still running and could still name more calls. When the first
+  call was answered before the later calls of the same response arrived, the backend got a
+  continuation per gap. The session now continues only when every call is answered and the
+  response has completed; calls answered while it runs are continued once, at its completion. The
+  fake realtime server's new `call_gap_ms` spaces the calls and the completion, and `pass_outcomes`
+  (checks 4 and 8, both transports) uses 300 ms: before the fix that run gave 4 continuations on
+  Linux over both transports, after it 1.
+
+## Local runs
+
+- A `CARGO_TARGET_DIR` shared with another checkout is unsafe for the hub's integration tests:
+  they run `target/debug/cataly`, which a concurrent build of the other checkout can replace with a
+  binary built without `voice`. Two local runs of `tests/voice_hub.rs` failed in every case that
+  way and passed with the same code once nothing else built [inference from the pattern; the
+  replaced binary was not captured].

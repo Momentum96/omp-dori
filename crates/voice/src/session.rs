@@ -718,7 +718,12 @@ impl<H: VoiceHost> Session<H> {
             "response.completed" | "response.done" => {
                 d.responding = false;
                 if d.open_calls.is_empty() {
-                    d.finished = Some(now);
+                    if d.answered > 0 {
+                        // Every call of this response was answered while it still ran.
+                        self.resume(&delegation);
+                    } else {
+                        d.finished = Some(now);
+                    }
                 }
             }
             "response.failed" | "response.incomplete" | "response.cancelled" => {
@@ -844,13 +849,21 @@ impl<H: VoiceHost> Session<H> {
         if let Some(d) = self.delegations.iter_mut().find(|d| d.id == delegation) {
             d.open_calls.retain(|(c, _)| c != call_id);
             d.answered += 1;
-            if d.open_calls.is_empty() {
-                resume = true;
-                d.answered = 0;
-                d.responding = true;
-            }
+            // A response still running may name more calls; it continues once, after its end.
+            resume = d.open_calls.is_empty() && !d.responding;
         }
-        if resume && self.state == State::Live {
+        if resume {
+            self.resume(delegation);
+        }
+    }
+
+    /// Asks the backend to continue a delegation whose calls are all answered.
+    fn resume(&mut self, delegation: &str) {
+        if let Some(d) = self.delegations.iter_mut().find(|d| d.id == delegation) {
+            d.answered = 0;
+            d.responding = true;
+        }
+        if self.state == State::Live {
             let id = self.id("continue");
             self.send(json!({"type": "response.create", "event_id": id,
                 "delegation_id": delegation}));
