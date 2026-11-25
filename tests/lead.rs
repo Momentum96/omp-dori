@@ -187,3 +187,38 @@ fn request_id_sends_commit_before_the_write() {
     assert_eq!(entries, 1, "written once");
     assert!(hub.stop().success());
 }
+
+/// The hub works from the real location of its state directory. On macOS `/tmp` and `/var/folders`
+/// sit behind a symlink into `/private`; a transcript path recorded through that symlink differs
+/// from its real location, the exact-resume check refused it, and the lead started a fresh session
+/// after every hub restart. Here the state directory is reached through a symlink on any system.
+#[test]
+fn lead_resumes_through_a_symlinked_state_directory() {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        omp.display(),
+        work.display()
+    ));
+    let link = hub.root.join("state-link");
+    std::os::unix::fs::symlink(hub.root.join("state"), &link).unwrap();
+    hub.env.push(("XDG_STATE_HOME".into(), link));
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    hub.crash();
+    hub.start();
+    let second = live(&hub, &first["session"]["pid"]);
+    assert_eq!(
+        second["session"]["session_id"], first["session"]["session_id"],
+        "{second}"
+    );
+    assert_eq!(
+        second["session"]["session_file"],
+        first["session"]["session_file"]
+    );
+    assert!(hub.stop().success());
+}

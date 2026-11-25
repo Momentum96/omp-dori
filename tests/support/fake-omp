@@ -45,6 +45,9 @@ turn() {
         touch "$dir/busy"
         (
             sleep 2
+            # Stock OMP stops streaming before it emits agent_end, so a readback the end events
+            # trigger shows the session idle, unless follow-ups wait to run next.
+            [ -f "$dir/queued" ] || rm -f "$dir/busy"
             finish "$answer" "$2"
             rm -f "$dir/busy"
             if [ -f "$dir/queued" ]; then

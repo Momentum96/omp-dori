@@ -377,7 +377,11 @@ fn home_backup_setup_and_restore() {
 
     // Snapshot: the first tick pushes to a local bare repository.
     let bare = hub.root.join("bare.git");
-    git(&hub.root, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    // The backup pushes `main`; the bare repository's HEAD must name it whatever git's default is.
+    git(
+        &hub.root,
+        &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+    );
     git(
         &state,
         &["remote", "set-url", "origin", bare.to_str().unwrap()],

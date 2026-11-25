@@ -286,6 +286,18 @@ fn crash_after_arrival_delivers_once() {
     assert!(hub.stop().success());
 }
 
+/// Waits until the process `pid` has ended (a zombie counts as ended).
+fn gone(hub: &TestHub, pid: &str) {
+    hub.until(WAIT, || {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&ps.stdout);
+        (stat.trim().is_empty() || stat.contains('Z')).then_some(())
+    });
+}
+
 /// Decision 15: the lead's wake is written while its records commit, and a live Discord message is
 /// handed off while its arrival commits. A crash at each point of that order (before the commit,
 /// after the prompt write with the commit held back, the same with the arrival held back too, after
@@ -308,11 +320,15 @@ fn crash_at_each_wake_point_delivers_once() {
         hub.env.push(("CATALY_FAULT".into(), PathBuf::from(point)));
         hub.start();
         ready(&hub);
-        let file = session_file(&hub);
+        let lead = hub.json(&["lead", "status", "--json"]);
+        let file = PathBuf::from(lead["session"]["session_file"].as_str().unwrap());
         let id = 800_000_000_000_000_051 + n as u64;
         fake.say(FakeDiscord::message(CH, id, OWNER, "exactly once"));
         let exit = hub.wait_exit(WAIT);
         assert!(!exit.success(), "{point}: the fault point ended the hub");
+        // OMP answers a prompt before it appends the prompt's entry to its session file, so the
+        // file is final only once the lead's OMP process is gone.
+        gone(&hub, &lead["session"]["pid"].to_string());
         let before = requests_in(&file).len();
         if point == "arrival_after_write" {
             assert_eq!(

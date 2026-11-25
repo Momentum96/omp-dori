@@ -329,7 +329,8 @@ impl TestHub {
 
 /// Stops a still-running hub with TERM first so it closes its OMP children (a KILL would orphan them
 /// with the sandbox as their home), then KILL after 10 s; then removes the whole sandbox, including
-/// any OMP agent directory under it. Runs on test failure too.
+/// any OMP agent directory under it. Runs on test failure too, and then first prints the end of the
+/// hub log, so a failure on CI shows what the hub did.
 impl Drop for TestHub {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
@@ -342,6 +343,17 @@ impl Drop for TestHub {
             }
             let _ = child.kill();
             let _ = child.wait();
+        }
+        if std::thread::panicking() {
+            let log =
+                std::fs::read_to_string(self.state().join("logs/hub.log")).unwrap_or_default();
+            let lines: Vec<&str> = log.lines().collect();
+            let tail = &lines[lines.len().saturating_sub(200)..];
+            eprintln!(
+                "---- hub.log (last {} lines)\n{}",
+                tail.len(),
+                tail.join("\n")
+            );
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }

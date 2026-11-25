@@ -60,6 +60,9 @@ impl Layout {
 
     /// The layout of the running binary when it runs from a version folder (so an installed
     /// binary acts on its own program folder whatever the environment says), else the default.
+    /// The binary's folder is found through its real path; when that is the default folder under
+    /// another spelling (on macOS `/tmp` and `/var/folders` sit behind a symlink into `/private`),
+    /// the default spelling is kept, since the links were written with it.
     pub(crate) fn of_running() -> Result<Self, String> {
         let exe = std::env::current_exe()
             .and_then(fs::canonicalize)
@@ -69,7 +72,13 @@ impl Layout {
                 (versions.file_name()? == "versions")
                     .then(|| versions.parent().map(Path::to_path_buf))?
             });
-        Self::from_env(exe.as_deref())
+        let default = Self::from_env(None)?;
+        match exe {
+            Some(root) if fs::canonicalize(&default.root).ok().as_ref() != Some(&root) => {
+                Self::from_env(Some(&root))
+            }
+            _ => Ok(default),
+        }
     }
 
     pub(crate) fn versions(&self) -> PathBuf {

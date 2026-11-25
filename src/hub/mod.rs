@@ -210,12 +210,22 @@ fn refuse(message: &str) {
 
 /// `cataly hub`: runs until a signal or a fatal condition; returns the process exit status.
 pub(crate) fn run(paths: &Paths) -> ExitCode {
-    for dir in [
-        &paths.state_dir,
-        &paths.logs_dir,
-        &paths.files_dir,
-        &paths.runtime_dir,
-    ] {
+    if let Err(e) = ensure_private_dir(&paths.state_dir) {
+        refuse(&format!("cataly hub: {e}"));
+        return ExitCode::from(exit::FAILED);
+    }
+    // Every state path the hub records or hands to OMP is the real one (no symlink on the way).
+    let paths = match paths.real_state() {
+        Ok(real) => real,
+        Err(e) => {
+            refuse(&format!(
+                "cataly hub: state directory {}: {e}",
+                paths.state_dir.display()
+            ));
+            return ExitCode::from(exit::FAILED);
+        }
+    };
+    for dir in [&paths.logs_dir, &paths.files_dir, &paths.runtime_dir] {
         if let Err(e) = ensure_private_dir(dir) {
             refuse(&format!("cataly hub: {e}"));
             return ExitCode::from(exit::FAILED);
@@ -295,7 +305,7 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
-    let code = runtime.block_on(serve(paths, config, store));
+    let code = runtime.block_on(serve(&paths, config, store));
     runtime.shutdown_timeout(Duration::from_secs(1));
     ExitCode::from(code)
 }
