@@ -409,9 +409,12 @@ Descriptors, threads and tasks are level: no child, connection or task outlives 
 20 lead restarts, 40 lane cycles and 3 reconnects. The fixed structures are small per entry (a
 bridge link, a turn lock, one lane's call IDs), so they do not move these slopes; they grew with
 lanes and sessions over the hub's life. The anonymous growth of about 10 MiB in 2000 iterations is
-the same with and without the fixes and flattens in both runs; it is not attributed yet. The
-6000-iteration run and the planner run with `MALLOC_ARENA_MAX=1`, which would separate the
-allocator's arenas from retained memory, were not finished when the budget ran out.
+the same with and without the fixes. A 6000-iteration run with the fixes (480 Discord messages,
+5520 `lead send` turns, 60 lead restarts, 120 lane cycles, 2699 job ticks, 350 s): anonymous RSS
+3.5, 7.9, 11.9, 13.6, 14.4, 14.6, 15.5, 16.5, 17.5, 17.9, 18.4 MiB every 600 iterations; slope
+after warm-up +1.2 MiB per 1000 iterations, still falling but not flat; descriptors 30, threads 13,
+tasks 46 throughout; `retained` bridge links 64 (the cap), spend readers 0, turn locks 1. The
+remaining slope is not attributed (each turn adds store rows, as in the planner run below).
 
 **The planner's late rise.** Main, 100 items, no lead, sampled every 500 passes (anonymous RSS):
 4.88 MiB at 505, 6.35 at 2,005, flat 6.46-6.49 from 2,505 to 5,005, then 6.60, 6.77, 6.99, 7.22,
