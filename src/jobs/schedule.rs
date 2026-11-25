@@ -491,6 +491,7 @@ mod tests {
         let cfg = "[jobs.o]\nkind = \"once\"\nat = \"2020-01-01T00:00:00Z\"\nargv = [\"true\"]\ncwd = \"/\"\n\
                    [jobs.p]\nkind = \"probe\"\nevery = \"1h\"\nargv = [\"echo\", \"x\"]\ncwd = \"/\"\n";
         let (ctx, stop, _dir) = ctx_with(cfg, "sched-late");
+        let before = now_ms();
         let task = tokio::spawn(scheduler(Arc::clone(&ctx)));
         let mut kinds = Vec::new();
         for _ in 0..200 {
@@ -511,10 +512,33 @@ mod tests {
         assert_eq!(kinds, ["probe.fired", "run.skipped"]);
         let once = ctx.store.read(|r| r.job("o")).await.unwrap().unwrap();
         assert!(once.consumed && once.skipped == 1);
-        // The probe's next run is one interval after it finished.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let probe = ctx.store.read(|r| r.job("p")).await.unwrap().unwrap();
-        assert!(probe.next_due_ms.unwrap() > now_ms() + 3_500_000);
+        // The probe's next run is one interval after it finished. The finish reaches the
+        // scheduler after the fired event, so wait for the reschedule; the creation due time is
+        // below `before + 1h`.
+        let hour = 3_600_000;
+        let mut next = None;
+        for _ in 0..500 {
+            next = ctx
+                .store
+                .read(|r| r.job("p"))
+                .await
+                .unwrap()
+                .unwrap()
+                .next_due_ms;
+            if next.is_some_and(|n| n >= before + hour) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let next = next.unwrap();
+        assert!(
+            next >= before + hour,
+            "rescheduled one interval after the run"
+        );
+        assert!(
+            next <= now_ms() + hour,
+            "not later than one interval from now"
+        );
         stop.send(true).unwrap();
         task.await.unwrap().unwrap();
     }
