@@ -42,6 +42,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 http-body-util = { version = "0.1.5", default-features = false }
 hyper = { version = "1.12", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
@@ -54,6 +55,7 @@ serde = { version = "1.0.229", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "process", "time", "signal", "sync", "io-util", "macros"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 toml = { version = "0.9.12", default-features = false, features = ["std", "parse", "serde"] }
 unicode-width = { version = "0.2.2", default-features = false }
 webpki-roots = { version = "1.0.12", default-features = false }

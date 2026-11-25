@@ -80,7 +80,7 @@ impl TestHub {
         let mut cmd = Command::new(BIN);
         cmd.args(args)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", path_without_omp())
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -298,14 +298,34 @@ impl TestHub {
     }
 }
 
+/// Stops a still-running hub with TERM first so it closes its OMP children (a KILL would orphan them
+/// with the sandbox as their home), then KILL after 10 s; then removes the whole sandbox, including
+/// any OMP agent directory under it. Runs on test failure too.
 impl Drop for TestHub {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
+            let _ = Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             let _ = child.kill();
             let _ = child.wait();
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// The test's PATH without any directory holding an `omp`: a hub whose config names no OMP must not
+/// find and run the user's installed one (it would probe it, unpack its native module into the
+/// sandbox home and fetch model lists from the network). Contract tests name stock OMP by its full
+/// path in `[omp] path`.
+pub fn path_without_omp() -> std::ffi::OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::env::split_paths(&path).filter(|dir| !dir.join("omp").exists()))
+        .unwrap_or_default()
 }
 
 /// A probe job section.

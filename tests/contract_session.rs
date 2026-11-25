@@ -54,6 +54,13 @@ struct Sandbox {
     model: FakeModel,
 }
 
+/// The whole profile (agent directory, sessions, home) goes with the sandbox, also when a test fails.
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
 impl Sandbox {
     fn new(tag: &str) -> Self {
         let root = std::env::temp_dir().join(format!("cataly-omp-{tag}-{}", std::process::id()));
@@ -133,6 +140,14 @@ struct Rpc {
     next: u32,
     /// Every frame read so far.
     frames: Vec<Value>,
+}
+
+/// A test that fails mid-conversation must not leave OMP running in the sandbox.
+impl Drop for Rpc {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Rpc {
@@ -312,7 +327,6 @@ fn rpc_contract_against_stock_omp() {
     );
     resumed.close();
     assert_ne!(sandbox.model.seen().len(), 0);
-    let _ = std::fs::remove_dir_all(&sandbox.root);
 }
 
 fn lead_hub(sandbox: &Sandbox, model: &str, extra: &str) -> TestHub {
@@ -405,7 +419,6 @@ fn lead_end_to_end_and_resume() {
     let refused = hub.cli(&["lead", "start"]);
     assert!(!refused.status.success());
     assert!(hub.stop().success());
-    let _ = std::fs::remove_dir_all(&sandbox.root);
 }
 
 /// Acceptance check 9 with stock OMP: a usage-limited model falls back along the owner's chain.
@@ -459,5 +472,4 @@ fn lead_falls_back_along_the_owner_chain() {
     assert_eq!(fallbacks[0]["urgent"], false);
     assert!(sandbox.model.seen().iter().any(|m| m == "backup"));
     assert!(hub.stop().success());
-    let _ = std::fs::remove_dir_all(&sandbox.root);
 }

@@ -236,6 +236,8 @@ pub(crate) struct Lead<R: Runtime> {
     pub(crate) wake_latency: Latency,
     /// Prompt line written to the entry found in the session file.
     pub(crate) confirm_latency: Latency,
+    /// Every event of the current session, for the relays (answers, typing, questions).
+    followers: broadcast::Sender<SessionEvent>,
 }
 
 impl<R: Runtime> Lead<R> {
@@ -258,6 +260,7 @@ impl<R: Runtime> Lead<R> {
             closing: AtomicBool::new(false),
             wake_latency: Latency::default(),
             confirm_latency: Latency::default(),
+            followers: broadcast::channel(256).0,
         })
     }
 
@@ -314,7 +317,12 @@ impl<R: Runtime> Lead<R> {
                 }
                 let _ = self.flush(None).await;
             }
-            let mut tick = if self.mailbox.unconfirmed().await {
+            // A batch that found the lead between states (a turn just ending) goes when the lead
+            // turns idle (see `watch`); the confirm tick is only the backstop.
+            let live = self.current().is_some_and(|s| s.alive());
+            let mut tick = if self.mailbox.unconfirmed().await
+                || (live && self.mailbox.waking_pending().await)
+            {
                 CONFIRM_TICK
             } else if self.wants_autostart() || self.env.omp.report().is_none() {
                 AUTOSTART_TICK.min(SWEEP)
@@ -644,7 +652,12 @@ impl<R: Runtime> Lead<R> {
         self.closing.store(false, Ordering::Release);
         self.set_phase(Phase::Live, started.held.clone());
         let identity = (started.session_id.clone(), PathBuf::from(&started.file));
-        tokio::spawn(Arc::clone(self).watch(handle, identity, session.subscribe()));
+        tokio::spawn(Arc::clone(self).watch(
+            handle,
+            identity,
+            session.subscribe(),
+            session.states(),
+        ));
         self.emit(
             Emit::new(EventKind::LeadStarted, Severity::Info, false, "lead")
                 .with("session", &started.session_id)
@@ -813,15 +826,57 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
+    /// A turn ended with the quota exhausted: the owner is alerted and the lead told once (OPC-58,
+    /// OPC-64).
+    async fn quota_blocked(&self, handle: &str, message: &str) {
+        self.emit(
+            Emit::new(EventKind::QuotaBlocked, Severity::Warning, true, "lead")
+                .with("role", "lead")
+                .with("message", message),
+        );
+        let _ = self
+            .mailbox
+            .admit(&Message {
+                sender: HUB_SENDER.into(),
+                text: format!(
+                    "[quota exhausted] {message}. OMP's configured fallback is exhausted or absent. \
+                     Stop, save progress and report; only owner requests reach you until it clears."
+                ),
+                urgent: false,
+                owner: false,
+                identity: Some(format!("{QUOTA_PREFIX}{handle}:{}", now_ms() / 3_600_000)),
+                request_id: None,
+            })
+            .await;
+    }
+
     /// Follows one session's events: hub events, inbox wakes, the stop record and the restart.
     async fn watch(
         self: Arc<Self>,
         handle: String,
         identity: (String, PathBuf),
         mut events: broadcast::Receiver<(u64, SessionEvent)>,
+        mut states: watch::Receiver<Arc<Snapshot>>,
     ) {
+        let mut states_open = true;
         loop {
-            let event = match events.recv().await {
+            let received = tokio::select! {
+                received = events.recv() => received,
+                changed = states.changed(), if states_open => {
+                    // A readback showing the lead idle: a batch that met it between states (a turn
+                    // just ending) goes now, not at the next tick; that readback brings no event of
+                    // its own. Snapshots change only on events and readbacks, so this never polls.
+                    if changed.is_err() {
+                        states_open = false;
+                        continue;
+                    }
+                    if states.borrow_and_update().status == Status::Idle {
+                        self.wake.notify_one();
+                    }
+                    continue;
+                }
+            };
+            let event = match received {
                 Ok((_, event)) => event,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     self.wake.notify_one();
@@ -829,6 +884,8 @@ impl<R: Runtime> Lead<R> {
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             };
+            // Nobody following is fine; a slow follower sees `Lagged` and reads the state again.
+            let _ = self.followers.send(event.clone());
             match event {
                 SessionEvent::TurnEnded { .. }
                 | SessionEvent::Quiet
@@ -853,26 +910,7 @@ impl<R: Runtime> Lead<R> {
                         .with("count", count),
                 ),
                 SessionEvent::QuotaBlocked { message } => {
-                    self.emit(
-                        Emit::new(EventKind::QuotaBlocked, Severity::Warning, true, "lead")
-                            .with("role", "lead")
-                            .with("message", &message),
-                    );
-                    // The lead is told once (OPC-58, OPC-64).
-                    let _ = self
-                        .mailbox
-                        .admit(&Message {
-                            sender: HUB_SENDER.into(),
-                            text: format!(
-                                "[quota exhausted] {message}. OMP's configured fallback is exhausted or absent. \
-                                 Stop, save progress and report; only owner requests reach you until it clears."
-                            ),
-                            urgent: false,
-                            owner: false,
-                            identity: Some(format!("{QUOTA_PREFIX}{handle}:{}", now_ms() / 3_600_000)),
-                            request_id: None,
-                        })
-                        .await;
+                    self.quota_blocked(&handle, &message).await;
                 }
                 SessionEvent::Fault { reason } => {
                     self.update(SessionUpdate {
@@ -1042,6 +1080,16 @@ impl<R: Runtime> Lead<R> {
                 Some(self.mailbox.receipt(Some(request_id.into()), id).await)
             }
         })
+    }
+
+    /// Follows the events of whichever lead session runs, across restarts.
+    pub(crate) fn follow(&self) -> broadcast::Receiver<SessionEvent> {
+        self.followers.subscribe()
+    }
+
+    /// The current session's snapshot without waiting.
+    pub(crate) fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.current().map(|s| s.snapshot())
     }
 
     pub(crate) async fn view(&self) -> View {

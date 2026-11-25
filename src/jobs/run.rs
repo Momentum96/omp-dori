@@ -721,7 +721,7 @@ mod tests {
             let dir = std::path::PathBuf::from(dir);
             let (store, _writer) =
                 crate::store::Store::open(&dir.join("cataly.db"), &dir.join("backup")).unwrap();
-            let (ctx, _stop, _dir) = ctx_in(store, dir, &probe_config(r#"["echo", "up"]"#, ""));
+            let (ctx, _stop) = ctx_in(store, &dir, &probe_config(r#"["echo", "up"]"#, ""));
             let job = ctx.config().jobs.get("p").cloned().unwrap();
             let _ = execute(
                 &ctx,
@@ -749,7 +749,7 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("CATALY_FAULT", "after_event_append")
-            .env("CATALY_FAULT_DIR", &dir)
+            .env("CATALY_FAULT_DIR", dir.as_os_str())
             .status()
             .unwrap();
         assert!(!status.success(), "the child must die at the fault point");
@@ -763,7 +763,7 @@ mod tests {
         );
         let memory = store.read(|r| r.memory("p", false)).await.unwrap();
         assert_eq!(memory, [], "state was not committed");
-        let (ctx, _stop, _dir) = ctx_in(store, dir, &probe_config(r#"["echo", "up"]"#, ""));
+        let (ctx, _stop) = ctx_in(store, &dir, &probe_config(r#"["echo", "up"]"#, ""));
         recover(&ctx).await.unwrap();
         let after = ctx.store.read(|r| r.events_after(0, 10)).await.unwrap();
         let kinds: Vec<&str> = after.iter().map(|e| e.kind.as_str()).collect();

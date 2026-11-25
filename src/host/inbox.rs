@@ -451,6 +451,18 @@ impl Mailbox {
             .is_ok_and(|d| !d.is_empty())
     }
 
+    /// Whether a message that wakes the target (urgent or the owner's) still waits to be written.
+    pub(crate) async fn waking_pending(&self) -> bool {
+        let target = self.target.clone();
+        self.store
+            .read(move |r| r.inbox_open(&target))
+            .await
+            .is_ok_and(|rows| {
+                rows.iter()
+                    .any(|r| r.state == "pending" && (r.urgent || r.owner))
+            })
+    }
+
     /// Resolves written batches, then sends what may go now (PATCH-01 rules 4, 8-11, 16).
     /// `quota_blocked` holds back everything but owner messages and quota notes.
     pub(crate) async fn flush<S: Control>(
@@ -767,6 +779,7 @@ mod tests {
     use crate::host::headless::Session;
     use crate::host::testing::{Fake, spec};
     use crate::store::tests::open_temp;
+    use crate::sys::fs::tests::Scratch;
 
     fn owner(text: &str, rid: Option<&str>) -> Message {
         Message {
@@ -793,8 +806,8 @@ mod tests {
         assert_eq!(preview("a\nb"), "a\\nb");
     }
 
-    async fn box_and_session(tag: &str) -> (Mailbox, Fake, Arc<Session>) {
-        let (store, _writer, _dir) = open_temp(tag);
+    async fn box_and_session(tag: &str) -> (Mailbox, Fake, Arc<Session>, Scratch) {
+        let (store, _writer, dir) = open_temp(tag);
         let fake = Fake::start();
         let (session, _) = fake.bind(spec("h1", None)).await.unwrap();
         (
@@ -804,12 +817,13 @@ mod tests {
             },
             fake,
             session,
+            dir,
         )
     }
 
     #[tokio::test]
     async fn owner_message_is_delivered_and_confirmed_from_the_file() {
-        let (mailbox, fake, session) = box_and_session("inbox-deliver").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-deliver").await;
         let (receipt, id) = mailbox.admit(&owner("hello", Some("r1"))).await.unwrap();
         assert_eq!(receipt.state, ReceiptState::Waiting);
         let notes = mailbox.flush(Some(&*session), false).await.unwrap();
@@ -843,7 +857,7 @@ mod tests {
     /// next message is only stored; a repeated request ID sends nothing.
     #[tokio::test]
     async fn deliver_stores_and_sends_in_one_commit() {
-        let (mailbox, fake, session) = box_and_session("inbox-one-commit").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-one-commit").await;
         let note = Message {
             sender: HUB_SENDER.into(),
             text: "fyi".into(),
@@ -894,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn quiet_notes_wait_for_a_wake_and_go_in_one_batch() {
-        let (mailbox, fake, session) = box_and_session("inbox-quiet").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-quiet").await;
         let note = Message {
             sender: HUB_SENDER.into(),
             text: "fyi".into(),
@@ -948,7 +962,7 @@ mod tests {
     #[tokio::test]
     async fn unconfirmed_batches_are_found_resent_once_or_in_doubt() {
         // Found in the file after a restart: delivered, nothing resent.
-        let (mailbox, fake, session) = box_and_session("inbox-found").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-found").await;
         mailbox.admit(&owner("a", None)).await.unwrap();
         mailbox.flush(Some(&*session), false).await.unwrap();
         let fake2 = Fake::start();
@@ -962,7 +976,7 @@ mod tests {
         assert_eq!(fake2.seen("prompt").len(), 0);
 
         // Process gone, no entry: resent once with the same ID into the same session.
-        let (mailbox, fake, session) = box_and_session("inbox-resend").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-resend").await;
         fake.set(|s| s.write_entries = false);
         mailbox.admit(&owner("b", None)).await.unwrap();
         mailbox.flush(Some(&*session), false).await.unwrap();
@@ -989,7 +1003,7 @@ mod tests {
         assert_eq!(fake3.seen("prompt").len(), 0);
 
         // Same process, no entry within 30 s: in doubt, the lead notified, nothing resent.
-        let (mailbox, fake, session) = box_and_session("inbox-doubt").await;
+        let (mailbox, fake, session, _dir) = box_and_session("inbox-doubt").await;
         fake.set(|s| s.write_entries = false);
         // The transcript exists but never gets the entry (a missing file would fault the session).
         std::fs::write(fake.file(), "{\"type\":\"session\"}\n").unwrap();

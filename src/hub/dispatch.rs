@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 28] = [
+const METHODS: [Method; 31] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -172,6 +172,21 @@ const METHODS: [Method; 28] = [
         name: method::LEAD_EVENTS,
         needs: Authority::Owner,
         mutating: false,
+    },
+    Method {
+        name: method::DISCORD_STATUS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::DISCORD_RELEASE,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::DISCORD_RESET,
+        needs: Authority::Owner,
+        mutating: true,
     },
 ];
 
@@ -371,6 +386,7 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
             prs: hub.jobs.pr_list().await?,
         }),
         lead if lead.starts_with("lead.") => lead_method(hub, lead, raw).await,
+        discord if discord.starts_with("discord.") => discord_method(hub, discord, raw).await,
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),
@@ -442,6 +458,93 @@ async fn lead_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure
             done()
         }
         method::LEAD_EVENTS => ok(&lead.events(p.after.unwrap_or(0)).map_err(refused)?),
+        _ => Err(Failure {
+            code: code::UNKNOWN_METHOD,
+            message: format!("unknown method '{name}'"),
+        }),
+    }
+}
+
+/// The `discord.*` methods: intake status (DISC-IN req. 60), releasing a held room, and the reset of
+/// intake state bound to another bot or owner (DISC-IN req. 3).
+async fn discord_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
+    use crate::store::relay::{OWED_WINDOW_MS, RelayWrite};
+    let p: proto::DiscordParams = params(raw)?;
+    let relay = crate::relay::discord::intake::NAME;
+    let store_failure = |e: crate::store::StoreError| Failure {
+        code: code::INTERNAL,
+        message: e.to_string(),
+    };
+    match name {
+        method::DISCORD_STATUS => {
+            let since = crate::sys::now_ms() - OWED_WINDOW_MS;
+            let (counts, positions, owed) = hub
+                .store
+                .read(move |r| {
+                    Ok((
+                        r.relay_counts(relay, since)?,
+                        r.positions(relay)?,
+                        r.owed(relay, since)?,
+                    ))
+                })
+                .await
+                .map_err(store_failure)?;
+            let held: Vec<Value> = positions
+                .iter()
+                .filter_map(|p| {
+                    p.held
+                        .as_ref()
+                        .map(|why| serde_json::json!({"room": p.room, "reason": why}))
+                })
+                .collect();
+            let rooms: Vec<Value> = positions
+                .iter()
+                .map(|p| serde_json::json!({"room": p.room, "position": p.position.to_string(), "parent": p.parent}))
+                .collect();
+            let open: Vec<_> = owed
+                .into_iter()
+                .filter(|o| o.settled_ms.is_none())
+                .collect();
+            let health = hub.discord.health();
+            let healthy = health.state == "connected" && health.caught_up && counts.queued == 0;
+            ok(&serde_json::json!({
+                "health": health,
+                "healthy": healthy,
+                "counts": counts,
+                "held": held,
+                "rooms": rooms,
+                "owed": open,
+            }))
+        }
+        method::DISCORD_RELEASE => {
+            let room = p
+                .room
+                .filter(|r| crate::relay::discord::Snowflake::parse(r).is_some())
+                .ok_or(Failure {
+                    code: code::BAD_REQUEST,
+                    message: "name the room (a Discord channel or thread ID)".into(),
+                })?;
+            hub.store
+                .relay(RelayWrite::Hold {
+                    relay: relay.into(),
+                    room,
+                    reason: None,
+                })
+                .await
+                .map_err(store_failure)?;
+            hub.discord.kick.notify_one();
+            Ok(Value::Object(serde_json::Map::new()))
+        }
+        method::DISCORD_RESET => {
+            hub.store
+                .relay(RelayWrite::Reset {
+                    relay: relay.into(),
+                })
+                .await
+                .map_err(store_failure)?;
+            hub.discord.kick.notify_one();
+            Ok(Value::Object(serde_json::Map::new()))
+        }
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),

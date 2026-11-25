@@ -42,6 +42,8 @@ pub(crate) struct Fake {
     seen: Arc<Mutex<Vec<Value>>>,
     push: mpsc::UnboundedSender<Option<Value>>,
     hub: Mutex<Option<(ReadHalf<DuplexStream>, WriteHalf<DuplexStream>)>>,
+    /// The session-file directory `start` made; removed when the fake drops.
+    dir: Option<crate::sys::fs::tests::Scratch>,
 }
 
 pub(crate) fn spec(handle: &str, expected: Option<(&str, PathBuf)>) -> StartSpec {
@@ -63,7 +65,7 @@ pub(crate) fn spec(handle: &str, expected: Option<(&str, PathBuf)>) -> StartSpec
 impl Fake {
     pub(crate) fn start() -> Self {
         let dir = crate::sys::fs::tests::scratch("fake-omp");
-        Self::with(FakeState {
+        let mut fake = Self::with(FakeState {
             session_id: "0b9e7c1a-1111-4222-8333-444455556666".into(),
             file: dir.join("2026-11-25T01-02-03-004Z_0b9e7c1a-1111-4222-8333-444455556666.jsonl"),
             streaming: false,
@@ -71,7 +73,9 @@ impl Fake {
             extra_usage: false,
             answer_prompts: true,
             write_entries: true,
-        })
+        });
+        fake.dir = Some(dir);
+        fake
     }
 
     pub(crate) fn with(state: FakeState) -> Self {
@@ -90,6 +94,7 @@ impl Fake {
             seen,
             push,
             hub: Mutex::new(Some(tokio::io::split(hub_side))),
+            dir: None,
         }
     }
 

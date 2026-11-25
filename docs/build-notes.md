@@ -257,3 +257,147 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   rule (replace only when connecting is refused) is unchanged; a crashed hub's socket has no such copy.
 - `tests/support/fake-omp` has an rpc-ui mode (fixture `rpc`): ready frame, every command answered,
   `get_state` naming the session it created or resumed. `tests/lead.rs` uses it for the restart test.
+
+# Milestone 2 slice 2b: Discord intake, replies and questions
+
+## Shape
+
+- `relay::Relay` (DESIGN 5.1) is the per-platform trait: `parts` (outgoing checks, tables, split),
+  `nonce`, `post` (one part, the first a reply), `seen`, `typing`. `relay::pipeline::Pipeline<R, T>` is
+  the shared part: envelope, spill over 64 KiB to `<state>/files/relay/`, hand-off to the lead through
+  `Lead::deliver` (`sender: owner`, `owner: true`, `urgent: true`, request ID `discord:<room>:<message>`),
+  seen mark in parallel, owed reply, finish in one store transaction, hold and tell the owner, answers
+  from the session file into the outbox and posted in parts. Telegram and Slack add a `Relay` and an
+  intake; nothing after normalisation changes.
+- `relay::discord::{gateway, intake, questions, types}`; REST calls stay on `relay::discord::Rest` over
+  `relay::http` (one client). The Gateway's TLS uses `relay::http::connect` (rustls with ring, webpki
+  roots), so `tokio-tungstenite` runs with only its `handshake` feature; `futures-util` (`sink`) is the
+  stream and sink traits tokio-tungstenite already depends on (no added weight).
+- Store schema v3 (additive): `bindings`, `positions`, `relay_flags`, `arrival_queue`, `handoffs`,
+  `read_marks`, `owed_replies`, `outbox_parts`, `open_questions`. Rooms and messages are text so other
+  relays fit; `seq`/`position` order a room (Discord: the snowflake).
+- The intake task idles (state `off`) until `[discord] owner` and `channels` are set. Fatal conditions
+  (bad token, not a bot, owner equals bot, no Message Content intent, binding to another bot or owner,
+  a listed channel that cannot be read, close codes 4004 and 4010-4014) stop intake with an urgent
+  `relay.stopped` event and wait for a config change or `cataly discord reset`; they never end the
+  supervised task (that would count toward the hub's restart limit). Network failures retry after 30 s.
+- Config `[discord]`: `owner`, `channels` (IDs, at most 256, duplicates dropped), `follow_threads`
+  (default true), `home` (question channel; default the only listed channel), `remote_approvals`
+  (default false, A18), `form_default_after` (default `3m`, 1 s to 1 h, A17), `profile` (default true:
+  upload the bundled avatar `assets/avatar.jpg`, made for Cataly, when the bot has none). `cataly setup`
+  manages `--discord-owner` and `--discord-channels` (comma list) besides the token file.
+- CLI: `cataly discord status` (state, catch-up, queue, held rooms, owed replies, read positions),
+  `cataly discord release <room>` (an in-doubt message counts as handled and is not resent),
+  `cataly discord reset`. Events: `relay.held`, `relay.stopped` (urgent).
+
+## Choices
+
+- The Gateway URL: `wss://gateway.discord.gg`; with the loopback `api_base` test override it comes from
+  `GET /gateway` and must be loopback `ws://`. Resume URLs must be `wss` under `discord.gg` (loopback in
+  test mode); anything else identifies again (DISC-IN req. 19, DISC-OUT req. 10).
+- Hand-off digest ignores the CDN `ex`/`is`/`hm` parameters; a changed message with the same ID holds
+  the room (DISC-IN req. 51). A hand-off is recorded (`handoffs`, with the owed reply) before
+  `Lead::deliver`; `Lead::deliver` is idempotent by request ID, so a crash between the two delivers once.
+- In doubt: the mailbox already resends once when the process that held the batch is gone (check 4);
+  a receipt `in_doubt` or `failed` holds the room (DESIGN 9.3), posts one reply in the room naming
+  `cataly discord release <room>`, and emits `relay.held`. Other rooms continue.
+- Read mark on durable admission (C9), recorded in `read_marks`; a failure is logged once per run.
+- Answers (A16): the final assistant message (stop reason `stop`, no tool call, visible text) between
+  the request's user entry (found by its tag `[discord <room>/<message>]`) and the next user entry. A
+  later request in the same batch takes the answer; a request that met another input before an answer is
+  abandoned (its owed reply stays open). The tag in a user entry is itself the hand-off confirmation, so
+  an answer may be posted before the receipt is read again. "Turn over" is the turn-end/settle event or
+  an idle snapshot. Answers older than 30 minutes without one are abandoned. The answer passes the
+  owner's outgoing text checks; a refusal abandons it with a log line.
+- Owed replies settle only by read mark plus confirmed linked first part (DISC-OUT req. 33, C8). The
+  60 s reminder and the stop-gate continuation are 2c (bridge and unanswered job).
+- Typing (C4): renewed every 8 s while a lead turn runs, in the room of the newest unanswered request.
+- Questions: `ask` dialogs (buttons for one question unless multi-select), HTML forms read by
+  `relay::discord::form` (buttons for one single-choice field), `select`, `confirm`; tool approvals only
+  with `remote_approvals`. An `ask` with several questions and a form with several editable fields are
+  posted as one card listing each question or field (name, kind, required, choices with their exact
+  values, default) and answered by a reply holding a JSON map (DISC-OUT req. 63, 70, 72): unknown or
+  hidden names are refused with a correction, omitted ones keep their default (an `ask` question without
+  a recommended choice must be answered), required fields must end up non-empty; plain messages never
+  answer such a card. The card is registered before its buttons become visible, so a press cannot find
+  it missing. Buttons are refused for non-owner presses with an ephemeral reply; the owner's press is
+  acknowledged (deferred update, or update for approvals) before the answer counts. The recommended
+  choice is submitted explicitly after `form_default_after` (C11, no timed-out flag). Typed answers: a
+  number, a unique label, or free text (`customInput`) for `ask`.
+- Debug builds only (`cfg(debug_assertions)`; the release profile does not enable it):
+  `CATALY_FAULT=relay_after_arrival` aborts the hub after the arrival commit and before the hand-off
+  (crash test of check 4, which needs the real binary, so `cfg(test)` cannot carry it). The release
+  binary holds no trace of it (`strings` finds no `relay_after_arrival`).
+- Hub events of the lead and the relays go through one queue and are recorded one at a time in the
+  order they were emitted (`hub::hub_events`); before, each event was its own task, so two events could
+  commit in either order.
+
+## Deviations
+
+- Form fields carry no limits yet (`number` min/max, text lengths are not read), so the hub does not
+  check DISC-OUT req. 72's ranges and lengths; everything else in req. 72 is checked.
+- MSG-11 display name: Discord bot accounts always have a user name, so only the avatar is set
+  (justified: nothing is empty to fill).
+- DISC-IN req. 17-18, 22 are kept; DISC-IN req. 61's 8 s REST deadline is DISC-OUT's 10 s (the shared
+  policy of part B). Catch-up 429/5xx retries use 2 s doubling to 30 s across rounds.
+- Not built in this slice: channel facts and earlier-conversation lookup (DISC-IN-17/18, not in scope),
+  thread-session routing (milestone 3), proof of source (DISC-IN-22, not in scope), Discord threads and
+  board posts.
+
+## Lead fixes found by this slice (host::lead, owner-approved)
+
+- A batch that met the lead between states (a turn just ending, the readback not idle yet) went back
+  to pending and only the 5-minute sweep retried it. The lead's event task now follows the session's
+  snapshot (`Control::states`, a watch receiver; snapshots change only on events and readbacks, so this
+  never polls) and flushes the inbox as soon as a readback shows the lead idle. A 5 s tick remains only
+  as a backstop while a waking message is pending (`Mailbox::waking_pending`). Test:
+  `tests/discord_relay.rs` `busy_lead_answers_in_order` asserts the second answer follows the first
+  within 4 s (its turn takes 2 s; the backstop would add up to 5 s).
+- `sys::lock` test: the re-acquire after dropping the lock retries for up to 2 s; another test thread
+  forking at that moment holds a copy of the lock's descriptor until its child's exec (the same cause as
+  the socket test above).
+
+## Acceptance fixes (2026-11-25)
+
+- **Test directories leaked (7,020 `cataly-unit-*`, 584 MB; contract sandboxes 3.7 GB).** Two causes.
+  `sys::fs::tests::scratch` returned a bare path nobody removed; it now returns a `Scratch` guard that
+  removes the directory on drop (also on a failing test, since unwinding runs drops), and the helpers
+  built on it (`store::tests::open_temp`, `jobs::tests::ctx_with`, `host::testing::Fake`, the inbox
+  tests) hold the guard as long as their store or session file lives. Second, every `TestHub` whose
+  config names no OMP found the user's installed `omp` on PATH: the hub probed it with the sandbox as
+  HOME, so stock OMP unpacked its 145 MB native module into `<sandbox>/home/.omp` and fetched model
+  catalogues from the network; when the hub was killed the probe outlived it and wrote after the
+  sandbox was removed. `TestHub` now strips every PATH directory holding an `omp` (contract tests name
+  stock OMP by full path), stops a running hub with TERM before KILL so it closes its children, and the
+  contract `Sandbox` and its `Rpc` children are removed and killed on drop. After three full runs and
+  all contract tests: zero new entries in `/tmp`.
+- **`discord_requests_against_stock_omp` never finished.** The test waited for `lead status` to show
+  `working` while the slow turn ran. Evidence from the live sandbox at the timeout: the lead idle, 41
+  owed replies settled, the slow answer posted, the follow-up never sent. The session status is
+  `unknown` during a turn (an `agent_start` makes the last readback stale and nothing reads back until
+  the turn ends; HOST req. 36 ranks "no fresh readback" above working), so `working` was never shown.
+  The product follows the spec; the test now waits until the fake model has the slow request.
+- **`lead_restarts_on_its_session_after_omp_exits` failed under load** (reproduced 10 of 24 runs with
+  four copies in parallel): it read the event stream as soon as `lead status` showed the third
+  process live and found one `lead.started ... resumed` instead of two. The phase turns live before
+  the start event is recorded, and events were recorded by one task each. The event-driven flush of
+  this slice did not cause it; it adds store work at the same moment, which likely widens the window. Fixes:
+  hub events are recorded in emission order through one queue, and the test waits (bounded, on the
+  condition) until the third start's record exists. 32 parallel runs pass.
+- **Forms and multi-question `ask` dialogs stayed local.** DISC-OUT-15 is in milestone 2's scope and
+  req. 59-61 list the reasons to refuse a form; "several fields" is not one of them. Both now become
+  one card answered by a JSON map (see Questions above).
+
+## Tests
+
+- Unit: store relay rows (queue, positions, settling, binding), transcript replies, Gateway URL and
+  close-code rules plus a fake WebSocket server (op 7 resumes, op 9 false identifies after 1-5 s, a
+  missed ACK resumes, 4004 stops, 6 s identify gap), the owner gate and normalisation, presses,
+  question conversion and typed answers, base64.
+- `tests/support/discord.rs` is now a fake Discord REST and Gateway; `tests/support/fake-omp` runs turns
+  (`turns`, `slow`, `noentry`, `ask` fixtures); `tests/support/model.rs` calls the `ask` tool on `ASK`.
+- `tests/discord_relay.rs`: checks 1, 2, 3, 4 (crash after arrival; process gone resends once; process
+  alive holds the room after 30 s), 5 (op 7 with catch-up, missed ACK, op 9, 4004, bad resume URL) and 7
+  (refusal, owner press, local answer race, recommended after the quiet time).
+- `tests/contract_discord.rs` (`CATALY_CONTRACT_OMP=1`): checks 1, 2 and 7 with stock OMP, the wake
+  latency, RSS and catch-up measurements.

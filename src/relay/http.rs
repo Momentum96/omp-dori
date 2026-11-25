@@ -211,6 +211,45 @@ static TLS: LazyLock<Option<Arc<ClientConfig>>> = LazyLock::new(|| {
         .map(|b| Arc::new(b.with_root_certificates(roots).with_no_client_auth()))
 });
 
+/// A connected byte stream, plain (loopback only) or TLS.
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+
+/// Opens a TCP connection (5 s) and, for `tls`, a TLS session (5 s) under the shared client setup.
+/// Plain connections are refused for a host that is not loopback (DISC-OUT req. 10).
+pub(crate) async fn connect(tls: bool, host: &str, port: u16) -> Result<Box<dyn Io>, String> {
+    let probe = Base {
+        tls,
+        host: host.to_string(),
+        port,
+        path: String::new(),
+    };
+    if !tls && !probe.is_loopback() {
+        return Err("plain connections are allowed only to a loopback host".into());
+    }
+    let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect((host, port)))
+        .await
+        .map_err(|_| "connect timed out".to_string())?
+        .map_err(|e| format!("connect failed: {}", e.kind()))?;
+    let _ = tcp.set_nodelay(true);
+    if !tls {
+        return Ok(Box::new(tcp));
+    }
+    let name =
+        ServerName::try_from(host.to_string()).map_err(|_| "invalid server name".to_string())?;
+    let config = TLS
+        .clone()
+        .ok_or_else(|| "TLS setup unavailable".to_string())?;
+    let stream = timeout(
+        CONNECT_TIMEOUT,
+        TlsConnector::from(config).connect(name, tcp),
+    )
+    .await
+    .map_err(|_| "TLS handshake timed out".to_string())?
+    .map_err(|e| format!("TLS handshake failed: {e}"))?;
+    Ok(Box::new(stream))
+}
+
 /// Sends `req` to `base` under `policy`, calling `observe` with every response (rate-limit headers).
 pub(crate) async fn call(
     base: &Base,

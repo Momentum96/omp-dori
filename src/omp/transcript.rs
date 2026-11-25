@@ -482,6 +482,184 @@ fn user_text_has(entry: &Value, marker: &str) -> bool {
     }
 }
 
+/// Where the answer to one request stands in a session file (DISC-OUT req. 21-23).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reply {
+    /// No user entry carries the tag in the searched part of the file.
+    NotFound,
+    /// The turn has not ended yet.
+    Pending,
+    /// The final assistant text of the turn the request started.
+    Answer(String),
+    /// Another input entered the transcript before an answer: the answer would belong to mixed work.
+    Abandoned,
+}
+
+/// One message entry: role, visible text, whether it calls a tool, and the stop reason.
+struct Said {
+    user: bool,
+    text: String,
+    tool_call: bool,
+    stop: Option<String>,
+}
+
+fn said(entry: &Value) -> Option<Said> {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = entry.get("message")?;
+    let user = match message.get("role").and_then(Value::as_str)? {
+        "user" => true,
+        "assistant" => false,
+        _ => return None,
+    };
+    let mut text = String::new();
+    let mut tool_call = false;
+    match message.get("content") {
+        Some(Value::String(t)) => text.push_str(t),
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                match part.get("type").and_then(Value::as_str) {
+                    // Commentary is the provider's running narration, not the answer.
+                    Some("text")
+                        if part.get("phase").and_then(Value::as_str) != Some("commentary") =>
+                    {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            text.push_str(t);
+                        }
+                    }
+                    Some("toolCall" | "tool_use" | "toolUse") => tool_call = true,
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    Some(Said {
+        user,
+        text,
+        tool_call,
+        stop: message
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+/// Reads the message entries of the last 8 MiB of `path` (2 s budget). `None` when the file is
+/// missing or the budget ran out.
+fn message_entries(path: &Path) -> Result<Option<Vec<Said>>> {
+    let started = Instant::now();
+    let mut file = match read_only(path) {
+        Ok(f) => f,
+        Err(TranscriptError::Io(_)) if !path.exists() => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let info = file.metadata()?;
+    if !info.is_file() {
+        return Err(TranscriptError::Io("not a regular file".into()));
+    }
+    if info.len() > FILE_LIMIT {
+        return Err(TranscriptError::TooLarge);
+    }
+    let start = info.len().saturating_sub(SEARCH_TAIL);
+    file.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut first = start > 0;
+    let mut out = Vec::new();
+    loop {
+        if started.elapsed() > SEARCH_BUDGET {
+            return Ok(None);
+        }
+        line.clear();
+        if reader
+            .by_ref()
+            .take(SEARCH_TAIL + 1)
+            .read_until(b'\n', &mut line)?
+            == 0
+        {
+            return Ok(Some(out));
+        }
+        if std::mem::take(&mut first) {
+            continue;
+        }
+        // An unfinished last line is skipped; it is read again next time.
+        if line.last() != Some(&b'\n') {
+            continue;
+        }
+        trim_newline(&mut line);
+        if let Ok(entry) = serde_json::from_slice::<Value>(&line)
+            && let Some(s) = said(&entry)
+        {
+            out.push(s);
+        }
+    }
+}
+
+/// The answer to each request tag. `prefix` starts every request tag, so a later request in the same
+/// user entry (one batch) takes the answer; `settled` means the session is idle, so a final message
+/// at the end of the file is the answer rather than a step of a turn still running.
+pub(crate) fn replies(
+    path: &Path,
+    tags: &[String],
+    prefix: &str,
+    settled: bool,
+) -> Result<Vec<Reply>> {
+    let Some(entries) = message_entries(path)? else {
+        return Ok(vec![Reply::Pending; tags.len()]);
+    };
+    Ok(tags
+        .iter()
+        .map(|tag| {
+            let Some(at) = entries
+                .iter()
+                .rposition(|e| e.user && e.text.contains(tag.as_str()))
+            else {
+                return Reply::NotFound;
+            };
+            let later_request = entries.get(at).is_some_and(|e| {
+                e.text
+                    .find(tag.as_str())
+                    .and_then(|i| e.text.get(i + tag.len()..))
+                    .is_some_and(|rest| rest.contains(prefix))
+            });
+            if later_request {
+                return Reply::Abandoned;
+            }
+            let mut answer: Option<&str> = None;
+            for e in entries.iter().skip(at + 1) {
+                if e.user {
+                    return answer.map_or(Reply::Abandoned, |a| Reply::Answer(a.to_string()));
+                }
+                answer = (e.stop.as_deref() == Some("stop")
+                    && !e.tool_call
+                    && !e.text.trim().is_empty())
+                .then_some(e.text.as_str());
+            }
+            match answer {
+                Some(a) if settled => Reply::Answer(a.to_string()),
+                _ => Reply::Pending,
+            }
+        })
+        .collect())
+}
+
+/// [`replies`] on the blocking pool.
+pub(crate) async fn read_replies(
+    path: PathBuf,
+    tags: Vec<String>,
+    prefix: String,
+    settled: bool,
+) -> Result<Vec<Reply>> {
+    tokio::task::spawn_blocking(move || replies(&path, &tags, &prefix, settled))
+        .await
+        .map_err(|e| TranscriptError::Io(format!("reply task: {e}")))?
+}
+
 /// [`find_marker`] on the blocking pool.
 pub(crate) async fn search(path: PathBuf, marker: String) -> Result<Found> {
     tokio::task::spawn_blocking(move || find_marker(&path, &marker))
@@ -504,6 +682,53 @@ pub(crate) async fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_follow_the_turn_a_request_started() {
+        let dir = crate::sys::fs::tests::scratch("replies");
+        let path = dir.join("s.jsonl");
+        let user = |t: &str| {
+            format!(
+                r#"{{"type":"message","message":{{"role":"user","content":[{{"type":"text","text":"{t}"}}]}}}}"#
+            )
+        };
+        let said = |t: &str, stop: &str, tool: bool| {
+            let tool = if tool {
+                r#",{"type":"toolCall","id":"c","name":"bash","arguments":{}}"#
+            } else {
+                ""
+            };
+            format!(
+                r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"{t}"}}{tool}],"stopReason":"{stop}"}}}}"#
+            )
+        };
+        let lines = [
+            r#"{"type":"session","id":"x"}"#.to_string(),
+            user("[d a] one"),
+            said("looking", "toolUse", true),
+            said("first answer", "stop", false),
+            user("[d b] two"),
+            said("thinking", "toolUse", true),
+            user("[d c] three [d e] five"),
+            said("done", "stop", false),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let tags: Vec<String> = ["[d a]", "[d b]", "[d c]", "[d e]", "[d z]"]
+            .map(String::from)
+            .to_vec();
+        let got = replies(&path, &tags, "[d ", false).unwrap();
+        assert_eq!(got[0], Reply::Answer("first answer".into()));
+        assert_eq!(got[1], Reply::Abandoned, "steered before an answer");
+        assert_eq!(
+            got[2],
+            Reply::Abandoned,
+            "a later request in the same batch takes it"
+        );
+        assert_eq!(got[3], Reply::Pending, "the session still works");
+        assert_eq!(got[4], Reply::NotFound);
+        let got = replies(&path, &tags, "[d ", true).unwrap();
+        assert_eq!(got[3], Reply::Answer("done".into()));
+    }
 
     #[test]
     fn session_file_names() {

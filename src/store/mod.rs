@@ -4,6 +4,7 @@
 
 pub(crate) mod host;
 mod read;
+pub(crate) mod relay;
 mod schema;
 mod writer;
 
@@ -403,6 +404,14 @@ impl Store {
     pub(crate) async fn host(&self, write: host::HostWrite) -> Result<host::HostDone, StoreError> {
         self.call(|r| Request::Host(Box::new(write), r)).await
     }
+
+    /// One relay mutation (positions, arrival queue, hand-offs, replies).
+    pub(crate) async fn relay(
+        &self,
+        write: relay::RelayWrite,
+    ) -> Result<relay::RelayDone, StoreError> {
+        self.call(|r| Request::Relay(Box::new(write), r)).await
+    }
 }
 
 impl ReaderPool {
@@ -450,9 +459,9 @@ fn prepare_file(db: &Path) -> Result<(), StoreError> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::sys::fs::tests::scratch;
+    use crate::sys::fs::tests::{Scratch, scratch};
 
-    pub(crate) fn open_temp(tag: &str) -> (Store, WriterHandle, PathBuf) {
+    pub(crate) fn open_temp(tag: &str) -> (Store, WriterHandle, Scratch) {
         let dir = scratch(tag);
         let (store, handle) = Store::open(&dir.join("cataly.db"), &dir.join("backup")).unwrap();
         (store, handle, dir)

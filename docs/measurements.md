@@ -159,3 +159,27 @@ EOF
 ```
 
 Release binary after these changes: 8,688,376 bytes.
+
+## Slice 2b: Discord intake to the lead (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+`CATALY_CONTRACT_OMP=1 cargo test --release --test contract_discord -- --nocapture --test-threads=1`:
+the hub's lead runs stock OMP on the loopback fake model, intake talks to the fake Discord Gateway and
+REST server (`tests/support/discord.rs`); 40 wakes of an idle lead, one slow turn with a follow-up,
+5 op-7 reconnects. Figures from `cataly stats --json` at the end of the run.
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Wake end to end: Gateway frame read to OMP `agent_start` (`discord_wake_latency`, 41 wakes) | p50 36.1 ms, p95 64.8 ms, p99 77.0 ms, max 109 ms | p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Of which hub `deliver` call to `prompt` line written | p50 9.3 ms, p95 15.0 ms | p50 ≤ 5 ms (see the disk floor above) |
+| Of which prompt written to `agent_start` | p50 8.5 ms, p95 13.8 ms | none set |
+| Reconnect (op 7) to catch-up complete (6 connects) | p50 28.3 ms, max 367 ms (the first connect) | none set |
+| Hub RSS, Discord connected and the lead attached, idle after the run (OMP excluded) | 12.5 MiB (13,066,240 bytes) | ≤ 30 MiB idle |
+| Release binary (`cargo build --release`, stripped) | 9,700,888 bytes (9.25 MiB; slice 2a: 8,688,376) | none set |
+
+The debug build of the same run: wake p50 40.1 ms, p95 48.6 ms; RSS 22.8 MiB. The remaining wake time
+above the hub and OMP parts (about 18 ms at p50) is intake before `Lead::deliver`; it was not broken
+down, but it holds two `synchronous=FULL` commits (arrival, then hand-off record) at the 8 ms disk
+floor measured above. The release binary grew by
+0.97 MiB with the Gateway (tokio-tungstenite, its handshake only), intake, questions and the form
+reader. `strings target/release/cataly | grep relay_after_arrival` finds nothing: the crash-test fault
+point is compiled out of release builds. macOS figures are not measured.

@@ -702,20 +702,22 @@ pub(crate) mod tests {
     use super::*;
     use crate::config;
     use crate::store::tests::open_temp;
+    use crate::sys::fs::tests::Scratch;
 
     pub(crate) fn ctx_with(
         config_text: &str,
         tag: &str,
-    ) -> (Arc<Ctx>, watch::Sender<bool>, PathBuf) {
+    ) -> (Arc<Ctx>, watch::Sender<bool>, Scratch) {
         let (store, _writer, dir) = open_temp(tag);
-        ctx_in(store, dir, config_text)
+        let (ctx, stop) = ctx_in(store, &dir, config_text);
+        (ctx, stop, dir)
     }
 
     pub(crate) fn ctx_in(
         store: Store,
-        dir: PathBuf,
+        dir: &std::path::Path,
         config_text: &str,
-    ) -> (Arc<Ctx>, watch::Sender<bool>, PathBuf) {
+    ) -> (Arc<Ctx>, watch::Sender<bool>) {
         let config = Arc::new(config::parse(config_text).unwrap());
         let (_config_tx, config_rx) = watch::channel(config);
         let (stop_tx, stop_rx) = watch::channel(false);
@@ -727,7 +729,7 @@ pub(crate) mod tests {
             config_file: dir.join("config.toml"),
         };
         let ctx = Ctx::new(store, config_rx, paths, Omp::new(), stop_rx);
-        (ctx, stop_tx, dir)
+        (ctx, stop_tx)
     }
 
     pub(crate) fn probe_config(argv: &str, extra: &str) -> String {

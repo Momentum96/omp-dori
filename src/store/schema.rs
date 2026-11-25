@@ -14,13 +14,17 @@ struct Migration {
     additive: bool,
 }
 
-const MIGRATIONS: [Migration; 2] = [
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         sql: include_str!("migrations/0001_init.sql"),
         additive: false,
     },
     Migration {
         sql: include_str!("migrations/0002_sessions.sql"),
+        additive: true,
+    },
+    Migration {
+        sql: include_str!("migrations/0003_relay.sql"),
         additive: true,
     },
 ];

@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 30] = [
+pub(crate) const COMMANDS: [Spec; 33] = [
     Spec {
         path: &["hub"],
         args: &[],
@@ -90,7 +90,14 @@ pub(crate) const COMMANDS: [Spec; 30] = [
         path: &["setup"],
         args: &[],
         flags: &["--json", "--apply"],
-        values: &["--expect", "--omp", "--discord-token-file", "--log-level"],
+        values: &[
+            "--expect",
+            "--omp",
+            "--discord-token-file",
+            "--discord-owner",
+            "--discord-channels",
+            "--log-level",
+        ],
         summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview)",
     },
     Spec {
@@ -225,6 +232,27 @@ pub(crate) const COMMANDS: [Spec; 30] = [
         flags: &["--json"],
         values: &["--after"],
         summary: "show the lead session's recent events after a sequence number",
+    },
+    Spec {
+        path: &["discord", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show Discord intake: connection, catch-up, queue, held rooms and owed replies",
+    },
+    Spec {
+        path: &["discord", "release"],
+        args: &["room"],
+        flags: &["--json"],
+        values: &[],
+        summary: "release a held room; its in-doubt message counts as handled and is not sent again",
+    },
+    Spec {
+        path: &["discord", "reset"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "forget Discord intake state (needed after changing the bot or the owner)",
     },
 ];
 

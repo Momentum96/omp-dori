@@ -1,41 +1,73 @@
-//! A fake Discord REST server on hyper, bound to loopback only (DISC-OUT-27). It answers the calls
-//! job posting makes (channel read, message create), records every request, deduplicates creates by
-//! their enforced nonce as Discord does, and can answer the next creates with scripted statuses.
+//! A fake Discord on loopback only (DISC-OUT-27): the REST calls Cataly makes (bot and application
+//! identity, the Gateway URL, channels, history, single messages, active threads, message create and
+//! edit, reactions, typing, interaction callbacks, avatar) and a Gateway WebSocket server. It records
+//! every request, deduplicates creates by their enforced nonce as Discord does, keeps a history per
+//! channel, answers a reply with message type 19 and its reference, and lets a test script the next
+//! create statuses, push dispatches, and send op 7, op 9 or a close code.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::{SinkExt as _, StreamExt as _};
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
+pub const BOT: &str = "500000000000000001";
+pub const APP: &str = "500000000000000002";
+pub const GUILD: &str = "500000000000000003";
 
 /// One request as the server saw it.
 #[derive(Debug, Clone)]
 pub struct Seen {
     pub method: String,
     pub path: String,
+    pub query: String,
     pub authorization: Option<String>,
     pub body: Value,
+}
+
+/// A command for the Gateway connection.
+#[derive(Debug, Clone)]
+pub enum Gw {
+    Dispatch(&'static str, Value),
+    Op7,
+    Op9(bool),
+    Close(u16),
 }
 
 #[derive(Default)]
 struct State {
     seen: Vec<Seen>,
-    /// Statuses for the next message creates, before normal answers resume.
     scripted: VecDeque<u16>,
-    /// Enforced nonce -> message ID already created.
     nonces: HashMap<String, u64>,
     next_id: u64,
-    /// Distinct messages created.
     created: usize,
+    /// Channel -> messages, oldest first.
+    history: HashMap<String, Vec<Value>>,
+    /// Channel -> its object.
+    channels: HashMap<String, Value>,
+    threads: Vec<Value>,
+    /// Gateway: hello interval, whether heartbeats are acknowledged, the resume URL offered.
+    interval_ms: u64,
+    no_ack: bool,
+    resume_url: Option<String>,
+    seq: u64,
+    /// "identify" or "resume", one per connection.
+    connections: Vec<String>,
+    gateway: Option<mpsc::UnboundedSender<Gw>>,
 }
 
 pub struct FakeDiscord {
     pub port: u16,
+    pub gateway_port: u16,
     state: Arc<Mutex<State>>,
 }
 
@@ -44,8 +76,12 @@ impl FakeDiscord {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
+        let gw = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        gw.set_nonblocking(true).unwrap();
+        let gateway_port = gw.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(State {
             next_id: 900_000_000_000_000_000,
+            interval_ms: 1_000,
             ..State::default()
         }));
         let shared = Arc::clone(&state);
@@ -56,6 +92,17 @@ impl FakeDiscord {
                 .unwrap();
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let gw = tokio::net::TcpListener::from_std(gw).unwrap();
+                let gw_state = Arc::clone(&shared);
+                tokio::spawn(async move {
+                    loop {
+                        let Ok((stream, _)) = gw.accept().await else {
+                            continue;
+                        };
+                        let state = Arc::clone(&gw_state);
+                        tokio::spawn(gateway(stream, state, gateway_port));
+                    }
+                });
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         continue;
@@ -70,14 +117,19 @@ impl FakeDiscord {
                 }
             });
         });
-        Self { port, state }
+        let fake = Self {
+            port,
+            gateway_port,
+            state,
+        };
+        fake.serve_gateway();
+        fake
     }
 
     pub fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    /// Answers the next message creates with these statuses (for example 500) after creating them.
     pub fn script(&self, statuses: &[u16]) {
         self.state.lock().unwrap().scripted.extend(statuses);
     }
@@ -86,7 +138,6 @@ impl FakeDiscord {
         self.state.lock().unwrap().seen.clone()
     }
 
-    /// Distinct messages that exist in the fake channel.
     pub fn messages(&self) -> usize {
         self.state.lock().unwrap().created
     }
@@ -98,29 +149,223 @@ impl FakeDiscord {
             .collect()
     }
 
-    /// Waits until at least `n` creates arrived.
+    /// Requests whose method and path match.
+    pub fn calls(&self, method: &str, path_part: &str) -> Vec<Seen> {
+        self.seen()
+            .into_iter()
+            .filter(|s| s.method == method && s.path.contains(path_part))
+            .collect()
+    }
+
     pub fn wait_creates(&self, n: usize, limit: Duration) -> Vec<Seen> {
+        self.wait(limit, |f| {
+            let c = f.creates();
+            (c.len() >= n).then_some(c)
+        })
+    }
+
+    /// Polls `f` every 20 ms for at most `limit`.
+    pub fn wait<T>(&self, limit: Duration, mut f: impl FnMut(&Self) -> Option<T>) -> T {
         let deadline = std::time::Instant::now() + limit;
         loop {
-            let creates = self.creates();
-            if creates.len() >= n {
-                return creates;
+            if let Some(v) = f(self) {
+                return v;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "{n} creates not seen within {limit:?}; saw {creates:?}"
+                "condition not met within {limit:?}; requests: {:?}",
+                self.seen()
+                    .iter()
+                    .map(|s| format!("{} {}", s.method, s.path))
+                    .collect::<Vec<_>>()
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Declares a channel (type 0 in the guild unless given).
+    pub fn channel(&self, id: &str, kind: u64, parent: Option<&str>) {
+        let mut v = json!({"id": id, "type": kind, "guild_id": GUILD});
+        if let Some(p) = parent {
+            v["parent_id"] = json!(p);
+        }
+        self.state.lock().unwrap().channels.insert(id.into(), v);
+    }
+
+    /// An active thread for the listing.
+    pub fn thread(&self, id: &str, parent: &str) {
+        self.channel(id, 11, Some(parent));
+        self.state
+            .lock()
+            .unwrap()
+            .threads
+            .push(json!({"id": id, "parent_id": parent, "type": 11,
+            "guild_id": GUILD, "thread_metadata": {"archived": false}}));
+    }
+
+    /// A message object.
+    pub fn message(channel: &str, id: u64, author: &str, content: &str) -> Value {
+        json!({"id": id.to_string(), "channel_id": channel, "type": 0, "content": content,
+            "author": {"id": author}, "attachments": []})
+    }
+
+    /// Adds a message to a channel's history only (seen by catch-up reads, not live).
+    pub fn put(&self, message: Value) {
+        let channel = message["channel_id"].as_str().unwrap().to_string();
+        let mut s = self.state.lock().unwrap();
+        let list = s.history.entry(channel).or_default();
+        list.push(message);
+        list.sort_by_key(|m| m["id"].as_str().unwrap().parse::<u64>().unwrap());
+    }
+
+    /// Adds a message to its history and sends it live.
+    pub fn say(&self, message: Value) {
+        self.put(message.clone());
+        self.gw(Gw::Dispatch("MESSAGE_CREATE", message));
+    }
+
+    pub fn gw(&self, cmd: Gw) {
+        let tx = self.state.lock().unwrap().gateway.clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(cmd);
+        }
+    }
+
+    /// "identify" or "resume" for each Gateway connection so far.
+    pub fn connections(&self) -> Vec<String> {
+        self.state.lock().unwrap().connections.clone()
+    }
+
+    pub fn wait_connections(&self, n: usize, limit: Duration) -> Vec<String> {
+        self.wait(limit, |f| {
+            let c = f.connections();
+            (c.len() >= n).then_some(c)
+        })
+    }
+
+    pub fn set_no_ack(&self, on: bool) {
+        self.state.lock().unwrap().no_ack = on;
+    }
+
+    pub fn set_resume_url(&self, url: &str) {
+        self.state.lock().unwrap().resume_url = Some(url.into());
+    }
+
+    /// The messages the bot created in a channel, oldest first.
+    pub fn bot_messages(&self, channel: &str) -> Vec<Value> {
+        self.state
+            .lock()
+            .unwrap()
+            .history
+            .get(channel)
+            .map_or_else(Vec::new, |l| {
+                l.iter()
+                    .filter(|m| m["author"]["id"] == BOT)
+                    .cloned()
+                    .collect()
+            })
+    }
+
+    /// The config lines that point the hub at this fake.
+    pub fn config(&self, token_file: &std::path::Path, owner: &str, channels: &[&str]) -> String {
+        let list: Vec<String> = channels.iter().map(|c| format!("\"{c}\"")).collect();
+        format!(
+            "[discord]\ntoken_file = \"{}\"\napi_base = \"{}\"\nowner = \"{owner}\"\nchannels = [{}]\n",
+            token_file.display(),
+            self.base(),
+            list.join(", ")
+        )
+    }
+}
+
+async fn gateway(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>, port: u16) {
+    let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+        return;
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let interval = {
+        let mut s = state.lock().unwrap();
+        s.gateway = Some(tx);
+        s.interval_ms
+    };
+    let hello = json!({"op": 10, "d": {"heartbeat_interval": interval}});
+    if ws.send(Message::text(hello.to_string())).await.is_err() {
+        return;
+    }
+    let next_seq = |state: &Arc<Mutex<State>>| {
+        let mut s = state.lock().unwrap();
+        s.seq += 1;
+        s.seq
+    };
+    loop {
+        tokio::select! {
+            incoming = ws.next() => {
+                let Some(Ok(Message::Text(text))) = incoming else { return };
+                let Ok(frame) = serde_json::from_str::<Value>(text.as_str()) else { continue };
+                match frame["op"].as_u64() {
+                    Some(1) => {
+                        if !state.lock().unwrap().no_ack {
+                            let _ = ws.send(Message::text(json!({"op": 11}).to_string())).await;
+                        }
+                    }
+                    Some(2) => {
+                        let resume = {
+                            let mut s = state.lock().unwrap();
+                            s.connections.push("identify".into());
+                            s.resume_url.clone().unwrap_or(format!("ws://127.0.0.1:{port}"))
+                        };
+                        let seq = next_seq(&state);
+                        let ready = json!({"op": 0, "s": seq, "t": "READY", "d": {"session_id": "fake-session",
+                            "resume_gateway_url": resume, "user": {"id": BOT, "bot": true}}});
+                        let _ = ws.send(Message::text(ready.to_string())).await;
+                    }
+                    Some(6) => {
+                        state.lock().unwrap().connections.push("resume".into());
+                        let seq = next_seq(&state);
+                        let resumed = json!({"op": 0, "s": seq, "t": "RESUMED", "d": {}});
+                        let _ = ws.send(Message::text(resumed.to_string())).await;
+                    }
+                    _ => {}
+                }
+            }
+            cmd = rx.recv() => {
+                let Some(cmd) = cmd else { return };
+                let frame = match cmd {
+                    Gw::Dispatch(kind, d) => json!({"op": 0, "s": next_seq(&state), "t": kind, "d": d}),
+                    Gw::Op7 => json!({"op": 7, "d": null}),
+                    Gw::Op9(resumable) => json!({"op": 9, "d": resumable}),
+                    Gw::Close(code) => {
+                        let close = CloseFrame { code: code.into(), reason: "fake".into() };
+                        let _ = ws.send(Message::Close(Some(close))).await;
+                        return;
+                    }
+                };
+                if ws.send(Message::text(frame.to_string())).await.is_err() {
+                    return;
+                }
+            }
         }
     }
 }
 
 fn reply(status: u16, body: &Value) -> Response<Full<Bytes>> {
+    let bytes = if status == 204 {
+        Bytes::new()
+    } else {
+        Bytes::from(body.to_string())
+    };
     Response::builder()
         .status(status)
         .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body.to_string())))
+        .body(Full::new(bytes))
         .unwrap()
+}
+
+fn param(query: &str, key: &str) -> Option<u64> {
+    query
+        .split('&')
+        .find_map(|p| p.strip_prefix(&format!("{key}=")))
+        .and_then(|v| v.parse().ok())
 }
 
 async fn answer(
@@ -129,6 +374,7 @@ async fn answer(
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or_default().to_string();
     let authorization = req
         .headers()
         .get("authorization")
@@ -140,36 +386,152 @@ async fn answer(
     s.seen.push(Seen {
         method: method.clone(),
         path: path.clone(),
+        query: query.clone(),
         authorization,
         body: body.clone(),
     });
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let unknown = json!({ "message": "Unknown Message", "code": 10008 });
     let response = match (method.as_str(), parts.as_slice()) {
-        ("GET", ["channels", id]) => reply(200, &json!({ "id": id, "type": 0 })),
-        ("POST", ["channels", id, "messages"]) => {
-            let nonce = body["nonce"].as_str().unwrap_or_default().to_string();
-            let enforced = body["enforce_nonce"] == true;
-            let existing = s.nonces.get(&nonce).copied().filter(|_| enforced);
-            let message = if let Some(m) = existing {
-                m
-            } else {
-                s.next_id += 1;
-                s.created += 1;
-                s.next_id
-            };
-            if enforced && !nonce.is_empty() {
-                s.nonces.insert(nonce, message);
+        ("GET", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": null})),
+        ("PATCH", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": "a"})),
+        ("GET", ["applications", "@me"]) => reply(
+            200,
+            &json!({"id": APP, "flags": 1 << 18, "interactions_endpoint_url": null}),
+        ),
+        ("GET", ["gateway"]) => {
+            let url = s
+                .channels
+                .get("gateway")
+                .and_then(|g| g["url"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            reply(200, &json!({ "url": url }))
+        }
+        ("GET", ["channels", id]) => {
+            let channel = s
+                .channels
+                .get(*id)
+                .cloned()
+                .unwrap_or(json!({ "id": id, "type": 0, "guild_id": GUILD }));
+            reply(200, &channel)
+        }
+        ("GET", ["guilds", _, "threads", "active"]) => {
+            reply(200, &json!({ "threads": s.threads, "members": [] }))
+        }
+        ("GET", ["channels", id, "messages"]) => {
+            let limit = usize::try_from(param(&query, "limit").unwrap_or(50)).unwrap();
+            let before = param(&query, "before");
+            let list = s.history.get(*id).cloned().unwrap_or_default();
+            let page: Vec<Value> = list
+                .iter()
+                .rev()
+                .filter(|m| {
+                    before.is_none_or(|b| m["id"].as_str().unwrap().parse::<u64>().unwrap() < b)
+                })
+                .take(limit)
+                .cloned()
+                .collect();
+            reply(200, &Value::Array(page))
+        }
+        ("GET", ["channels", id, "messages", mid]) => {
+            match s
+                .history
+                .get(*id)
+                .and_then(|l| l.iter().find(|m| m["id"] == *mid).cloned())
+            {
+                Some(m) => reply(200, &m),
+                None => reply(404, &unknown),
             }
-            // A scripted status answers after the message exists: the sender cannot know.
-            if let Some(status) = s.scripted.pop_front() {
-                return Ok(reply(status, &json!({ "message": "scripted" })));
+        }
+        ("POST", ["channels", id, "messages"]) => create(&mut s, id, &body),
+        ("PATCH", ["channels", id, "messages", mid]) => {
+            if let Some(m) = s
+                .history
+                .get_mut(*id)
+                .and_then(|l| l.iter_mut().find(|m| m["id"] == *mid))
+            {
+                if let Some(c) = body.get("content") {
+                    m["content"] = c.clone();
+                }
+                if let Some(c) = body.get("components") {
+                    m["components"] = c.clone();
+                }
             }
-            reply(
-                200,
-                &json!({ "id": message.to_string(), "channel_id": id, "content": body["content"] }),
-            )
+            reply(200, &json!({ "id": mid, "channel_id": id }))
+        }
+        ("PUT", ["channels", _, "messages", _, "reactions", _, "@me"]) => reply(204, &Value::Null),
+        ("POST", ["channels", _, "typing"] | ["interactions", _, _, "callback"]) => {
+            reply(204, &Value::Null)
         }
         _ => reply(404, &json!({ "message": "Unknown", "code": 0 })),
     };
     Ok(response)
+}
+
+/// A message create: deduplicated by enforced nonce, a reply gets type 19 and its reference.
+fn create(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
+    let nonce = body["nonce"].as_str().unwrap_or_default().to_string();
+    let enforced = body["enforce_nonce"] == true;
+    let reference = body["message_reference"]["message_id"]
+        .as_str()
+        .map(str::to_string);
+    let source_exists = reference.as_ref().is_none_or(|r| {
+        s.history
+            .get(id)
+            .is_some_and(|l| l.iter().any(|m| m["id"] == r.as_str()))
+    });
+    if !source_exists && body["message_reference"]["fail_if_not_exists"] == true {
+        return reply(400, &json!({"message": "Invalid Form Body", "code": 50035}));
+    }
+    let existing = s.nonces.get(&nonce).copied().filter(|_| enforced);
+    let message = if let Some(m) = existing {
+        m
+    } else {
+        s.next_id += 1;
+        s.created += 1;
+        s.next_id
+    };
+    if enforced && !nonce.is_empty() {
+        s.nonces.insert(nonce, message);
+    }
+    let mut created = json!({ "id": message.to_string(), "channel_id": id, "content": body["content"],
+                "author": {"id": BOT, "bot": true}, "type": 0, "components": body["components"] });
+    if let Some(r) = &reference {
+        created["type"] = json!(19);
+        created["message_reference"] = json!({"message_id": r, "channel_id": id});
+    }
+    if existing.is_none() {
+        s.history
+            .entry((id).to_string())
+            .or_default()
+            .push(created.clone());
+    }
+    if let Some(status) = s.scripted.pop_front() {
+        return reply(status, &json!({ "message": "scripted" }));
+    }
+    reply(200, &created)
+}
+
+impl FakeDiscord {
+    /// Makes `GET /gateway` name this fake's Gateway.
+    pub fn serve_gateway(&self) {
+        let url = format!("ws://127.0.0.1:{}", self.gateway_port);
+        self.state
+            .lock()
+            .unwrap()
+            .channels
+            .insert("gateway".into(), json!({ "url": url }));
+    }
+
+    /// A button press interaction from `user` on bot message `message` in `channel`.
+    pub fn press(&self, user: &str, channel: &str, message: &str, custom_id: &str) {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let raw = json!({"id": (700_000_000_000_000_000u64 + n).to_string(), "token": format!("tok{n}"),
+            "application_id": APP, "channel_id": channel, "type": 3,
+            "data": {"component_type": 2, "custom_id": custom_id},
+            "message": {"id": message}, "member": {"user": {"id": user}}});
+        self.gw(Gw::Dispatch("INTERACTION_CREATE", raw));
+    }
 }

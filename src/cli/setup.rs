@@ -18,10 +18,12 @@ use crate::sys::fs::{create_atomic, read_private, write_atomic};
 use crate::sys::paths::Paths;
 
 /// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 3] = [
+const MANAGED: [(&str, &str, &str); 5] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
+    ("discord", "owner", "--discord-owner"),
+    ("discord", "channels", "--discord-channels"),
 ];
 const CONFIG_MAX: u64 = 1024 * 1024;
 
@@ -112,7 +114,12 @@ fn toml_string(value: &str) -> String {
 
 /// Sets `key` in `[section]` to `value`, replacing its line or adding it; everything else is kept.
 pub(crate) fn set_key(text: &str, section: &str, key: &str, value: &str) -> String {
-    let line = format!("{key} = {}", toml_string(value));
+    set_rendered(text, section, key, &toml_string(value))
+}
+
+/// [`set_key`] with a value already written as TOML.
+fn set_rendered(text: &str, section: &str, key: &str, rendered: &str) -> String {
+    let line = format!("{key} = {rendered}");
     let header = format!("[{section}]");
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let start = lines.iter().position(|l| l.trim() == header);
@@ -193,6 +200,27 @@ fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec
                 );
                 (config.omp.path.clone(), Some(note))
             }
+            ("discord", "owner") => (
+                config
+                    .discord
+                    .owner
+                    .map_or_else(|| "-".to_string(), |o| o.to_string()),
+                Some(if config.discord.intake() {
+                    "intake runs".to_string()
+                } else {
+                    "intake is off until the owner and channels are set".to_string()
+                }),
+            ),
+            ("discord", "channels") => (
+                config
+                    .discord
+                    .channels
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                None,
+            ),
             _ => {
                 let path = crate::jobs::owner::health::token_path(&config, &paths.config_file);
                 let note = match read_private(&path, 4096) {
@@ -258,7 +286,28 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
             if key == "token_file" && !Path::new(&v).is_absolute() {
                 return Err(Failure::Usage(format!("{flag}: expected an absolute path")));
             }
-            text = set_key(&text, section, key, &v);
+            let id = |s: &str| crate::relay::discord::Snowflake::parse(s.trim()).is_some();
+            if key == "owner" && !id(&v) {
+                return Err(Failure::Usage(format!(
+                    "{flag}: expected the owner's Discord user ID"
+                )));
+            }
+            if key == "channels" {
+                let ids: Vec<&str> = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() || !ids.iter().all(|s| id(s)) {
+                    return Err(Failure::Usage(format!(
+                        "{flag}: expected Discord channel IDs separated by commas"
+                    )));
+                }
+                let list: Vec<String> = ids.iter().map(|s| toml_string(s)).collect();
+                text = set_rendered(&text, section, key, &format!("[{}]", list.join(", ")));
+                continue;
+            }
+            text = set_key(&text, section, key, v.trim());
         }
     }
     let after = sha256_hex(text.as_bytes());
@@ -332,7 +381,7 @@ fn print_report(
     out::line(&format!("  before {before}"));
     out::line(&format!("  after  {after}"));
     out::line(
-        "  managed: hub.log_level, omp.path, discord.token_file; other keys and comments are kept",
+        "  managed: hub.log_level, omp.path, discord.token_file, discord.owner, discord.channels; other keys and comments are kept",
     );
     if let Some(e) = invalid {
         out::line(&format!("  the result is not a valid config: {e}"));

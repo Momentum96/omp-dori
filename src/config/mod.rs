@@ -86,14 +86,64 @@ pub(crate) struct OmpSettings {
     pub(crate) path: String,
 }
 
-/// `[discord]`: where the bot token is, the guild for channel names, and the loopback-only test
-/// override of the API base (DISC-OUT req. 10).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `[discord]`: where the bot token is, the guild for channel names, the loopback-only test
+/// override of the API base (DISC-OUT req. 10), and intake: the owner, the watched channels and
+/// the question and approval rules (DISC-IN req. 1-7; DISC-OUT req. 74, 78, 81; DESIGN 12.2 A17, A18).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiscordSettings {
     /// Default `<config dir>/secrets/discord-token`.
     pub(crate) token_file: Option<PathBuf>,
     pub(crate) guild: Option<Snowflake>,
     pub(crate) api_base: Option<Base>,
+    /// The owner's account; intake runs only with an owner and at least one channel.
+    pub(crate) owner: Option<Snowflake>,
+    /// Watched channels, threads, DMs and forums, without duplicates (at most 256).
+    pub(crate) channels: Vec<Snowflake>,
+    /// Follow threads under watched channels (DISC-IN req. 6).
+    pub(crate) follow_threads: bool,
+    /// Where the lead's questions go; default the one watched channel when only one is listed.
+    pub(crate) home: Option<Snowflake>,
+    /// Owner approval of OMP permission requests by button (off by default, A18).
+    pub(crate) remote_approvals: bool,
+    /// A question with one recommended choice takes it after this long (A17, default 3 minutes).
+    pub(crate) form_default_after: Duration,
+    /// Set an empty bot avatar at start (MSG-11; the owner may turn it off).
+    pub(crate) profile: bool,
+}
+
+/// Most watched Discord channels (DISC-IN req. 5).
+pub(crate) const DISCORD_CHANNELS_MAX: usize = 256;
+
+impl Default for DiscordSettings {
+    fn default() -> Self {
+        Self {
+            token_file: None,
+            guild: None,
+            api_base: None,
+            owner: None,
+            channels: Vec::new(),
+            follow_threads: true,
+            home: None,
+            remote_approvals: false,
+            form_default_after: Duration::from_mins(3),
+            profile: true,
+        }
+    }
+}
+
+impl DiscordSettings {
+    /// Intake runs only with an owner and watched channels.
+    pub(crate) fn intake(&self) -> bool {
+        self.owner.is_some() && !self.channels.is_empty()
+    }
+
+    /// The lead's question channel (DISC-OUT req. 78).
+    pub(crate) fn home(&self) -> Option<Snowflake> {
+        self.home.or(match self.channels.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        })
+    }
 }
 
 /// `[limits]`: the account-limits view (WS req. 37-38, 81).
@@ -415,6 +465,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
                 Err(e) => errors.push(d.error("api_base", &e)),
             }
         }
+        discord_intake(errors, &mut d, &mut config.discord);
         d.finish(errors);
     }
     if let Some(mut o) = root.table(errors, "outgoing") {
@@ -672,6 +723,61 @@ fn templates(
 }
 
 /// Parses `30s`, `5m`, `2h`, `1d` and sums like `1h30m`.
+/// The intake keys of `[discord]`.
+fn discord_intake(errors: &mut Vec<ConfigError>, d: &mut Section<'_>, out: &mut DiscordSettings) {
+    if let Some(owner) = d.string(errors, "owner") {
+        out.owner = Snowflake::parse(owner);
+        if out.owner.is_none() {
+            errors.push(d.error("owner", "expected the owner's Discord user ID"));
+        }
+    }
+    if let Some(list) = d.strings(errors, "channels") {
+        for text in &list {
+            match Snowflake::parse(text) {
+                Some(id) if !out.channels.contains(&id) => out.channels.push(id),
+                Some(_) => {}
+                None => errors.push(d.error("channels", &format!("'{text}' is not a Discord ID"))),
+            }
+        }
+        if out.channels.len() > DISCORD_CHANNELS_MAX {
+            errors.push(d.error("channels", "at most 256 channels"));
+        }
+    }
+    if let Some(on) = d.bool(errors, "follow_threads") {
+        out.follow_threads = on;
+    }
+    if let Some(home) = d.string(errors, "home") {
+        out.home = Snowflake::parse(home).filter(|h| out.channels.contains(h));
+        if out.home.is_none() {
+            errors.push(d.error("home", "expected one of the watched channels"));
+        }
+    }
+    if let Some(on) = d.bool(errors, "remote_approvals") {
+        out.remote_approvals = on;
+    }
+    if let Some(on) = d.bool(errors, "profile") {
+        out.profile = on;
+    }
+    if let Some(after) = d.duration(
+        errors,
+        "form_default_after",
+        Duration::from_secs(1),
+        Duration::from_hours(1),
+    ) {
+        out.form_default_after = after;
+    }
+    if out.channels.is_empty() != out.owner.is_none() {
+        errors.push(d.error(
+            if out.owner.is_none() {
+                "owner"
+            } else {
+                "channels"
+            },
+            "intake needs both the owner and the watched channels",
+        ));
+    }
+}
+
 pub(crate) fn parse_duration(text: &str) -> Option<Duration> {
     let mut total: u64 = 0;
     let mut number: Option<u64> = None;

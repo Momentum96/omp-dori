@@ -231,6 +231,8 @@ pub(crate) trait Runtime: Send + Sync + 'static {
 /// req. 3). [`Control::snapshot`] never waits.
 pub(crate) trait Control: Send + Sync + 'static {
     fn snapshot(&self) -> Arc<Snapshot>;
+    /// Follows the snapshot: changes when a readback or an event moves the state.
+    fn states(&self) -> tokio::sync::watch::Receiver<Arc<Snapshot>>;
     fn subscribe(&self) -> broadcast::Receiver<(u64, SessionEvent)>;
     fn events_after(&self, after: u64, limit: usize) -> EventPage;
     /// Whether the child is still running.

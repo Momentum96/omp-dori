@@ -49,6 +49,9 @@ pub(crate) mod method {
     pub(crate) const LEAD_ACCEPT_MODEL: &str = "lead.accept_model";
     pub(crate) const LEAD_ANSWER: &str = "lead.answer";
     pub(crate) const LEAD_EVENTS: &str = "lead.events";
+    pub(crate) const DISCORD_STATUS: &str = "discord.status";
+    pub(crate) const DISCORD_RELEASE: &str = "discord.release";
+    pub(crate) const DISCORD_RESET: &str = "discord.reset";
 }
 
 /// Error codes besides the decision classes.
@@ -221,6 +224,19 @@ pub(crate) struct Stats {
     /// Prompt line written to OMP's `agent_start`.
     #[serde(default)]
     pub(crate) agent_start_latency: Option<LatencySummary>,
+    /// Discord Gateway frame read to OMP's `agent_start` (wake, end to end).
+    #[serde(default)]
+    pub(crate) discord_wake_latency: Option<LatencySummary>,
+    /// Discord Gateway connection established to its catch-up read finished.
+    #[serde(default)]
+    pub(crate) discord_catch_up_latency: Option<LatencySummary>,
+}
+
+/// Parameters of the `discord.*` methods.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DiscordParams {
+    pub(crate) room: Option<String>,
 }
 
 /// Parameters of the `lead.*` methods; each method reads the fields it needs.
@@ -269,6 +285,8 @@ pub(crate) struct HostDisk {
 pub(crate) struct LatencySummary {
     pub(crate) count: usize,
     pub(crate) p50_us: u64,
+    #[serde(default)]
+    pub(crate) p95_us: u64,
     pub(crate) p99_us: u64,
     pub(crate) max_us: u64,
 }
@@ -310,6 +328,7 @@ impl From<Summary> for LatencySummary {
         Self {
             count: s.count,
             p50_us: s.p50_us,
+            p95_us: s.p95_us,
             p99_us: s.p99_us,
             max_us: s.max_us,
         }

@@ -237,8 +237,31 @@ fn nofollow() -> i32 {
 pub(crate) mod tests {
     use super::*;
 
-    /// A unique, owner-only scratch directory under the system temp folder.
-    pub(crate) fn scratch(tag: &str) -> PathBuf {
+    /// A unique, owner-only scratch directory under the system temp folder, removed with everything
+    /// in it when the guard drops (also when a test fails: unwinding runs the drop).
+    #[derive(Debug)]
+    pub(crate) struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    pub(crate) fn scratch(tag: &str) -> Scratch {
         static N: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "cataly-unit-{tag}-{}-{}",
@@ -247,7 +270,7 @@ pub(crate) mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         ensure_private_dir(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// Marks a test script executable by its owner only.

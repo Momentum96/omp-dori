@@ -62,6 +62,84 @@ fn simple(hub: &mut Client, name: &str, params: Value, as_json: bool) -> Result<
     })
 }
 
+fn print_discord(v: &Value) {
+    let h = v.get("health").cloned().unwrap_or(Value::Null);
+    let reason = h
+        .get("reason")
+        .and_then(Value::as_str)
+        .map_or_else(String::new, |r| format!(" ({r})"));
+    out::line(&format!(
+        "discord  {}{reason}, {}",
+        text(&h, "state"),
+        if v.get("healthy") == Some(&Value::Bool(true)) {
+            "healthy"
+        } else {
+            "not healthy"
+        }
+    ));
+    out::line(&format!(
+        "bot      {} for owner {}, buttons {}",
+        text(&h, "bot"),
+        text(&h, "owner"),
+        if h.get("buttons") == Some(&Value::Bool(true)) {
+            "on"
+        } else {
+            "off"
+        }
+    ));
+    let c = v.get("counts").cloned().unwrap_or(Value::Null);
+    out::line(&format!(
+        "rooms    {} watched, {} followed threads, {} held",
+        text(&c, "rooms"),
+        text(&h, "followed_threads"),
+        text(&c, "held")
+    ));
+    out::line(&format!(
+        "queue    {} waiting, {} answers to post, {} owed replies open",
+        text(&c, "queued"),
+        text(&c, "answers_waiting"),
+        text(&c, "owed_open")
+    ));
+    for held in v
+        .get("held")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        out::line(&format!(
+            "held     room {}: {}",
+            text(held, "room"),
+            text(held, "reason")
+        ));
+    }
+    if let Some(e) = h.get("last_error").and_then(Value::as_str) {
+        out::line(&format!("last     {e}"));
+    }
+}
+
+/// `discord` verbs; `None` for anything else.
+pub(super) fn discord_verbs(
+    p: &Parsed,
+    hub: &mut Client,
+    as_json: bool,
+) -> Option<Result<(), Failure>> {
+    let result = match p.spec.path {
+        ["discord", "status"] => hub
+            .call(method::DISCORD_STATUS, json!({}), CALL_TIMEOUT)
+            .map_err(Failure::from)
+            .and_then(|v| show(v, as_json, |v: Value| print_discord(&v))),
+        ["discord", "release"] => simple(
+            hub,
+            method::DISCORD_RELEASE,
+            json!({ "room": p.args.first() }),
+            as_json,
+        ),
+        ["discord", "reset"] => simple(hub, method::DISCORD_RESET, json!({}), as_json),
+        _ => return None,
+    };
+    Some(result)
+}
+
 /// `lead` verbs; `None` for anything else.
 pub(super) fn verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(), Failure>> {
     let arg = |n: usize| p.args.get(n).cloned().unwrap_or_default();

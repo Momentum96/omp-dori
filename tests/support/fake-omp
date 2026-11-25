@@ -9,7 +9,62 @@
 #                               success, get_state naming the session it created (--session-dir) or
 #                               resumed (--resume), the model from --model, and no turns. Each such
 #                               process appends its PID to omp-data/pids.
+#   with omp-data/turns          a prompt or follow-up runs one turn: its user entry is appended to the
+#                               session file, then agent_start, one assistant answer (omp-data/answer.json,
+#                               a JSON string, else "ok") appended as a final message, agent_end,
+#                               prompt_result and session_settled. omp-data/slow makes the turn take 2 s
+#                               in the background (get_state then reports streaming, and a prompt or
+#                               follow-up meanwhile waits for the turn end, as OMP's follow-up does);
+#                               omp-data/noentry answers the prompt and writes nothing; with omp-data/ask
+#                               a message containing ASK opens the HTML `form` dialog stock OMP's ask
+#                               tool sends, and the turn ends when it is answered: "picked <choice>".
 dir=$(cd "$(dirname "$0")" && pwd)/omp-data
+
+# One turn of the `turns` fixture for the command line $1 with ID $2.
+turn() {
+    [ -f "$dir/noentry" ] && return
+    if [ -f "$dir/busy" ]; then
+        printf '%s\n' "$1" >> "$dir/queued"
+        return
+    fi
+    msg=$(printf '%s' "$1" | sed -nE 's/.*"message":("([^"\\]|\\.)*").*/\1/p')
+    printf '{"type":"message","message":{"role":"user","content":[{"type":"text","text":%s}]}}\n' "$msg" >> "$file"
+    echo '{"type":"agent_start"}'
+    if [ -f "$dir/ask" ] && printf '%s' "$msg" | grep -q ASK; then
+        asked=$2
+        echo '{"type":"extension_ui_request","id":"d1","method":"form","html":"<form><fieldset><legend>Pick a color</legend><label><input type=\"radio\" name=\"color\" value=\"Red\"> Red</label><label><input type=\"radio\" name=\"color\" value=\"Blue\" checked> Blue</label></fieldset></form>"}'
+        return
+    fi
+    answer='"ok"'
+    [ -f "$dir/answer.json" ] && answer=$(cat "$dir/answer.json")
+    if [ -f "$dir/slow" ]; then
+        touch "$dir/busy"
+        (
+            sleep 2
+            finish "$answer" "$2"
+            rm -f "$dir/busy"
+            if [ -f "$dir/queued" ]; then
+                mv "$dir/queued" "$dir/queued.run"
+                while IFS= read -r next; do
+                    nid=$(printf '%s' "$next" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+                    turn "$next" "$nid"
+                done < "$dir/queued.run"
+                rm -f "$dir/queued.run"
+            fi
+        ) &
+        return
+    fi
+    finish "$answer" "$2"
+}
+
+# Ends a turn with the JSON string $1 as the final answer, for the prompt with ID $2.
+finish() {
+    printf '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":%s}],"stopReason":"stop"}}\n' "$1" >> "$file"
+    printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":%s}],"stopReason":"stop"}}\n' "$1"
+    echo '{"type":"agent_end"}'
+    printf '{"type":"prompt_result","id":"%s","agentInvoked":true,"status":"completed","sessionSettled":true}\n' "$2"
+    echo '{"type":"session_settled"}'
+}
 
 rpc() {
     model=fake/primary
@@ -49,11 +104,23 @@ rpc() {
         cid=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
         kind=$(printf '%s' "$line" | sed -n 's/.*"type":"\([a-z_]*\)".*/\1/p')
         case "$kind" in
-        get_state) data="{$state}" ;;
+        get_state)
+            streaming=false
+            [ -f "$dir/busy" ] && streaming=true
+            data=$(printf '{%s}' "$state" | sed "s/\"isStreaming\":false/\"isStreaming\":$streaming/") ;;
         get_session_lease) data='{"held":[],"unknown":[]}' ;;
         *) data='{}' ;;
         esac
+        if [ "$kind" = extension_ui_response ]; then
+            picked=$(printf '%s' "$line" | sed -nE 's/.*"color":"([^"]*)".*/\1/p')
+            [ -n "$picked" ] || picked=cancelled
+            finish "\"picked $picked\"" "$asked"
+            continue
+        fi
         printf '{"type":"response","id":"%s","command":"%s","success":true,"data":%s}\n' "$cid" "$kind" "$data"
+        case "$kind" in
+        prompt | follow_up | steer) [ -f "$dir/turns" ] && turn "$line" "$cid" ;;
+        esac
     done
 }
 

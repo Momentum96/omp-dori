@@ -1031,6 +1031,10 @@ impl Control for Session {
         Arc::clone(&self.inner.snapshot.borrow())
     }
 
+    fn states(&self) -> watch::Receiver<Arc<Snapshot>> {
+        self.inner.snapshot.subscribe()
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<(u64, SessionEvent)> {
         self.inner.events.subscribe()
     }

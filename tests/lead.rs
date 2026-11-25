@@ -72,7 +72,19 @@ fn lead_restarts_on_its_session_after_omp_exits() {
     );
     assert_eq!(third["session"]["session_id"], session, "{third}");
 
-    let events = hub.events();
+    // Events are recorded after the phase they report turns live: wait for the third start's record.
+    let resumed = |events: &[Value]| {
+        events
+            .iter()
+            .filter(|e| {
+                e["kind"] == "lead.started" && e["text"].as_str().unwrap().contains("resumed")
+            })
+            .count()
+    };
+    let events = hub.until(Duration::from_secs(10), || {
+        let events = hub.events();
+        (resumed(&events) == 2).then_some(events)
+    });
     let stopped: Vec<&Value> = events
         .iter()
         .filter(|e| e["kind"] == "session.stopped")
@@ -95,11 +107,6 @@ fn lead_restarts_on_its_session_after_omp_exits() {
             .unwrap()
             .contains("restarting in 2 s")
     );
-    let resumed = events
-        .iter()
-        .filter(|e| e["kind"] == "lead.started" && e["text"].as_str().unwrap().contains("resumed"))
-        .count();
-    assert_eq!(resumed, 2, "{events:?}");
     let inbox = hub.json(&["lead", "inbox", "--json"]);
     let notes: Vec<&Value> = inbox
         .as_array()

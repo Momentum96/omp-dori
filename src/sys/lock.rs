@@ -78,6 +78,18 @@ mod tests {
             LockOutcome::Acquired(_) => panic!("lock taken twice"),
         }
         drop(first);
-        assert!(matches!(acquire(&path).unwrap(), LockOutcome::Acquired(_)));
+        // Another test thread that forks a child at this moment holds a copy of the lock's
+        // descriptor until the child's exec closes it (see docs/build-notes.md, the socket test), so
+        // the lock may stay taken for a few milliseconds after the drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match acquire(&path).unwrap() {
+                LockOutcome::Acquired(_) => break,
+                LockOutcome::Held { .. } if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                LockOutcome::Held { .. } => panic!("the lock stayed held after its drop"),
+            }
+        }
     }
 }

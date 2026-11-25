@@ -124,11 +124,14 @@ pub(crate) fn read_state(data: Option<&Value>) -> Option<ReadState> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct Question {
-    id: String,
+    pub(crate) id: String,
     #[serde(rename = "question")]
-    text: String,
-    options: Vec<String>,
-    multi: bool,
+    pub(crate) text: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) multi: bool,
+    /// Index into `options` of the recommended choice, when the asker named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) recommended: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -240,12 +243,18 @@ fn question_of(item: &Value) -> Option<Question> {
         .into_iter()
         .flatten()
         .filter_map(|choice| string(choice.get("label")).map(str::to_owned))
-        .collect();
+        .collect::<Vec<String>>();
+    let recommended = question
+        .get("recommended")
+        .and_then(Value::as_u64)
+        .and_then(|i| usize::try_from(i).ok())
+        .filter(|i| *i < options.len());
     Some(Question {
         id: id.to_owned(),
         text: text.to_owned(),
         options,
         multi: question.get("multi") == Some(&Value::Bool(true)),
+        recommended,
     })
 }
 

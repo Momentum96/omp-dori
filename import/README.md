@@ -25,11 +25,18 @@ are durable rows in `store::host`, keyed per inbox target), `m2/turn_events.rs` 
 `agent_start` and `message_end` handling in the session actor's event task), `m2/transcript.rs`
 (`omp::transcript`, plus the delivery-marker search).
 
+Adapted and deleted in milestone 2 slice 2b: `m2/discord_gateway.rs` (`relay::discord::gateway`:
+the connection loop behind a `Handler` trait, TLS through `relay::http::connect`, `futures-util` for the
+WebSocket stream; admitted owner messages go to the durable arrival queue before the next frame),
+`m1/discord_rest.rs` (the rest of it on `relay::discord::Rest`: bot identity and the message-content
+intent check, history and single-message reads, linked reply parts and the 10008 rule, edits, clearing
+buttons by an edit, interaction callbacks, the seen reaction; the DM-channel call was not taken because
+the owner's DM channel is listed by ID like any other room), `m1/discord_types.rs`
+(`relay::discord::types`: message gate, normalisation and button presses; the owner-only decision with
+its stamp is in `relay::discord::questions`, which defines the approval card from DISC-OUT req. 81-83).
+
 | File | Target module | Known gaps |
 | --- | --- | --- |
-| `m1/discord_rest.rs` | `relay::discord` REST (milestone 2) | Absorbed in milestone 1: the request policy (now `relay::http` on hyper), message create with parts, enforced nonce and no mentions, channel read, Discord error codes (now `relay::discord`). Left: bot identity and the message-content intent check, history read, replies and their receipts, edit, clear, interaction callbacks, the seen reaction, DM channels, the unknown-message (10008) rule. Use `relay::http` and `relay::discord::Snowflake`; do not bring back a second client. |
-| `m1/discord_types.rs` | `relay::discord` types, owner-only button check (milestone 2) | Absorbed in milestone 1: `Snowflake` (now `relay::discord::Snowflake`). Left: message origin, interactions and the owner-only decision check. `ApprovalCard`, `Decision` and `CUSTOM_ID_PREFIX` are undefined: define them from DISC-OUT and the design's form and approval rules. |
-| `m2/discord_gateway.rs` | `relay::discord` Gateway | Hand admitted messages to the arrival queue of the relay pipeline. Use `futures-util` only if tokio-tungstenite requires it. First connect uses `v=10&encoding=json`. Log a dropped interaction when the queue is full. |
 | `m3/discord_threads.rs` | `relay::discord` thread discovery and parent routes | Route state becomes actor state. Log discovery errors. Mapping a message to its earlier-conversation space is not imported; write it from DISC-IN if that feature is built. |
 
 The lint and release-profile settings the owner used before match `DESIGN.md` 10.3 and are already

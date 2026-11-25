@@ -77,6 +77,8 @@ pub(crate) enum EventKind {
     QuotaBlocked,
     DeliveryInDoubt,
     DeliveryFailed,
+    RelayHeld,
+    RelayStopped,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -87,7 +89,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 45] = [
+const KINDS: [KindRow; 47] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -368,6 +370,18 @@ const KINDS: [KindRow; 45] = [
         "delivery.failed",
         &["target", "count", "reason"],
         "{count} message(s) for {target} not delivered: {reason}",
+    ),
+    (
+        EventKind::RelayHeld,
+        "relay.held",
+        &["relay", "room", "reason"],
+        "{relay} room {room} is held: {reason}",
+    ),
+    (
+        EventKind::RelayStopped,
+        "relay.stopped",
+        &["relay", "reason"],
+        "{relay} intake stopped: {reason}",
     ),
 ];
 

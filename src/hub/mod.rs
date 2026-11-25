@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::cli::exit;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
-use crate::host::lead::{Env as LeadEnv, Lead};
+use crate::host::lead::{Env as LeadEnv, Events, Lead};
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::jobs::{Ctx, Files, Jobs};
 use crate::log;
@@ -58,6 +58,7 @@ pub(crate) struct Hub {
     supervisor: Supervisor,
     lead: Arc<Lead<Headless>>,
     agent_start: Latency,
+    pub(crate) discord: Arc<crate::relay::discord::intake::Shared>,
 }
 
 impl Hub {
@@ -106,6 +107,8 @@ impl Hub {
             wake_latency: self.lead.wake_latency.summary().map(Into::into),
             confirm_latency: self.lead.confirm_latency.summary().map(Into::into),
             agent_start_latency: self.agent_start.summary().map(Into::into),
+            discord_wake_latency: self.discord.wake_latency.summary().map(Into::into),
+            discord_catch_up_latency: self.discord.catch_up_latency.summary().map(Into::into),
         }
     }
 
@@ -287,12 +290,15 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             return exit::FAILED;
         }
     };
-    let agent_start = Latency::default();
-    let lead = lead(paths, &jobs, &omp, &config_rx, &store, &agent_start);
-    {
-        let (lead, stop) = (Arc::clone(&lead), shutdown_rx.clone());
-        supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
-    }
+    let (lead, agent_start, discord) = sessions(
+        paths,
+        &jobs,
+        &omp,
+        &config_rx,
+        &store,
+        &supervisor,
+        &shutdown_rx,
+    );
     let hub = Arc::new(Hub {
         paths: paths.clone(),
         started_ms: now_ms(),
@@ -306,6 +312,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         supervisor: supervisor.clone(),
         lead: Arc::clone(&lead),
         agent_start,
+        discord,
     });
     {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
@@ -338,6 +345,52 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     code
 }
 
+/// The lead and Discord intake, each under its supervised task; returns the lead, its `agent_start`
+/// latency ring and intake's shared state.
+fn sessions(
+    paths: &Paths,
+    jobs: &Jobs,
+    omp: &Arc<Omp>,
+    config: &watch::Receiver<Arc<Config>>,
+    store: &Store,
+    supervisor: &Supervisor,
+    shutdown: &watch::Receiver<bool>,
+) -> (
+    Arc<Lead<Headless>>,
+    Latency,
+    Arc<crate::relay::discord::intake::Shared>,
+) {
+    let agent_start = Latency::default();
+    let events = hub_events(jobs);
+    let lead = lead(paths, jobs, omp, config, store, &agent_start, &events);
+    {
+        let (lead, stop) = (Arc::clone(&lead), shutdown.clone());
+        supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
+    }
+    let discord = discord(
+        paths, jobs, &lead, &events, config, store, supervisor, shutdown,
+    );
+    (lead, agent_start, discord)
+}
+
+/// Events of the lead and the relays, recorded one at a time in the order they were emitted (a task
+/// per event could commit `session.stopped` after the `lead.started` that followed it).
+fn hub_events(jobs: &Jobs) -> Events {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Emit>();
+    let jobs = jobs.clone();
+    tokio::spawn(async move {
+        while let Some(emit) = rx.recv().await {
+            if let Err(e) = jobs.hub_event(emit).await {
+                log::warn("hub event not recorded", &[("error", &e)]);
+            }
+        }
+    });
+    Arc::new(move |emit: Emit| {
+        // Closed only when the runtime shuts down.
+        let _ = tx.send(emit);
+    })
+}
+
 /// The standing lead with its headless runtime (DESIGN 4.2), started by its supervised task.
 fn lead(
     paths: &Paths,
@@ -346,9 +399,9 @@ fn lead(
     config: &watch::Receiver<Arc<Config>>,
     store: &Store,
     agent_start: &Latency,
+    events: &Events,
 ) -> Arc<Lead<Headless>> {
     let gate = jobs.clone();
-    let events = jobs.clone();
     let (state, socket, logs) = (
         paths.state_dir.clone(),
         paths.socket.clone(),
@@ -359,14 +412,7 @@ fn lead(
         config: config.clone(),
         omp: Arc::clone(omp),
         gate_held: Arc::new(move || gate.gate().held),
-        events: Arc::new(move |emit: Emit| {
-            let jobs = events.clone();
-            tokio::spawn(async move {
-                if let Err(e) = jobs.hub_event(emit).await {
-                    log::warn("session event not recorded", &[("error", &e)]);
-                }
-            });
-        }),
+        events: Arc::clone(events),
         store: store.clone(),
         state_dir: paths.state_dir.clone(),
         make: Box::new(move |config: &Config, exe: &Path| Headless {
@@ -380,6 +426,37 @@ fn lead(
             agent_start: agent_start.clone(),
         }),
     })
+}
+
+/// Discord intake and replies (DESIGN 5.1), a supervised task that idles until the config names the
+/// owner and channels.
+#[allow(clippy::too_many_arguments)]
+fn discord(
+    paths: &Paths,
+    jobs: &Jobs,
+    lead: &Arc<Lead<Headless>>,
+    events: &Events,
+    config: &watch::Receiver<Arc<Config>>,
+    store: &Store,
+    supervisor: &Supervisor,
+    shutdown: &watch::Receiver<bool>,
+) -> Arc<crate::relay::discord::intake::Shared> {
+    use crate::relay::discord::intake::{Env, Shared, run};
+    let shared = Arc::new(Shared::default());
+    let rest = jobs.clone();
+    let env = Arc::new(Env {
+        config: config.clone(),
+        store: store.clone(),
+        lead: Arc::clone(lead),
+        events: Arc::clone(events),
+        rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
+        spill_dir: paths.files_dir.join("relay"),
+    });
+    let (task, stop) = (Arc::clone(&shared), shutdown.clone());
+    supervisor.spawn("discord", move || {
+        run(Arc::clone(&task), Arc::clone(&env), stop.clone())
+    });
+    shared
 }
 
 /// The OMP probe, the heartbeat and store maintenance; returns the heartbeat the stall detector reads.

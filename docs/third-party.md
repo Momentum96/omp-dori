@@ -19,6 +19,8 @@ no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.
 | tokio-rustls | 0.26 | MIT OR Apache-2.0 | https://crates.io/crates/tokio-rustls | `ring`, `tls12`: TLS on tokio streams through rustls with the ring provider (`DESIGN.md` 10.2); brings rustls 0.23 (Apache-2.0 OR ISC OR MIT), rustls-webpki (ISC), rustls-pki-types (MIT OR Apache-2.0) |
 | webpki-roots | 1.0 | CDLA-Permissive-2.0 | https://crates.io/crates/webpki-roots | defaults off: the Mozilla root set compiled in, so no system trust store is read |
 | regex | 1.13 | MIT OR Apache-2.0 | https://crates.io/crates/regex | `std`, `perf` only (no Unicode tables): owner secret patterns of the backup job, linear time. Unicode classes in a pattern are refused as a config error. |
+| tokio-tungstenite | 0.30 | MIT | https://crates.io/crates/tokio-tungstenite | `handshake` only: WebSocket framing for the Discord Gateway (`DESIGN.md` 10.2). TLS comes from the existing tokio-rustls (ring) connector in `relay::http`, so no TLS feature is enabled. Brings tungstenite 0.30 (MIT OR Apache-2.0) with sha1, rand, data-encoding, thiserror, utf-8 |
+| futures-util | 0.3 | MIT OR Apache-2.0 | https://crates.io/crates/futures-util | `sink`: the stream and sink traits of the WebSocket stream; already a dependency of tokio-tungstenite |
 | unicode-width | 0.2 | MIT OR Apache-2.0 | https://crates.io/crates/unicode-width | defaults off: display width for table rendering in `relay::text` (DISC-OUT req. 43) |
 
 Transitive crates come only through these (for example `libsqlite3-sys`, `cc` at build time, `mio`,
