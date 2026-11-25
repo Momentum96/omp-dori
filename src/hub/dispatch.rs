@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 39] = [
+const METHODS: [Method; 40] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -227,6 +227,12 @@ const METHODS: [Method; 39] = [
     // the dispatcher's reply dedupe, which would answer other inputs with the earlier reply.
     Method {
         name: method::LANE,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    // The orderly stop the restart option asks for (IR req. 33): refused while a session works.
+    Method {
+        name: method::HUB_STOP,
         needs: Authority::Owner,
         mutating: false,
     },
@@ -440,6 +446,7 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         {
             relay_method(hub, relay, raw).await
         }
+        method::HUB_STOP => hub.request_stop().map(|()| Value::Null).map_err(refused),
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),

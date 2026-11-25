@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 44] = [
+pub(crate) const COMMANDS: [Spec; 51] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -41,9 +41,9 @@ pub(crate) const COMMANDS: [Spec; 44] = [
     Spec {
         path: &["status"],
         args: &[],
-        flags: &["--json"],
-        values: &[],
-        summary: "show the hub's state",
+        flags: &["--json", "--install"],
+        values: &["--prefix"],
+        summary: "show the hub's state; --install checks the installation instead (links, records, hashes)",
     },
     Spec {
         path: &["events"],
@@ -102,18 +102,67 @@ pub(crate) const COMMANDS: [Spec; 44] = [
         summary: "apply the config file; an invalid file is refused and the running config kept",
     },
     Spec {
-        path: &["bridge", "install"],
+        path: &["version"],
         args: &[],
         flags: &["--json"],
         values: &[],
-        summary: "link the bridge into OMP's extension folder (PI_CODING_AGENT_DIR or ~/.omp/agent)",
+        summary: "version, commit, target, minimum OMP and bridge protocol; needs no config",
     },
     Spec {
-        path: &["bridge", "status"],
+        path: &["extension"],
+        args: &[],
+        flags: &[],
+        values: &[],
+        summary: "print the bridge file this binary installs (the release's extension asset)",
+    },
+    Spec {
+        path: &["install"],
+        args: &[],
+        flags: &[],
+        values: &["--from", "--prefix"],
+        summary: "install from a folder of release assets (--from); install.sh runs this",
+    },
+    Spec {
+        path: &["update"],
+        args: &[],
+        flags: &["--restart"],
+        values: &["--from", "--tag", "--prefix"],
+        summary: "install the latest stable release (or --tag, or --from <folder>); --restart restarts a running hub",
+    },
+    Spec {
+        path: &["rollback"],
+        args: &[],
+        flags: &["--restart"],
+        values: &["--expect", "--prefix"],
+        summary: "switch back to the previous version (--expect <version> to assert which)",
+    },
+    Spec {
+        path: &["check"],
         args: &[],
         flags: &["--json"],
+        values: &["--tag"],
+        summary: "compare the latest stable release (or --tag) with the installed version; changes nothing",
+    },
+    Spec {
+        path: &["uninstall"],
+        args: &[],
+        flags: &[],
+        values: &["--prefix"],
+        summary: "remove the program folder and both links; config and state are kept",
+    },
+    Spec {
+        path: &["service", "enable"],
+        args: &[],
+        flags: &[],
         values: &[],
-        summary: "check that OMP's extension folder links this version's bridge",
+        summary: "write and start a user service that runs the hub (systemd user unit or launchd agent)",
+    },
+    Spec {
+        path: &["service", "disable"],
+        args: &[],
+        flags: &[],
+        values: &[],
+        summary: "stop and remove the user service Cataly created",
     },
     Spec {
         path: &["setup"],

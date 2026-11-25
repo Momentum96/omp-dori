@@ -312,7 +312,7 @@ pub(crate) async fn call(
     let mut maybe_sent: Option<String> = None;
     loop {
         attempt += 1;
-        let result = timeout(policy.attempt, once(base, req))
+        let result = timeout(policy.attempt, once(base, req, BODY_CAP))
             .await
             .unwrap_or_else(|_| Err(Attempt::Unknown("no complete answer in time".into())));
         let elapsed = started.elapsed();
@@ -377,7 +377,59 @@ fn after_doubt(maybe_sent: Option<String>, last: Outcome) -> Outcome {
     }
 }
 
-async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
+/// Most redirects a download follows.
+const REDIRECTS_MAX: usize = 5;
+
+/// Downloads `url` with GET, following at most 5 redirects, each to `https` (or `http` on a
+/// loopback host, as for every request here), and reading at most `cap` bytes (IR req. 9). The
+/// caller bounds the whole transfer. Errors never carry the URL.
+pub(crate) async fn download(url: &str, cap: usize) -> Result<Vec<u8>, String> {
+    let mut url = url.to_string();
+    for _ in 0..=REDIRECTS_MAX {
+        let (base, path) = split_url(&url)?;
+        let req = Request {
+            method: Method::GET,
+            path: &path,
+            headers: Vec::new(),
+            json: None,
+            kind: Kind::Read,
+        };
+        let resp = once(&base, &req, cap).await.map_err(|e| match e {
+            Attempt::NotSent(why) | Attempt::Unknown(why) => why,
+        })?;
+        match resp.status {
+            200..=299 => return Ok(resp.body),
+            301 | 302 | 303 | 307 | 308 => {
+                url = resp
+                    .header("location")
+                    .ok_or("a redirect named no location")?
+                    .to_string();
+            }
+            status => return Err(format!("HTTP {status}")),
+        }
+    }
+    Err("too many redirects".into())
+}
+
+/// Splits an absolute URL into its base (scheme and authority, checked by [`Base::parse`]) and the
+/// path with its query. A fragment is refused.
+fn split_url(url: &str) -> Result<(Base, String), String> {
+    let scheme_end = url.find("://").map_or(0, |i| i + 3);
+    let rest = url.get(scheme_end..).unwrap_or_default();
+    let cut = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, path) = url.split_at(scheme_end + cut);
+    if path.contains('#') {
+        return Err("the URL must not carry a fragment".into());
+    }
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    Ok((Base::parse(authority)?, path))
+}
+
+async fn once(base: &Base, req: &Request<'_>, cap: usize) -> Result<Response, Attempt> {
     let tcp = timeout(
         CONNECT_TIMEOUT,
         TcpStream::connect((base.host.as_str(), base.port)),
@@ -386,7 +438,7 @@ async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
     .map_err(|_| Attempt::NotSent("connect timed out".into()))?
     .map_err(|e| Attempt::NotSent(format!("connect failed: {}", e.kind())))?;
     if !base.tls {
-        return exchange(tcp, base, req).await;
+        return exchange(tcp, base, req, cap).await;
     }
     let name = ServerName::try_from(base.host.clone())
         .map_err(|_| Attempt::NotSent("invalid server name".into()))?;
@@ -400,10 +452,10 @@ async fn once(base: &Base, req: &Request<'_>) -> Result<Response, Attempt> {
     .await
     .map_err(|_| Attempt::NotSent("TLS handshake timed out".into()))?
     .map_err(|e| Attempt::NotSent(format!("TLS handshake failed: {e}")))?;
-    exchange(tls, base, req).await
+    exchange(tls, base, req, cap).await
 }
 
-async fn exchange<S>(io: S, base: &Base, req: &Request<'_>) -> Result<Response, Attempt>
+async fn exchange<S>(io: S, base: &Base, req: &Request<'_>, cap: usize) -> Result<Response, Attempt>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -434,10 +486,10 @@ where
             .map_err(|e| Attempt::Unknown(format!("request failed: {e}")))?;
         let status = response.status();
         let headers = response.headers().clone();
-        let body = Limited::new(response.into_body(), BODY_CAP)
+        let body = Limited::new(response.into_body(), cap)
             .collect()
             .await
-            .map_err(|_| Attempt::Unknown("response body unreadable or over 2 MiB".into()))?
+            .map_err(|_| Attempt::Unknown(format!("response body unreadable or over {cap} bytes")))?
             .to_bytes()
             .to_vec();
         Ok(Response {

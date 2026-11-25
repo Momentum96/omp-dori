@@ -71,6 +71,9 @@ pub(super) async fn tick(t: &mut Tick<'_>, b: &Backup) -> Result<(), String> {
     if git_dir.join("index.lock").exists() {
         return Err("a git lock is held by another process; skipped".into());
     }
+    if b.include_cataly && !t.dry {
+        cataly_files(t, b).await?;
+    }
     // A dry tick stages into a private copy of the index, so the real index is never touched.
     let index = if t.dry {
         let copy = t.ctx.files_dir.join(format!("backup-{}.index", t.job.name));
@@ -98,6 +101,30 @@ pub(super) async fn tick(t: &mut Tick<'_>, b: &Backup) -> Result<(), String> {
     let outcome = result?;
     apply(t, outcome);
     Ok(())
+}
+
+/// The Cataly home backup (owner decision 16): the config file copied to `config/cataly.toml` and a
+/// consistent store snapshot at `store/cataly.db`, both scanned like every other file. The live
+/// store, its WAL and journal stay ignored.
+async fn cataly_files(t: &Tick<'_>, b: &Backup) -> Result<(), String> {
+    let config = b.dir.join("config");
+    std::fs::create_dir_all(&config).map_err(|e| format!("config copy: {}", e.kind()))?;
+    if let Ok(Some(bytes)) = crate::sys::fs::read_private(&t.ctx.config_file, 1024 * 1024) {
+        crate::sys::fs::write_atomic(&config.join("cataly.toml"), &bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    let store = b.dir.join("store");
+    std::fs::create_dir_all(&store).map_err(|e| format!("store snapshot: {}", e.kind()))?;
+    let tmp = store.join(".cataly.db.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let target = tmp.clone();
+    t.ctx
+        .store
+        .read(move |r| r.snapshot_into(&target))
+        .await
+        .map_err(|e| format!("store snapshot: {e}"))?;
+    std::fs::rename(&tmp, store.join("cataly.db"))
+        .map_err(|e| format!("store snapshot: {}", e.kind()))
 }
 
 /// What a tick found, applied to memory and events after git is done.

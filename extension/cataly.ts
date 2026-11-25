@@ -6,6 +6,8 @@
 // prompt, asks the hub at stop, and keeps tool-result fingerprints. Every decision is the hub's.
 
 const PROTOCOL = 1;
+// The product version; `cataly extension` writes the release file with it filled in (IR req. 5-6).
+const VERSION = "0.0.0-source";
 const MARKER = "cataly";
 const CONNECT_MS = 1_000;
 const HEARTBEAT_MS = 15_000;
@@ -231,7 +233,7 @@ export class Bridge {
 		const ctx = this.ctx;
 		const [cwd, agent, mode] = [ctx?.cwd ?? "", ctx?.agent?.kind ?? "main", ctx?.mode ?? ""].map(String);
 		const ids = { token: this.token, key: this.key, session: this.session, file: this.file() };
-		return { ext: PROTOCOL, ...ids, pid: process.pid, cwd, agent, mode, marker: marked(ctx) };
+		return { ext: PROTOCOL, version: VERSION, ...ids, pid: process.pid, cwd, agent, mode, marker: marked(ctx) };
 	}
 
 	async connect(): Promise<void> {

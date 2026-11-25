@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 pub mod discord;
+pub mod github;
 pub mod model;
 pub mod slack;
 pub mod telegram;
@@ -93,15 +94,33 @@ impl TestHub {
         cmd
     }
 
+    /// Links this binary's bridge into the sandbox's OMP agent directory, as an install does: the
+    /// file `cataly extension` prints, under `<root>/bridge`, linked from `extensions/cataly.ts`.
+    /// Returns the link.
+    pub fn link_bridge(&self) -> PathBuf {
+        let printed = self.command(&["extension"]).output().unwrap();
+        assert!(printed.status.success(), "{printed:?}");
+        let file = self.root.join("bridge/cataly.ts");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, &printed.stdout).unwrap();
+        let agent = self
+            .env
+            .iter()
+            .find(|(k, _)| k == "PI_CODING_AGENT_DIR")
+            .map_or_else(|| self.root.join("home/.omp/agent"), |(_, v)| v.clone());
+        let link = agent.join("extensions/cataly.ts");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        // An installed link (`cataly install` made it) is the real thing; it stays.
+        if std::fs::symlink_metadata(&link).is_err() {
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+        }
+        link
+    }
+
     /// Starts the hub process after linking the bridge into the sandbox's OMP agent directory
     /// (DESIGN 12.2 C19: sessions start only with the link in place).
     pub fn spawn_hub(&self) -> Child {
-        let linked = self.command(&["bridge", "install"]).output().unwrap();
-        assert!(
-            linked.status.success(),
-            "{}",
-            String::from_utf8_lossy(&linked.stderr)
-        );
+        self.link_bridge();
         self.command(&["hub"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

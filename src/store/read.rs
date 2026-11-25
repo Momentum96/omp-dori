@@ -69,6 +69,12 @@ fn event_from_row(r: &Row<'_>) -> rusqlite::Result<EventRecord> {
 }
 
 impl Reads {
+    /// A consistent copy of the whole store at `path` through SQLite's online backup, for the home
+    /// backup (owner decision 16): never the live file, its WAL or its journal.
+    pub(crate) fn snapshot_into(&self, path: &std::path::Path) -> rusqlite::Result<()> {
+        self.0.backup(rusqlite::MAIN_DB, path, None)
+    }
+
     /// Events with an ID above `after`, oldest first.
     pub(crate) fn events_after(
         &self,

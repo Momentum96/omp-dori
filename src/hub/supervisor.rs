@@ -73,6 +73,11 @@ impl Supervisor {
         self.0.restarts.load(Ordering::Relaxed)
     }
 
+    /// Asks the hub to exit with `code`, as a supervised task giving up does.
+    pub(crate) fn request_exit(&self, code: u8) {
+        let _ = self.0.exit.send(Some(code));
+    }
+
     /// Runs `factory()` as task `name` until the hub shuts down, restarting it whenever it ends.
     pub(crate) fn spawn<F, Fut, E>(&self, name: &'static str, factory: F)
     where

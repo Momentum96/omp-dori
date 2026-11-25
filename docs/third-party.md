@@ -8,7 +8,7 @@ no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.
 | tokio | 1.54 | MIT | https://crates.io/crates/tokio | `rt-multi-thread`, `net`, `process`, `time`, `signal`, `sync`, `io-util` as in 10.2; `macros` for `select!` (compile-time only, see `docs/build-notes.md`). `fs` is not enabled: nothing uses it yet. |
 | serde | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde | `std`, `derive`: wire and record types |
 | serde_json | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde_json | `std`: control protocol, event log |
-| rusqlite | 0.37 | MIT (bundled SQLite: public domain) | https://crates.io/crates/rusqlite | `bundled`: no system SQLite |
+| rusqlite | 0.37 | MIT (bundled SQLite: public domain) | https://crates.io/crates/rusqlite | `bundled`: no system SQLite; `backup`: SQLite's online backup for the consistent store snapshot of the home backup (decision 16) |
 | ring | 0.17 | Apache-2.0 AND ISC | https://crates.io/crates/ring | none beyond defaults off: SHA-256 (condition-job output, config and receipt digests); `rand::SystemRandom` (the operating system's secure generator) for the secure tokens of the session host: single-use launch tokens (`CATALY_LAUNCH`), session handles and delivery IDs (`host::random_hex`) |
 | toml | 0.9 | MIT OR Apache-2.0 | https://crates.io/crates/toml | `std`, `parse`, `serde`: reading the config (no writer) |
 | jiff | 0.2 | Unlicense OR MIT | https://crates.io/crates/jiff | `std`, `tzdb-zoneinfo`: IANA zones from the system zoneinfo, DST gaps and folds |

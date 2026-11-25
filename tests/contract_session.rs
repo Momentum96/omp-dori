@@ -543,9 +543,7 @@ fn bridge_in_stock_omp() {
     linker
         .env
         .push(("PI_CODING_AGENT_DIR".into(), sandbox.root.join("agent")));
-    let out = linker.cli(&["bridge", "install"]);
-    assert!(out.status.success(), "{out:?}");
-    let link = sandbox.root.join("agent/extensions/cataly.ts");
+    let link = linker.link_bridge();
     let target = std::fs::read_link(&link).unwrap();
     // A listener where the bridge would connect: any accept means it was not inert.
     let socket = sandbox.root.join("hub.sock");

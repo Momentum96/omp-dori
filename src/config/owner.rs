@@ -76,6 +76,9 @@ pub(crate) struct Backup {
     /// Owner secret patterns, beside the built-in token shapes.
     pub(crate) patterns: Vec<Regex>,
     pub(crate) max_file_bytes: u64,
+    /// The Cataly home backup (owner decision 16): before each tick a copy of the config file and a
+    /// consistent store snapshot are written into the tree.
+    pub(crate) include_cataly: bool,
 }
 
 /// `kind = "health"` (OJ-16, OJ-18, WS-34).
@@ -402,6 +405,7 @@ fn backup(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Option<Backup> 
         name: name?,
         email: email?,
         patterns,
+        include_cataly: s.bool(errors, "include_cataly").unwrap_or(false),
         max_file_bytes: u64::try_from(max_mib).unwrap_or(50) * 1024 * 1024,
     })
 }

@@ -2,6 +2,7 @@
 
 mod args;
 mod client;
+mod install;
 mod lead;
 pub(crate) mod out;
 mod setup;
@@ -36,6 +37,12 @@ pub(crate) mod exit {
     pub(crate) const ALREADY_RUNNING: u8 = 4;
     /// A message may or may not have arrived: never send it again (COORD req. 25).
     pub(crate) const IN_DOUBT: u8 = 5;
+    /// An install operation was held: nothing changed (IR req. 34).
+    pub(crate) const HELD: u8 = 6;
+    /// An update or rollback was switched back: the system is as before.
+    pub(crate) const SWITCHED_BACK: u8 = 7;
+    /// The installation differs from both before and after; the message says what to do.
+    pub(crate) const NEEDS_ATTENTION: u8 = 8;
     /// Internal failure: supervision gave up, the store writer failed, or the main loop stalled.
     pub(crate) const INTERNAL: u8 = 70;
 }
@@ -135,8 +142,8 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
     if p.is(&["setup"]) {
         return setup::run(p, paths, as_json);
     }
-    if p.is(&["bridge", "install"]) || p.is(&["bridge", "status"]) {
-        return bridge(p.is(&["bridge", "install"]), as_json);
+    if let Some(done) = install::run(p, paths) {
+        return done;
     }
     let mut hub = Client::connect(&paths.socket)?;
     if let Some(done) = owner_verbs(p, &mut hub, as_json) {
@@ -225,24 +232,6 @@ fn job_hold(p: &Parsed, hub: &mut Client, enable: bool, as_json: bool) -> Result
     } else {
         let state = if enable { "resumed" } else { "on hold" };
         out::line(&format!("job {name} {state}"));
-    }
-    Ok(())
-}
-
-/// `bridge install` and `bridge status`. Works without a hub: the link is a file in OMP's
-/// extension folder (DESIGN 11.2).
-fn bridge(install: bool, as_json: bool) -> Result<(), Failure> {
-    let installed = if install {
-        crate::omp::extension::install().map(drop)
-    } else {
-        crate::omp::extension::check()
-    };
-    let (link, _) = crate::omp::extension::locations().map_err(Failure::Refused)?;
-    installed.map_err(Failure::Refused)?;
-    if as_json {
-        out::json(&json!({ "link": link.display().to_string(), "ok": true }));
-    } else {
-        out::line(&format!("bridge linked at {}", link.display()));
     }
     Ok(())
 }

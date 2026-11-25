@@ -20,3 +20,4 @@ Decisions the owner made. They override defaults in `DESIGN.md` section 12 and i
 | 12 | Updates | Notice only. `cataly update` installs. Nothing installs by itself. |
 | 13 | Weight | Always light. Reuse code where it can be reused. One implementation per concern, no duplication. |
 | 14 | Earlier Rust | Rust that the owner wrote himself in the earlier tree may be reused after a per-file check (see `docs/cleanroom.md`, "Vetted imports"). |
+| 16 | Home backup | Every Cataly user's home backup goes to a private GitHub repository named `cataly-home` (under the authenticated `gh` user) by default. The home is the state folder; the config file is copied in and the store goes in as an online-backup snapshot, never the live SQLite files. Secrets and token files stay out; the secret scan runs before every push. A public repository is refused and never created. |

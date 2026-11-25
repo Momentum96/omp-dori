@@ -276,6 +276,11 @@ impl<R: Runtime> Lead<R> {
             .clone()
     }
 
+    /// Why the lead may not be stopped now, if it may not.
+    pub(crate) fn busy(&self) -> Option<&'static str> {
+        self.current().and_then(|s| s.snapshot().busy())
+    }
+
     fn phase(&self) -> MutexGuard<'_, (Phase, Option<String>)> {
         self.status.lock().unwrap_or_else(PoisonError::into_inner)
     }

@@ -7,6 +7,7 @@ pub(crate) mod coord;
 pub(crate) mod lanes;
 pub(crate) mod owner;
 pub(crate) mod relays;
+pub(crate) mod release;
 pub(crate) mod session;
 
 use std::collections::BTreeMap;
@@ -55,6 +56,8 @@ pub(crate) struct Config {
     pub(crate) fallback: session::FallbackSettings,
     pub(crate) lanes: lanes::LaneSettings,
     pub(crate) coord: coord::CoordSettings,
+    pub(crate) update: release::UpdateSettings,
+    pub(crate) usage: release::UsageSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
 }
@@ -70,6 +73,8 @@ impl Default for Config {
             telegram: relays::TelegramSettings::default(),
             slack: relays::SlackSettings::default(),
             context: relays::ContextSettings::default(),
+            update: release::UpdateSettings::default(),
+            usage: release::UsageSettings::default(),
             outgoing: Checks::default(),
             limits: LimitsSettings {
                 enabled: false,
@@ -582,6 +587,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         &mut config.slack,
         &mut config.context,
     );
+    release::parse(errors, root, &mut config.update, &mut config.usage);
 }
 
 fn job(

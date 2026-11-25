@@ -8,6 +8,8 @@ on:
     # Nightly: the contract test against the latest stock OMP release (IR-38).
     - cron: "17 3 * * *"
   workflow_dispatch:
+  # The release workflow runs the full CI on the tagged commit (IR req. 42).
+  workflow_call:
 
 permissions:
   contents: read
