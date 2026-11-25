@@ -384,10 +384,10 @@ pub(crate) const COMMANDS: [Spec; 51] = [
     },
     Spec {
         path: &["slack", "upload"],
-        args: &["channel", "file"],
+        args: &["workspace/channel", "file"],
         flags: &["--json"],
         values: &["--thread"],
-        summary: "upload a file into a Slack conversation (optionally a thread)",
+        summary: "upload a file into a Slack conversation, named <workspace>/<conversation> (optionally a thread)",
     },
 ];
 

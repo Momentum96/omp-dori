@@ -668,16 +668,23 @@ async fn slack_upload(hub: &Hub, p: proto::DiscordParams) -> Result<Value, Failu
     let config = hub.config();
     let api =
         crate::relay::slack::Api::from_config(&config, &hub.paths.config_file).map_err(bad)?;
-    let id = crate::relay::slack::upload(&api, &channel, p.thread.as_deref(), &name, bytes)
-        .await
-        .map_err(|e| Failure {
-            code: code::INTERNAL,
-            message: if e.uncertain {
-                format!("the upload may or may not have been posted: {e}")
-            } else {
-                format!("not uploaded: {e}")
-            },
-        })?;
+    let id = crate::relay::slack::upload(
+        &api,
+        &hub.store,
+        &channel,
+        p.thread.as_deref(),
+        &name,
+        bytes,
+    )
+    .await
+    .map_err(|e| Failure {
+        code: code::INTERNAL,
+        message: if e.uncertain {
+            format!("the upload may or may not have been posted: {e}")
+        } else {
+            format!("not uploaded: {e}")
+        },
+    })?;
     ok(&serde_json::json!({ "file": id }))
 }
 

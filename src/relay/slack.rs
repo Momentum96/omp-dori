@@ -361,8 +361,15 @@ impl Api {
 }
 
 /// Edits one message (SLACK req. 46): a bad target is refused before any request.
-pub(crate) async fn edit(api: &Api, channel: &str, ts: &str, text: &str) -> Result<(), ApiError> {
-    if !valid_ts(ts) || !slack_channel(channel) {
+pub(crate) async fn edit(
+    api: &Api,
+    store: &Store,
+    target: &str,
+    ts: &str,
+    text: &str,
+) -> Result<(), ApiError> {
+    let channel = resolve(api, store, target).await?;
+    if !valid_ts(ts) {
         return Err(ApiError {
             status: None,
             why: "the edit target is not a channel and digits.digits timestamp".into(),
@@ -422,13 +429,13 @@ async fn post_and_record(
     Ok(ts)
 }
 
-/// A post to a destination (job events, the board): split, the first part may start or join a
-/// thread; every post records its thread. Confirmed timestamps, or the failure with those already
-/// confirmed.
+/// A post to a destination `<workspace>/<conversation>` (job events, the board): split, the first
+/// part may start or join a thread; every post records its thread. Confirmed timestamps, or the
+/// failure with those already confirmed.
 pub(crate) async fn send(
     api: &Api,
     store: &Store,
-    channel: &str,
+    target: &str,
     thread: Option<&str>,
     text: &str,
     checks: &Checks,
@@ -443,7 +450,10 @@ pub(crate) async fn send(
             },
         )
     };
-    if !slack_channel(channel) || thread.is_some_and(|t| !valid_ts(t)) {
+    let channel = resolve(api, store, target)
+        .await
+        .map_err(|e| (Vec::new(), e))?;
+    if thread.is_some_and(|t| !valid_ts(t)) {
         return Err(refuse("not a Slack conversation and thread".into()));
     }
     text::check(text, checks)
@@ -470,10 +480,51 @@ pub(crate) fn upload_url_ok(url: &str) -> bool {
     authority.eq_ignore_ascii_case("files.slack.com") && path.starts_with("/upload/")
 }
 
+/// A destination `<workspace>/<conversation>` (SLACK-04), such as `T0123/C0456`.
+pub(crate) fn destination(target: &str) -> Option<(&str, &str)> {
+    let (team, channel) = target.split_once('/')?;
+    (team.starts_with('T') && crate::config::relays::slack_id(team) && slack_channel(channel))
+        .then_some((team, channel))
+}
+
+/// The conversation of `target`, once its workspace is this hub's Slack account's: the one the
+/// intake bound at its identity check, else what `auth.test` names now. Another workspace is refused
+/// before any post or upload request (SLACK-04).
+pub(crate) async fn resolve<'a>(
+    api: &Api,
+    store: &Store,
+    target: &'a str,
+) -> Result<&'a str, ApiError> {
+    let refuse = |why: String| ApiError {
+        status: None,
+        why,
+        uncertain: false,
+    };
+    let (team, channel) = destination(target)
+        .ok_or_else(|| refuse("not a Slack destination <workspace>/<conversation>".into()))?;
+    let bound = store
+        .read(|r| r.binding(NAME))
+        .await
+        .map_err(|e| refuse(format!("the Slack binding is unreadable: {e}")))?
+        .and_then(|b| b.split_once('/').map(|(t, _)| t.to_string()));
+    let own = match bound {
+        Some(t) => t,
+        None => api.identity().await?.0,
+    };
+    if own == team {
+        Ok(channel)
+    } else {
+        Err(refuse(format!(
+            "{team} is not the workspace of this Slack account; nothing was sent"
+        )))
+    }
+}
+
 /// Uploads a file into a conversation (SLACK req. 47); the file ID.
 pub(crate) async fn upload(
     api: &Api,
-    channel: &str,
+    store: &Store,
+    target: &str,
     thread: Option<&str>,
     name: &str,
     bytes: Vec<u8>,
@@ -483,7 +534,8 @@ pub(crate) async fn upload(
         why: why.to_string(),
         uncertain: false,
     };
-    if !slack_channel(channel) || thread.is_some_and(|t| !valid_ts(t)) {
+    let channel = resolve(api, store, target).await?;
+    if thread.is_some_and(|t| !valid_ts(t)) {
         return Err(refuse("not a Slack conversation and thread"));
     }
     if bytes.is_empty()

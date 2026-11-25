@@ -37,6 +37,20 @@
   `config/cataly.toml` to the config file, start the hub; it opens the store and runs migrations.
 - `rollback` writes the "do not announce again" mark only after the hub stopped (or none ran), so
   a held `--restart` leaves nothing behind.
+- Onboarding (OPC-66..70, 72, 73; check 8): `hub::onboarding` keeps phase, consent and per-tool
+  answers in the store (job memory under `@onboarding`, a key no job name can take). The lead's tool
+  gains `onboarding`, `onboarding.start|consent|tool|finish`; a "no" ends onboarding and `start`
+  refuses until the owner raises it (`reopen` with his message); a tool answer is refused before
+  consent. While it runs, posting questions, every writing `lane.*` op and `job.start` are refused,
+  and the lead's shell (its hello now sets `shell`, so the bridge asks the hub) refuses `cataly`
+  commands that send, upload or start; an unreadable record counts as running. The recap carries a
+  first-run line; `assets/lead.md` has the onboarding guidance (greet first, one consent question,
+  visible signals only, mail subjects only, memory, summary with gaps, no session adoption).
+- Slack destinations carry the workspace (SLACK-04): `slack:<team>/<conversation>` on boards,
+  `channel = "<team>/<conversation>"` in `[destinations.x]`, and the same for `cataly slack upload`.
+  Every post, edit and upload resolves it first: the team must be the one the intake bound at its
+  identity check (or, before the intake ran, the one `auth.test` names); another workspace is refused
+  before any post or upload request.
 
 ## Signing key (owner)
 
@@ -48,14 +62,15 @@ at run time (tests use this with a throwaway key).
 
 ## Choices
 
-- Slack MSG-14: a bot user's photo and name cannot be set with a bot token (users.setPhoto refuses
-  bot tokens; the app icon is set in the app's settings), and a member account is human and is never
-  changed (OPC req. 67). Not built; setup guidance should point to the app settings.
+- Slack bot name and avatar: set in the Slack app configuration (App Home: display name; Basic
+  Information: app icon), not by the hub. Slack's API offers no call that sets a bot user's name or
+  photo with a bot token (`users.setPhoto` and `users.profile.set` act on human users with a user
+  token), per-message overrides need the extra `chat:write.customize` scope and would make every post
+  look different from the app, and a member account is a human whose profile Cataly never changes
+  (OPC-67). Setup guidance points the owner to the app settings.
 - Test versions above the crate's are real builds of a copy of the crate with the manifest version
   raised (`target/install-variants`, debug info off to stay under the 128 MiB bound).
 
 ## Not done (left)
 
-- Onboarding OPC-66..73 (a draft module exists outside the tree, not committed), check 8.
-- Slack workspace tag on destinations (SLACK-04).
 - Local reproducible-build run (check 5 is CI-only: the workflow step is written).

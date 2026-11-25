@@ -272,11 +272,12 @@ pub(super) fn parse(
                 .is_some();
             let slack = d
                 .strip_prefix("slack:")
-                .is_some_and(super::relays::slack_channel);
+                .and_then(crate::relay::slack::destination)
+                .is_some();
             if !(discord || telegram || slack) {
                 errors.push(ConfigError {
                     path: format!("coord.board[{i}]"),
-                    message: "expected discord:<channel id>, telegram:<chat>[/<topic>] or slack:<channel>"
+                    message: "expected discord:<channel id>, telegram:<chat>[/<topic>] or slack:<workspace>/<conversation>"
                         .into(),
                 });
             }

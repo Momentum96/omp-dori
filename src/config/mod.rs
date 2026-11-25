@@ -199,7 +199,7 @@ pub(crate) enum Destination {
     Discord { channel: ChannelRef },
     /// A Telegram chat, optionally one forum topic of it.
     Telegram { chat: i64, topic: Option<i64> },
-    /// A Slack conversation, optionally one thread of it.
+    /// A Slack conversation, `<workspace>/<conversation>` (SLACK-04), optionally one thread of it.
     Slack {
         channel: String,
         thread: Option<String>,
@@ -467,9 +467,12 @@ fn destination(
         }
         Some("slack") => {
             let channel = s.required_string(errors, "channel").and_then(|c| {
-                let ok = relays::slack_channel(c);
+                let ok = crate::relay::slack::destination(c).is_some();
                 if !ok {
-                    errors.push(s.error("channel", "expected a Slack conversation ID (C, G or D)"));
+                    errors.push(s.error(
+                        "channel",
+                        "expected <workspace>/<conversation>, such as T0123ABCD/C0456EFGH",
+                    ));
                 }
                 ok.then(|| c.to_string())
             });

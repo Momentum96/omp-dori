@@ -164,6 +164,17 @@ impl Reads {
             .optional()
     }
 
+    /// The account a relay's intake state is bound to (Slack: `<workspace>/<account>`).
+    pub(crate) fn binding(&self, relay: &str) -> rusqlite::Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT account FROM bindings WHERE relay = ?1",
+                [relay],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
     /// Transition memory of one job: (subject, condition) to value.
     pub(crate) fn memory(
         &self,

@@ -237,10 +237,24 @@ fn slack_threads_allowlist_acks_and_uploads() {
         acks.iter().all(|(_, d)| *d < Duration::from_secs(3)),
         "{acks:?}"
     );
-    // Uploads: a ticket whose URL is off files.slack.com sends no byte.
+    // Uploads: a destination of another workspace is refused before any request (SLACK-04).
     let file = hub.private_file("report.txt", "the report");
+    let target = format!("{}/{GEN}", fake_slack::TEAM);
+    let before = slack.seen().len();
+    let other = hub.cli(&["slack", "upload", "T0OTHER/C0GEN", file.to_str().unwrap()]);
+    assert!(!other.status.success());
+    assert!(
+        String::from_utf8_lossy(&other.stderr).contains("not the workspace"),
+        "{other:?}"
+    );
+    assert_eq!(
+        slack.seen().len(),
+        before,
+        "no request for another workspace"
+    );
+    // A ticket whose URL is off files.slack.com sends no byte.
     slack.set_upload_url("https://files.slack.com.evil.example/upload/v1/X");
-    let refused = hub.cli(&["slack", "upload", GEN, file.to_str().unwrap(), "--json"]);
+    let refused = hub.cli(&["slack", "upload", &target, file.to_str().unwrap(), "--json"]);
     assert!(!refused.status.success());
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("files.slack.com"),
@@ -257,7 +271,7 @@ fn slack_threads_allowlist_acks_and_uploads() {
     let done = hub.json(&[
         "slack",
         "upload",
-        GEN,
+        &target,
         file.to_str().unwrap(),
         "--thread",
         &root,
@@ -411,12 +425,13 @@ fn telegram_scope_topics_and_destinations() {
     let slack = FakeSlack::start();
     let extra = format!(
         "[destinations.tgok]\nkind = \"telegram\"\nchat = \"7\"\n[destinations.tgbad]\nkind = \"telegram\"\nchat = \"999\"\n\
-         [destinations.sl]\nkind = \"slack\"\nchannel = \"{GEN}\"\n{}[coord]\nboard = [\"telegram:-100/5\", \"slack:{GEN}\"]\n",
+         [destinations.sl]\nkind = \"slack\"\nchannel = \"{team}/{GEN}\"\n{}[coord]\nboard = [\"telegram:-100/5\", \"slack:{team}/{GEN}\"]\n",
         support::probe(
             "say",
             r#"["printf", "%s", "job says hi"]"#,
             "destinations = [\"tgok\", \"tgbad\", \"sl\"]\n"
-        )
+        ),
+        team = fake_slack::TEAM,
     );
     let mut hub = relay_hub(Some(&tg), Some(&slack), &extra);
     hub.start();
