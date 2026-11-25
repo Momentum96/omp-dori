@@ -233,7 +233,7 @@ pub(crate) fn spend_offer(dialog: &Dialog, owner_phrases: &[String]) -> bool {
             .any(|p| !p.is_empty() && text.contains(p.as_str()))
 }
 
-fn question_of(item: &Value) -> Option<Question> {
+pub(crate) fn question_of(item: &Value) -> Option<Question> {
     let question = item.as_object()?;
     let id = string(question.get("id")).filter(|id| !id.is_empty())?;
     let text = string(question.get("question"))?;

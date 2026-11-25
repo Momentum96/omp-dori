@@ -751,6 +751,25 @@ impl<R: Runtime> Lanes<R> {
                 SessionEvent::DialogOpened { .. } | SessionEvent::DialogClosed { .. } => {
                     self.nudge.notify_one();
                 }
+                SessionEvent::LinkLost => {
+                    let why = "the terminal session's bridge was silent for 45 s";
+                    self.keep(&key, |r| r.lost = Some(why.into())).await;
+                    self.emit(
+                        Emit::new(EventKind::LaneLost, Severity::Warning, true, &key)
+                            .with("lane", &key)
+                            .with("detail", why),
+                    );
+                }
+                SessionEvent::LinkRestored => {
+                    self.keep(&key, |r| r.lost = None).await;
+                    self.alert(
+                        &key,
+                        "lane restored",
+                        "the terminal session's bridge reconnected with the same session",
+                        false,
+                    );
+                    let _ = self.mailbox(&key).flush(Some(&*session), false).await;
+                }
                 SessionEvent::Stopped { record } => {
                     self.lost(&key, &session, &record.how, record.detail.as_deref())
                         .await;

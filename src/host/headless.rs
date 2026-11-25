@@ -78,6 +78,10 @@ pub(crate) struct Headless {
 impl Runtime for Headless {
     type Session = Session;
 
+    fn kind(&self) -> &'static str {
+        "headless"
+    }
+
     async fn start(&self, spec: StartSpec) -> Result<(Arc<Session>, Started), StartError> {
         let token = super::random_hex(16);
         self.links.issue(&token, &spec.handle, spec.role);

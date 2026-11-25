@@ -45,13 +45,22 @@ impl Launch<'_> {
     /// The argument vector: the executable, the owner's extra flags, then the flags the hub always
     /// sets, so a later hub flag wins over anything before it.
     pub(crate) fn argv(&self) -> Vec<String> {
+        self.build(true)
+    }
+
+    /// The terminal runtime's argument vector: the same flags without the rpc-ui mode and the
+    /// approval mode, so OMP runs its TUI with the owner's own approvals (HOST req. 93).
+    pub(crate) fn tui_argv(&self) -> Vec<String> {
+        self.build(false)
+    }
+
+    fn build(&self, rpc: bool) -> Vec<String> {
         let mut argv = vec![self.exe.display().to_string()];
         argv.extend(self.extra.iter().cloned());
+        if rpc {
+            argv.extend(["--mode", "rpc-ui", "--approval-mode", "always-ask"].map(String::from));
+        }
         argv.extend([
-            "--mode".to_string(),
-            "rpc-ui".to_string(),
-            "--approval-mode".to_string(),
-            "always-ask".to_string(),
             format!("--config={}", self.overlay.display()),
             format!("--model={}", self.model),
         ]);

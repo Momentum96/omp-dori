@@ -460,17 +460,23 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// A user message, or the custom message the terminal runtime's bridge delivers (EXT req. 25), whose
+/// text carries `marker`.
 fn user_text_has(entry: &Value, marker: &str) -> bool {
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return false;
-    }
-    let Some(message) = entry.get("message") else {
-        return false;
+    let content = match entry.get("type").and_then(Value::as_str) {
+        Some("custom_message") => entry.get("content"),
+        Some("message") => {
+            let Some(message) = entry.get("message") else {
+                return false;
+            };
+            match message.get("role").and_then(Value::as_str) {
+                Some("user" | "custom") => message.get("content"),
+                _ => return false,
+            }
+        }
+        _ => return false,
     };
-    if message.get("role").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    match message.get("content") {
+    match content {
         Some(Value::String(text)) => text.contains(marker),
         Some(Value::Array(parts)) => parts.iter().any(|p| {
             p.get("type").and_then(Value::as_str) == Some("text")

@@ -517,10 +517,11 @@ impl<R: Runtime> Lead<R> {
         self.overlay(&config)?;
         let handle = super::random_hex(8);
         let now = now_ms();
+        let runtime = (self.env.make)(&config, &exe);
         let row = SessionRow {
             handle: handle.clone(),
             role: "lead".into(),
-            runtime: "headless".into(),
+            runtime: runtime.kind().into(),
             cwd: cwd.display().to_string(),
             name: "lead".into(),
             model: settings.model.clone(),
@@ -554,7 +555,6 @@ impl<R: Runtime> Lead<R> {
             .await
             .map_err(|e| e.to_string())?;
         self.set_phase(Phase::Starting, None);
-        let runtime = (self.env.make)(&config, &exe);
         let spec = StartSpec {
             handle: handle.clone(),
             role: Role::Lead,
@@ -898,6 +898,7 @@ impl<R: Runtime> Lead<R> {
                 SessionEvent::TurnEnded { .. }
                 | SessionEvent::Quiet
                 | SessionEvent::Settled { .. }
+                | SessionEvent::LinkRestored
                 | SessionEvent::Message { .. } => self.wake.notify_one(),
                 SessionEvent::Fallback { from, to, reason } => self.emit(
                     Emit::new(EventKind::ModelFallback, Severity::Info, false, "lead")
@@ -963,6 +964,7 @@ impl<R: Runtime> Lead<R> {
                 | SessionEvent::DialogOpened { .. }
                 | SessionEvent::DialogClosed { .. }
                 | SessionEvent::ModelChanged { .. }
+                | SessionEvent::LinkLost
                 | SessionEvent::InterruptUnconfirmed => {}
             }
         }
@@ -1044,6 +1046,24 @@ impl<R: Runtime> Lead<R> {
                             .with("reason", &reason),
                     );
                 }
+                // Text from one conversation reached another: the owner is told once, nothing is
+                // resent (PATCH-01 rule 9).
+                Note::Misdelivered {
+                    delivery,
+                    target_session,
+                    found_session,
+                } => self.emit(
+                    Emit::new(EventKind::DeliveryFailed, Severity::Warning, true, "lead")
+                        .with("target", LEAD)
+                        .with("delivery", delivery)
+                        .with(
+                            "reason",
+                            format!(
+                                "misdelivered: a message for session {target_session} reached \
+                                 session {found_session}; it is not resent"
+                            ),
+                        ),
+                ),
             }
         }
     }

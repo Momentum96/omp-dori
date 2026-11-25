@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, watch};
 use crate::cli::exit;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
+use crate::host::hosted::Hosted;
 use crate::host::lead::{Env as LeadEnv, Events, Lead};
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::jobs::{Ctx, Files, Jobs};
@@ -60,8 +61,8 @@ pub(crate) struct Hub {
     dedupe: Dedupe,
     shutdown: watch::Receiver<bool>,
     supervisor: Supervisor,
-    lead: Arc<Lead<Headless>>,
-    lanes: Arc<crate::lanes::Lanes<Headless>>,
+    lead: Arc<Lead<Hosted>>,
+    lanes: Arc<crate::lanes::Lanes<Hosted>>,
     agent_start: Latency,
     pub(crate) discord: Arc<crate::relay::intake::Shared>,
     pub(crate) telegram: Arc<crate::relay::intake::Shared>,
@@ -411,8 +412,8 @@ pub(crate) struct RelayShares {
 
 /// What `sessions` starts: the lead, the lanes, the `agent_start` ring and the relays' shared state.
 type Sessions = (
-    Arc<Lead<Headless>>,
-    Arc<crate::lanes::Lanes<Headless>>,
+    Arc<Lead<Hosted>>,
+    Arc<crate::lanes::Lanes<Hosted>>,
     Latency,
     RelayShares,
 );
@@ -515,29 +516,46 @@ fn sessions(
     )
 }
 
-/// How the hub starts a headless session (DESIGN 4.2); the lead and every lane use it.
+/// How the hub starts a session (DESIGN 4.1-4.3); the lead and every lane use it. The config in
+/// force picks the runtime of each new session (HOST-30).
 fn runtime(
     paths: &Paths,
     agent_start: &Latency,
     links: &Arc<crate::host::bridge::Links>,
-) -> crate::host::lead::Factory<Headless> {
-    let (state, socket, logs) = (
+) -> crate::host::lead::Factory<Hosted> {
+    let (state, socket, logs, spill) = (
         paths.state_dir.clone(),
         paths.socket.clone(),
         paths.logs_dir.join("sessions"),
+        paths.files_dir.join("tern"),
     );
     let agent_start = agent_start.clone();
     let links = Arc::clone(links);
-    Box::new(move |config: &Config, exe: &Path| Headless {
-        exe: exe.to_path_buf(),
-        state: state.clone(),
-        socket: socket.clone(),
-        logs: logs.clone(),
-        credentials: config.sessions.credentials.clone(),
-        extra_flags: config.sessions.extra_flags.clone(),
-        spend_phrases: config.sessions.spend_phrases.clone(),
-        agent_start: agent_start.clone(),
-        links: Arc::clone(&links),
+    Box::new(move |config: &Config, exe: &Path| {
+        if config.sessions.runtime == crate::config::session::RuntimeKind::Tern {
+            return Hosted::Tern(crate::host::tern::Tern {
+                program: crate::omp::resolve(&config.sessions.tern),
+                block_session: config.sessions.tern_session.clone(),
+                omp: exe.to_path_buf(),
+                state: state.clone(),
+                socket: socket.clone(),
+                spill: spill.clone(),
+                extra_flags: config.sessions.extra_flags.clone(),
+                agent_start: agent_start.clone(),
+                links: Arc::clone(&links),
+            });
+        }
+        Hosted::Headless(Headless {
+            exe: exe.to_path_buf(),
+            state: state.clone(),
+            socket: socket.clone(),
+            logs: logs.clone(),
+            credentials: config.sessions.credentials.clone(),
+            extra_flags: config.sessions.extra_flags.clone(),
+            spend_phrases: config.sessions.spend_phrases.clone(),
+            agent_start: agent_start.clone(),
+            links: Arc::clone(&links),
+        })
     })
 }
 
@@ -552,8 +570,8 @@ fn lanes(
     agent_start: &Latency,
     events: &Events,
     links: &Arc<crate::host::bridge::Links>,
-    lead: &Arc<Lead<Headless>>,
-) -> Arc<crate::lanes::Lanes<Headless>> {
+    lead: &Arc<Lead<Hosted>>,
+) -> Arc<crate::lanes::Lanes<Hosted>> {
     let (gate, rest, lead) = (jobs.clone(), jobs.clone(), Arc::clone(lead));
     crate::lanes::Lanes::new(crate::lanes::Env {
         config: config.clone(),
@@ -623,7 +641,7 @@ fn hub_events(jobs: &Jobs) -> Events {
 fn discord(
     paths: &Paths,
     jobs: &Jobs,
-    (lead, lanes): (&Arc<Lead<Headless>>, &Arc<crate::lanes::Lanes<Headless>>),
+    (lead, lanes): (&Arc<Lead<Hosted>>, &Arc<crate::lanes::Lanes<Hosted>>),
     events: &Events,
     config: &watch::Receiver<Arc<Config>>,
     store: &Store,
