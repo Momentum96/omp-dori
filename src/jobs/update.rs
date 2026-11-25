@@ -2,39 +2,79 @@
 //! GitHub's latest stable release and tells the owner, once per version, when it is newer than this
 //! binary. It never downloads, installs or restarts anything; `cataly update` does that when the
 //! owner runs it. A version the owner rolled back from is never announced again. With the check off
-//! no request is made. The notice goes to `[update] destinations`, else to the owner's home room
-//! through the normal outgoing path; it is never work for the lead.
+//! no request is made. The notice, and the message after the hub first runs an updated or rolled
+//! back version, go to `[update] destinations`, else to the owner's home room through the normal
+//! outgoing path; they are never work for the lead.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
 use super::Jobs;
-use super::event::{self, Emit, EventKind, Severity, TEXT_MAX, one_line};
+use super::event::{self, Emit, EventKind, Severity, TEXT_MAX, Template, one_line};
 use super::memory::Memory;
-use crate::config::{Config, HOME_DESTINATION};
+use crate::config::{Config, HOME_DESTINATION, Language};
 use crate::log;
+use crate::proto::Resumed;
 use crate::store::{Apply, NewEvent};
+use crate::sys::install::Layout;
 use crate::sys::now_ms;
 use crate::sys::release::{self, Release, Version};
 
 /// The memory this task keeps (survives a restart, IR req. 39).
 const JOB: &str = "update";
 const SUBJECT: &str = "release";
+/// The memory subject holding the version of the hub's last run.
+const HUB: &str = "hub";
 /// One check per day; the next is due a day after the attempt, whatever its result (IR req. 36).
 const EVERY_MS: i64 = 24 * 60 * 60 * 1000;
 /// How often the task looks at the config and the clock while it waits.
 const LOOK: Duration = Duration::from_secs(30);
 
-/// Runs until the hub stops. `root` is the program folder holding the silenced version.
+/// The sessions the hub brought back at start; `None` while it is still bringing them back.
+pub(crate) type ResumedView = Arc<dyn Fn() -> Option<Resumed> + Send + Sync>;
+
+/// How long the message after an update waits for the sessions to come back.
+const RESUME_WAIT: Duration = Duration::from_mins(1);
+
+/// Runs until the hub stops. `layout` is the program folder holding the silenced version and the
+/// install records. First, once per version change, the owner hears that the hub now runs a newer
+/// (or, after a rollback, an older) version than its previous run, and which sessions it resumed.
 pub(crate) async fn run(
     jobs: Jobs,
-    root: PathBuf,
+    layout: Option<Layout>,
+    resumed: ResumedView,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let started = Instant::now();
+    let mut memory = load(&jobs).await?;
+    if let Some(previous) = changed(&mut memory, layout.as_ref()) {
+        let deadline = Instant::now() + RESUME_WAIT;
+        let sessions = loop {
+            match resumed() {
+                Some(r) => break Some(r),
+                None if Instant::now() >= deadline => break None,
+                None => {}
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                // Unsaved, so the next start says it.
+                _ = stop.changed() => return Ok(()),
+            }
+        };
+        let config = Arc::clone(&jobs.ctx().config.borrow());
+        if let Some(event) = updated(&previous, sessions, &config) {
+            jobs.ctx()
+                .stream
+                .append(vec![event])
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    save(&jobs, memory).await?;
+    let silenced_file = layout.map(|l| l.silenced());
     loop {
         let config = Arc::clone(&jobs.ctx().config.borrow());
         let mut memory = load(&jobs).await?;
@@ -64,7 +104,12 @@ pub(crate) async fn run(
             _ = stop.changed() => return Ok(()),
         };
         let notice = match fetched {
-            Ok(Some(latest)) => notice(&mut memory, &latest, silenced(&root).as_ref(), &config),
+            Ok(Some(latest)) => notice(
+                &mut memory,
+                &latest,
+                silenced(silenced_file.as_ref()).as_ref(),
+                &config,
+            ),
             Ok(None) => None,
             Err(e) => {
                 log::warn("release check failed", &[("error", &e)]);
@@ -78,14 +123,7 @@ pub(crate) async fn run(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        jobs.ctx()
-            .store
-            .apply(Apply {
-                memory: memory.into_writes(),
-                ..Apply::default()
-            })
-            .await
-            .map_err(|e| e.to_string())?;
+        save(&jobs, memory).await?;
     }
 }
 
@@ -99,10 +137,82 @@ async fn load(jobs: &Jobs) -> Result<Memory, String> {
     Ok(Memory::new(JOB, false, rows))
 }
 
+async fn save(jobs: &Jobs, memory: Memory) -> Result<(), String> {
+    jobs.ctx()
+        .store
+        .apply(Apply {
+            memory: memory.into_writes(),
+            ..Apply::default()
+        })
+        .await
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
 /// The version the owner rolled back from, if any.
-fn silenced(root: &Path) -> Option<Version> {
-    let bytes = crate::sys::fs::read_private(&root.join("silenced"), 64).ok()??;
+fn silenced(file: Option<&PathBuf>) -> Option<Version> {
+    let bytes = crate::sys::fs::read_private(file?, 64).ok()??;
     Version::parse(String::from_utf8_lossy(&bytes).trim())
+}
+
+/// The previous run's version when this run's differs: an update or a rollback, once per change,
+/// never on an ordinary restart. The previous run's version is kept in this task's memory; before
+/// any run recorded one, the install records' previous version counts when this binary is the
+/// installed current one.
+fn changed(memory: &mut Memory, layout: Option<&Layout>) -> Option<String> {
+    let latest = release::VERSION;
+    let recorded = memory.get(HUB, "version").map(str::to_string);
+    memory.transition(HUB, "version", latest);
+    let previous = recorded.or_else(|| {
+        let l = layout.filter(|l| l.current_version().as_deref() == Some(latest))?;
+        Some(crate::sys::install::role(l, "previous")?.version)
+    })?;
+    (previous != latest).then_some(previous)
+}
+
+/// The message after an update or a rollback from `previous`, with the sessions resumed.
+fn updated(previous: &str, resumed: Option<Resumed>, config: &Config) -> Option<NewEvent> {
+    let latest = release::VERSION;
+    let (old, new) = (Version::parse(previous)?, Version::parse(latest)?);
+    if old == new {
+        return None;
+    }
+    let rolled_back = new < old;
+    let language = config.hub.language;
+    let template = config
+        .update
+        .updated(language, rolled_back)
+        .map_err(|e| log::warn("update message template", &[("error", &e)]))
+        .ok()?;
+    let kind = if rolled_back {
+        EventKind::UpdateRolledBack
+    } else {
+        EventKind::UpdateDone
+    };
+    let emit = Emit::new(kind, Severity::Info, false, "hub")
+        .with("previous", previous)
+        .with("latest", latest)
+        .with("sessions", resumed_text(language, resumed));
+    Some(post(emit, &template, config))
+}
+
+/// One sentence on the sessions a hub resumed after an update, in the owner's language; empty when
+/// none came back (or it is not known yet).
+pub(crate) fn resumed_text(language: Language, resumed: Option<Resumed>) -> String {
+    let Some(Resumed { lead, lanes }) = resumed else {
+        return String::new();
+    };
+    match (language, lead, lanes) {
+        (_, false, 0) => String::new(),
+        (Language::Korean, true, 0) => "lead를 이어서 열었습니다.".into(),
+        (Language::Korean, true, n) => format!("lead와 lane {n}개를 이어서 열었습니다."),
+        (Language::Korean, false, n) => format!("lane {n}개를 이어서 열었습니다."),
+        (Language::English, true, 0) => "Resumed the lead.".into(),
+        (Language::English, true, 1) => "Resumed the lead and 1 lane.".into(),
+        (Language::English, true, n) => format!("Resumed the lead and {n} lanes."),
+        (Language::English, false, 1) => "Resumed 1 lane.".into(),
+        (Language::English, false, n) => format!("Resumed {n} lanes."),
+    }
 }
 
 /// The notice for `latest`, once per version, never for a silenced one or an older one (IR req. 37).
@@ -119,7 +229,7 @@ fn notice(
     }
     let template = config
         .update
-        .template()
+        .template(config.hub.language)
         .map_err(|e| log::warn("update notice template", &[("error", &e)]))
         .ok()?;
     if !memory.transition(SUBJECT, "announced", &version.to_string()) {
@@ -141,6 +251,11 @@ fn notice(
             latest.tag
         ),
     );
+    Some(post(emit, &template, config))
+}
+
+/// The event in `template`'s wording, to `[update] destinations`, else the owner's home room.
+fn post(emit: Emit, template: &Template, config: &Config) -> NewEvent {
     let text = template.render(&emit.values);
     let destinations = config.update.destinations.clone().unwrap_or_else(|| {
         config
@@ -154,7 +269,7 @@ fn notice(
         .map(|line| one_line(line, TEXT_MAX))
         .collect::<Vec<_>>()
         .join("\n");
-    Some(event)
+    event
 }
 
 #[cfg(test)]
@@ -220,7 +335,7 @@ mod tests {
     fn template_language_and_destinations_override() {
         let text = format!(
             "{DISCORD}[destinations.phone]\nkind = \"command\"\nargv = [\"true\"]\n\
-             [update]\nlanguage = \"en\"\ntemplate = \"new {{latest}} (was {{current}}): {{url}}\"\n\
+             [update]\ntemplate = \"new {{latest}} (was {{current}}): {{url}}\"\n\
              destinations = [\"phone\", \"log\"]\n"
         );
         let config = config::parse(&text).unwrap();
@@ -234,7 +349,7 @@ mod tests {
             "{}",
             event.text
         );
-        let config = config::parse("[update]\nlanguage = \"en\"\n").unwrap();
+        let config = config::parse("[hub]\nlanguage = \"en\"\n").unwrap();
         let event = notice(&mut memory, &release("v99.2.0"), None, &config).unwrap();
         assert!(
             event
@@ -243,11 +358,73 @@ mod tests {
         );
         for bad in [
             "[update]\ntemplate = \"{version}\"\n",
-            "[update]\nlanguage = \"fr\"\n",
+            "[hub]\nlanguage = \"fr\"\n",
+            "[update]\nlanguage = \"en\"\n",
             "[update]\ndestinations = [\"nowhere\"]\n",
         ] {
             assert!(config::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The message after a version change: once, in the owner's language, never on a restart of
+    /// the same version, naming the sessions resumed; a rollback has its own wording;
+    /// `updated_template` replaces the update's.
+    #[test]
+    fn updated_and_rolled_back_once_per_change() {
+        let (older, newer, v) = ("0.0.1", "999.0.0", release::VERSION);
+        let mut memory = Memory::new(JOB, false, Vec::new());
+        assert_eq!(changed(&mut memory, None), None, "first run");
+        assert_eq!(changed(&mut memory, None), None, "same version");
+        let mut memory = Memory::new(
+            JOB,
+            false,
+            vec![(HUB.into(), "version".into(), older.into())],
+        );
+        assert_eq!(changed(&mut memory, None).as_deref(), Some(older));
+        assert_eq!(changed(&mut memory, None), None, "once");
+
+        let config = config::parse(DISCORD).unwrap();
+        let both = Some(Resumed {
+            lead: true,
+            lanes: 2,
+        });
+        let event = updated(older, both, &config).unwrap();
+        assert_eq!(event.kind, "update.done");
+        assert_eq!(event.destinations, [HOME_DESTINATION]);
+        assert_eq!(
+            event.text,
+            format!(
+                "{v} 버전으로 업데이트했습니다. 보스, 감사합니다!\n{older} -> {v}\n\
+                 lead와 lane 2개를 이어서 열었습니다."
+            )
+        );
+        let event = updated(newer, None, &config).unwrap();
+        assert_eq!(event.kind, "update.rolled_back");
+        assert_eq!(
+            event.text,
+            format!("{v} 버전으로 되돌렸습니다.\n{newer} -> {v}")
+        );
+
+        let english = config::parse(&format!("{DISCORD}[hub]\nlanguage = \"en\"\n")).unwrap();
+        let lead = Some(Resumed {
+            lead: true,
+            lanes: 0,
+        });
+        let event = updated(older, lead, &english).unwrap();
+        assert_eq!(
+            event.text,
+            format!("Updated to {v}. Thanks, boss!\n{older} -> {v}\nResumed the lead.")
+        );
+        let event = updated(newer, None, &english).unwrap();
+        assert!(event.text.starts_with("Rolled back to "), "{}", event.text);
+
+        let own = config::parse(&format!(
+            "{DISCORD}[update]\nupdated_template = \"now {{latest}} (was {{previous}})\"\n"
+        ))
+        .unwrap();
+        let event = updated(older, both, &own).unwrap();
+        assert_eq!(event.text, format!("now {v} (was {older})"));
+        assert!(config::parse("[update]\nupdated_template = \"{url}\"\n").is_err());
     }
 
     /// With the check off, no request reaches the release API.
@@ -258,11 +435,10 @@ mod tests {
         let cfg = format!(
             "{DISCORD}[update]\ncheck = false\nfirst_after = \"1s\"\napi_base = \"http://127.0.0.1:{port}\"\n"
         );
-        let (ctx, _stop, dir) = crate::jobs::tests::ctx_with(&cfg, "update-off");
+        let (ctx, _stop, _dir) = crate::jobs::tests::ctx_with(&cfg, "update-off");
         let jobs = Jobs { ctx };
         let (stop_tx, stop_rx) = watch::channel(false);
-        let root = dir.join("root");
-        let task = tokio::spawn(run(jobs, root, stop_rx));
+        let task = tokio::spawn(run(jobs, None, Arc::new(|| None), stop_rx));
         let accepted = tokio::time::timeout(Duration::from_millis(2500), listener.accept()).await;
         assert!(accepted.is_err(), "a request was made");
         stop_tx.send(true).unwrap();

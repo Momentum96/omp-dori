@@ -219,7 +219,8 @@ fn events_since_and_follow() {
     });
     let since = String::from_utf8(hub.cli(&["events", "--since", "1h"]).stdout).unwrap();
     assert!(
-        since.contains("hub 0.1.0 started") && since.contains("p: condition met"),
+        since.contains(&format!("hub {} started", env!("CARGO_PKG_VERSION")))
+            && since.contains("p: condition met"),
         "{since}"
     );
     let fired = hub

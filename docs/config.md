@@ -154,10 +154,25 @@ does not see your shell's environment, so it:
 | Key | Type | Default | Allowed | What it does | Setup |
 |---|---|---|---|---|---|
 | `log_level` | string | `"info"` | `error`, `warn`, `info`, `debug` | Detail of `logs/hub.log`. Changes on reload. | `--log-level` |
+| `language` | string | `"ko"` | `ko` (Korean), `en` (English) | Your one language (DESIGN A19): every fixed text Cataly writes to you, such as the [update notice](#update-and-usage), uses it unless you give your own wording. | |
 
 ```toml
 [hub]
 log_level = "info"
+language = "ko"
+```
+
+## `[setup]`
+
+What `cataly setup` remembers between runs. You rarely edit it by hand.
+
+| Key | Type | Default | Allowed | What it does | Setup |
+|---|---|---|---|---|---|
+| `backup` | boolean | `true` | | `false` once you turned the [home backup](#home-backup) off before it existed; a plain re-run then leaves it off instead of offering it again. | `--backup off` writes `false`; `--backup on` (or `--backup-repo`) sets it back to `true` and plans the backup |
+
+```toml
+[setup]
+backup = false
 ```
 
 ## `[omp]`
@@ -544,24 +559,26 @@ ignore = ["bridge"]
 ## `[update]` and `[usage]`
 
 Each newer stable release is announced once, never one you rolled back from. The notice only
-tells you; `cataly update` installs. It goes out like any job post (no mentions) and is not sent
-to the lead as work. Without `destinations` it goes to your home room: the `[discord]` home
-channel, else the `[telegram]` group (and topic) or your DM. With neither, it stays in the event
-log; for Slack, name a destination.
+tells you; `cataly update` installs (it restarts a running hub on the new version; see the README).
+After the hub first runs a different version than its previous run, it says once that it was
+updated (or rolled back) and which sessions it resumed; an ordinary restart says nothing. Both go
+out like any job post (no mentions) and are not sent to the lead as work. Without `destinations`
+they go to your home room: the `[discord]` home channel, else the `[telegram]` group (and topic)
+or your DM. With neither, they stay in the event log; for Slack, name a destination.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `update.check` | boolean | `true` | | Daily check for a newer stable release; off means no request is ever made. |
 | `update.first_after` | duration | `"10m"` | 1s–24h | First check after the hub starts. |
 | `update.api_base` | string | GitHub's API | localhost only | Test override. |
-| `update.language` | string | `"ko"` | `ko`, `en` | Language of the default notice. |
 | `update.template` | string | see below | fields `{current}`, `{latest}`, `{url}`; `{{`/`}}` for braces | The notice wording; line breaks are kept. |
-| `update.destinations` | list of strings | your home room | names from `[destinations]`, `log` | Where the notice goes instead. |
+| `update.updated_template` | string | see below | fields `{previous}`, `{latest}`, `{sessions}` | The wording after an update; a rollback keeps its default. |
+| `update.destinations` | list of strings | your home room | names from `[destinations]`, `log` | Where the notice and the update message go instead. |
 | `usage.enabled` | boolean | `false` | needs `endpoint` | Sends usage counts. There is no default collector. |
 | `usage.endpoint` | string | none | URL | OTLP/HTTP logs endpoint, such as `https://collector.example/v1/logs`. |
 | `usage.key_file` | string | none | absolute path | Owner-only file with the collector's key, sent as a bearer token. |
 
-Default notice (`ko`, then `en`):
+Default notice, in `[hub] language` (`ko`, then `en`):
 
 ```text
 새로운 버전이 나왔습니다! 보스. 콘솔 창에 `cataly update` 명령어를 입력해주세요.
@@ -571,10 +588,30 @@ A new version is out, boss. Run `cataly update` in a terminal.
 {current} -> {latest} {url}
 ```
 
+After an update and after a rollback (`{sessions}` is a sentence such as `lead와 lane 2개를 이어서
+열었습니다.`, or nothing):
+
+```text
+{latest} 버전으로 업데이트했습니다. 보스, 감사합니다!
+{previous} -> {latest}
+{sessions}
+
+{latest} 버전으로 되돌렸습니다.
+{previous} -> {latest}
+{sessions}
+
+Updated to {latest}. Thanks, boss!
+{previous} -> {latest}
+{sessions}
+
+Rolled back to {latest}.
+{previous} -> {latest}
+{sessions}
+```
+
 ```toml
 [update]
 check = true
-language = "ko"
 # template = "Cataly {latest} is out (you have {current}): {url}"
 # destinations = ["phone"]
 ```
@@ -741,7 +778,8 @@ Events: `backup.refused` (`files`, `rule`), `backup.clean` (`commit`),
 
 `cataly setup` backs up the state folder to a private GitHub repository when `gh` is logged in, by
 default `<your gh login>/cataly-home` (`--backup-repo owner/name` picks another; `--backup off`
-leaves it out). It reads your `gh` login and the repository; a public repository is refused, and a
+leaves it out, and when no backup exists yet setup remembers that as `[setup] backup = false`, so a
+later plain run does not offer it again until `--backup on`). It reads your `gh` login and the repository; a public repository is refused, and a
 missing one is created private once you say yes. Setup makes the state folder a git working tree whose
 `.gitignore` keeps token files, secrets, keys and the live database out, sets the remote, and adds
 `[jobs.home]` with `kind = "backup"`, `dir` = the state folder, `remote = "origin"`,

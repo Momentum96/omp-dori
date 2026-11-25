@@ -107,6 +107,10 @@ pub(crate) enum EventKind {
     NotesRefresh,
     /// A newer stable release is out (IR req. 37).
     UpdateAvailable,
+    /// The hub runs a newer version than its previous run.
+    UpdateDone,
+    /// The hub runs an older version than its previous run.
+    UpdateRolledBack,
     /// Usage counts are on (COORD req. 69).
     UsageOn,
 }
@@ -119,7 +123,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 66] = [
+const KINDS: [KindRow; 68] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -520,6 +524,18 @@ const KINDS: [KindRow; 66] = [
         "update.available",
         &["current", "latest", "url"],
         "A new version is out, boss. Run `cataly update` in a terminal. {current} -> {latest} {url}",
+    ),
+    (
+        EventKind::UpdateDone,
+        "update.done",
+        &["previous", "latest", "sessions"],
+        "Updated to {latest}. Thanks, boss! {previous} -> {latest} {sessions}",
+    ),
+    (
+        EventKind::UpdateRolledBack,
+        "update.rolled_back",
+        &["previous", "latest", "sessions"],
+        "Rolled back to {latest}. {previous} -> {latest} {sessions}",
     ),
     (
         EventKind::UsageOn,

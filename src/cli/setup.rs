@@ -782,6 +782,8 @@ fn lead(planned: &Config, mut text: String, items: &mut Vec<Item>) -> String {
 }
 
 /// The home backup: kept as configured, switched off or on by `--backup`, or planned with `gh`.
+/// Turned off before it existed, it is remembered as `[setup] backup = false`, so a plain re-run
+/// does not offer it again; `--backup on` (or `--backup-repo`) plans it and clears the mark.
 fn backup(
     p: &Parsed,
     paths: &Paths,
@@ -798,6 +800,10 @@ fn backup(
             text = set_rendered(&text, &section, "enabled", "false");
             items.push(Item::new("backup", "off (job home switched off)", true));
         }
+        (None, Some(false), _) if planned.setup.backup => {
+            text = set_rendered(&text, "setup", "backup", "false");
+            items.push(Item::new("backup", "off (remembered)", true));
+        }
         (_, Some(false), _) => items.push(Item::new("backup", "off", false)),
         (Some(j), Some(true), None) if !j.enabled => {
             text = set_rendered(&text, &section, "enabled", "true");
@@ -812,8 +818,16 @@ fn backup(
             },
             false,
         )),
+        (None, None, None) if !planned.setup.backup => items.push(Item::new(
+            "backup",
+            "off (you turned it off; `cataly setup --backup on` turns it on)",
+            false,
+        )),
         (_, asked, repo) => match block_on(super::home::plan(repo, paths)) {
             Ok(h) => {
+                if !planned.setup.backup {
+                    text = set_rendered(&text, "setup", "backup", "true");
+                }
                 text = h.config(&text);
                 items.push(Item::new("backup", h.summary(), true));
                 return Ok((text, Some(h)));

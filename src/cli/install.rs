@@ -12,6 +12,7 @@ use serde_json::json;
 use super::args::Parsed;
 use super::client::{Client, ClientError};
 use super::{Failure, exit, out};
+use crate::config::{Config, Language};
 use crate::proto::{Status, method};
 use crate::sys::install::{self as layout_ops, Layout, Staged};
 use crate::sys::lock::{self, HubLock, LockOutcome};
@@ -122,13 +123,30 @@ fn take_lock(l: &Layout) -> Result<HubLock, Outcome> {
     }
 }
 
-/// The running hub's version when one answers on its socket within 1 s.
-fn hub_version(paths: &Paths) -> Option<String> {
+/// The running hub's status when one answers on its socket within 1 s.
+fn hub_status(paths: &Paths) -> Option<Status> {
     let mut client = Client::connect(&paths.socket).ok()?;
     let reply = client.call(method::STATUS, json!({}), HUB_ANSWER).ok()?;
-    serde_json::from_value::<Status>(reply)
-        .ok()
-        .map(|s| s.version)
+    serde_json::from_value::<Status>(reply).ok()
+}
+
+/// The running hub's version when one answers on its socket within 1 s.
+fn hub_version(paths: &Paths) -> Option<String> {
+    hub_status(paths).map(|s| s.version)
+}
+
+/// The sessions the new hub brought back, once it settled (at most [`STOP_WAIT`]).
+async fn resumed(paths: &Paths) -> Option<crate::proto::Resumed> {
+    let deadline = Instant::now() + STOP_WAIT;
+    loop {
+        if let Some(r) = hub_status(paths).and_then(|s| s.resumed) {
+            return Some(r);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// `omp --version` as `(a, b, c)`, or `None` when OMP is absent or says nothing usable.
@@ -280,7 +298,8 @@ async fn first_install(l: &Layout, staged: Staged) -> Outcome {
     }
 }
 
-/// Activates a newer staged version over `current`: held while a hub answers unless `restart`.
+/// Activates a newer staged version over `current`. A running hub is restarted on it when `restart`
+/// is set, else left on `current` until it next starts.
 async fn switch_to(
     l: &Layout,
     paths: &Paths,
@@ -299,15 +318,12 @@ async fn switch_to(
         staged.discard();
         return o;
     }
-    let running = hub_version(paths).is_some();
-    if running && !restart {
-        staged.discard();
-        return Outcome::Held("the hub is running; stop it first or add --restart".into());
-    }
+    let answering = hub_version(paths).is_some();
+    let running = answering && restart;
     let closed = if running {
         if let Err(why) = stop_hub(paths).await {
             staged.discard();
-            return Outcome::Held(format!("{why}; nothing changed"));
+            return Outcome::Held(why);
         }
         Some(Instant::now())
     } else {
@@ -324,6 +340,9 @@ async fn switch_to(
         return restart_switch(l, paths, &version, current, closed).await;
     }
     match activate(l, &version, current) {
+        Ok(()) if answering => Outcome::Done(format!(
+            "cataly {current} -> {version}; the running hub stays on {current} until it restarts"
+        )),
         Ok(()) => Outcome::Done(format!("cataly {current} -> {version}")),
         Err(e) => Outcome::NeedsAttention(format!("{e}; run `cataly status --install`")),
     }
@@ -354,9 +373,16 @@ async fn restart_switch(
     match start_and_wait(l, paths, version).await {
         Ok(()) => {
             let _ = layout_ops::retain(l);
+            let answered = closed.elapsed().as_millis();
+            let sessions =
+                crate::jobs::update::resumed_text(owner_language(paths), resumed(paths).await);
+            let sessions = if sessions.is_empty() {
+                String::new()
+            } else {
+                format!("\n{sessions}")
+            };
             Outcome::Done(format!(
-                "cataly {was} -> {version}; the new hub answered {} ms after the old one closed",
-                closed.elapsed().as_millis()
+                "cataly {was} -> {version}; the new hub answered {answered} ms after the old one closed{sessions}"
             ))
         }
         Err(why) => {
@@ -380,28 +406,77 @@ async fn restart_switch(
     }
 }
 
-/// Asks the hub to stop until it accepts (busy sessions refuse), then waits for its socket to close.
+/// Asks the hub to stop until it accepts, then waits for its socket to close. A busy session (the
+/// lead or a lane working or waiting on a dialog) refuses; it is never stopped, and after 60 s the
+/// owner is told, in his language, which session the switch waits for. Sessions the owner started
+/// with OMP himself are not the hub's and are never asked.
 async fn stop_hub(paths: &Paths) -> Result<(), String> {
+    let language = owner_language(paths);
     let deadline = Instant::now() + STOP_WAIT;
+    let mut said = String::new();
     loop {
         let answer = Client::connect(&paths.socket)
             .and_then(|mut c| c.call(method::HUB_STOP, json!({}), Duration::from_secs(5)));
         match answer {
             Ok(_) | Err(ClientError::NoHub | ClientError::Io(_)) => break,
-            Err(ClientError::Remote(body)) if Instant::now() < deadline => {
-                out::line(&format!("waiting: {}", body.message));
+            Err(ClientError::Remote(body)) => {
+                let busy = body.message.trim_start_matches("busy: ").to_string();
+                if Instant::now() >= deadline {
+                    return Err(busy_held(language, &busy));
+                }
+                if busy != said {
+                    out::line(&busy_waiting(language, &busy));
+                    said = busy;
+                }
             }
-            Err(e) => return Err(format!("the hub did not stop: {e}")),
+            Err(e) => return Err(format!("the hub did not stop: {e}; nothing changed")),
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     while hub_version(paths).is_some() {
         if Instant::now() >= deadline {
-            return Err("the hub's socket stayed open".into());
+            return Err("the hub's socket stayed open; nothing changed".into());
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     Ok(())
+}
+
+/// The owner's language from the config file; the default when it is absent or invalid.
+fn owner_language(paths: &Paths) -> Language {
+    loaded(paths).map_or(Config::default().hub.language, |c| c.hub.language)
+}
+
+/// The config file, when it exists and is valid.
+fn loaded(paths: &Paths) -> Option<Config> {
+    if !paths.config_file.exists() {
+        return None;
+    }
+    crate::config::load(&paths.config_file).ok()
+}
+
+/// Said once per distinct reason while a busy session holds the switch.
+fn busy_waiting(language: Language, busy: &str) -> String {
+    match language {
+        Language::Korean => {
+            format!("작업 중인 세션을 기다리는 중입니다 ({busy}). 최대 60초 기다립니다.")
+        }
+        Language::English => format!("waiting for a busy session ({busy}), up to 60 s"),
+    }
+}
+
+/// Why the switch is held after 60 s of a busy session.
+fn busy_held(language: Language, busy: &str) -> String {
+    match language {
+        Language::Korean => format!(
+            "업데이트가 작업 중인 세션을 기다리고 있습니다 ({busy}). 작업 중인 세션은 멈추지 않습니다. \
+             작업이 끝나면 다시 실행해주세요. 아무것도 바뀌지 않았습니다."
+        ),
+        Language::English => format!(
+            "the update is waiting for a busy session ({busy}); busy sessions are never stopped. \
+             Run it again once that work is done. Nothing changed."
+        ),
+    }
 }
 
 /// Starts the hub through the user service Cataly created, else detached, and waits for it.
@@ -429,7 +504,7 @@ async fn start_and_wait(l: &Layout, paths: &Paths, version: &str) -> Result<(), 
     Err(format!("no hub reported {version} within 30 s"))
 }
 
-/// `cataly update [--from <folder> | --tag <tag>] [--restart]`.
+/// `cataly update [--from <folder> | --tag <tag>] [--no-restart]`.
 async fn update(p: &Parsed, paths: &Paths) -> Outcome {
     let l = match layout(p) {
         Ok(l) => l,
@@ -442,7 +517,7 @@ async fn update(p: &Parsed, paths: &Paths) -> Outcome {
     let Some(current) = l.current_version() else {
         return Outcome::Held("Cataly is not installed here; use install.sh first".into());
     };
-    let restart = p.flag("--restart");
+    let restart = !p.flag("--no-restart");
     if let Err(e) = layout_ops::clear_staging(&l) {
         return Outcome::Held(e);
     }
@@ -477,11 +552,7 @@ async fn update(p: &Parsed, paths: &Paths) -> Outcome {
 
 /// Release metadata through the config's API base (a loopback fake in tests).
 async fn fetch(paths: &Paths, tag: Option<&str>) -> Result<release::Release, String> {
-    let settings = if paths.config_file.exists() {
-        crate::config::load(&paths.config_file).map_or_default(|c| c.update)
-    } else {
-        crate::config::release::UpdateSettings::default()
-    };
+    let settings = loaded(paths).map_or_default(|c| c.update);
     match release::fetch_release(&settings.api()?, tag).await? {
         Some(r) if r.version.stable() || tag.is_some() => Ok(r),
         _ => Err("no stable release is published yet; name one with --tag v<version>".into()),
@@ -504,7 +575,7 @@ async fn download(l: &Layout, r: &release::Release) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// `cataly rollback [--expect <version>] [--restart]` (IR req. 30).
+/// `cataly rollback [--expect <version>] [--no-restart]` (IR req. 30).
 async fn rollback(p: &Parsed, paths: &Paths) -> Outcome {
     let l = match layout(p) {
         Ok(l) => l,
@@ -538,12 +609,10 @@ async fn rollback(p: &Parsed, paths: &Paths) -> Outcome {
         }
         Err(e) => return Outcome::Held(e),
     }
-    let running = hub_version(paths).is_some();
-    if running && !p.flag("--restart") {
-        return Outcome::Held("the hub is running; stop it first or add --restart".into());
-    }
+    let answering = hub_version(paths).is_some();
+    let running = answering && !p.flag("--no-restart");
     if running && let Err(why) = stop_hub(paths).await {
-        return Outcome::Held(format!("{why}; nothing changed"));
+        return Outcome::Held(why);
     }
     // Only now is the restart known not to be held: the version rolled back from is never
     // announced again (IR req. 37).
@@ -559,6 +628,10 @@ async fn rollback(p: &Parsed, paths: &Paths) -> Outcome {
     match layout_ops::switch(&l, &previous.version)
         .and_then(|()| layout_ops::settle_records(&l, Some(&current)).map(drop))
     {
+        Ok(()) if answering => Outcome::Done(format!(
+            "rolled back: cataly {current} -> {}; the running hub stays on {current} until it restarts",
+            previous.version
+        )),
         Ok(()) => Outcome::Done(format!(
             "rolled back: cataly {current} -> {}",
             previous.version

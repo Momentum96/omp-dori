@@ -126,7 +126,15 @@ impl Hub {
             sessions_refused: sessions,
             quota_gate: self.jobs.gate(),
             lead,
+            resumed: self.resumed(),
         })
+    }
+
+    /// The sessions brought back at start, once the lead and the lanes settled.
+    fn resumed(&self) -> Option<crate::proto::Resumed> {
+        let lead = self.lead.settled()?;
+        let lanes = *self.lanes.resumed.get()?;
+        Some(crate::proto::Resumed { lead, lanes })
     }
 
     async fn stats(&self) -> Stats {
@@ -439,7 +447,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         });
     }
     spawn_lead_tasks(&hub, &supervisor, &shutdown_rx);
-    spawn_release_tasks(&jobs, &supervisor, paths, &shutdown_rx);
+    spawn_release_tasks(&hub, &supervisor, paths, &shutdown_rx);
     streams.resume().await;
     let heartbeat = spawn_background(&supervisor, paths, omp, config_rx, &store, &shutdown_rx);
     let notifier = Arc::new(Notifier::from_env());
@@ -816,16 +824,24 @@ fn spawn_background(
 
 /// The daily release notice and the opt-in usage counts.
 fn spawn_release_tasks(
-    jobs: &Jobs,
+    hub: &Arc<Hub>,
     supervisor: &Supervisor,
     paths: &Paths,
     shutdown: &watch::Receiver<bool>,
 ) {
-    let root = crate::sys::install::Layout::of_running().map_or_default(|l| l.root);
+    let jobs = &hub.jobs;
+    let layout = crate::sys::install::Layout::of_running().ok();
     {
         let (jobs, stop) = (jobs.clone(), shutdown.clone());
+        let hub = Arc::clone(hub);
+        let resumed: crate::jobs::update::ResumedView = Arc::new(move || hub.resumed());
         supervisor.spawn("update", move || {
-            crate::jobs::update::run(jobs.clone(), root.clone(), stop.clone())
+            crate::jobs::update::run(
+                jobs.clone(),
+                layout.clone(),
+                Arc::clone(&resumed),
+                stop.clone(),
+            )
         });
     }
     let (jobs, stop, state) = (jobs.clone(), shutdown.clone(), paths.state_dir.clone());

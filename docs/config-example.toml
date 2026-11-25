@@ -10,6 +10,7 @@
 
 [hub]
 log_level = "info"                      # error, warn, info or debug
+language = "ko"                         # ko or en: the language of Cataly's own notices to you
 
 [omp]
 path = "omp"                            # or an absolute path to the OMP executable

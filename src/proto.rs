@@ -232,6 +232,16 @@ pub(crate) struct Status {
     /// The lead's model and phase; `None` when the config has no `[lead]`.
     #[serde(default)]
     pub(crate) lead: Option<String>,
+    /// The sessions this hub brought back at start (DESIGN decision 9); `None` while recovering.
+    #[serde(default)]
+    pub(crate) resumed: Option<Resumed>,
+}
+
+/// The sessions a hub brought back at start: the lead and how many lanes run again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Resumed {
+    pub(crate) lead: bool,
+    pub(crate) lanes: usize,
 }
 
 /// `stats` reply.

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{ConfigError, LOG_DESTINATION, Section};
+use super::{ConfigError, LOG_DESTINATION, Language, Section};
 use crate::jobs::event::{EventKind, Template};
 use crate::relay::http::Base;
 
@@ -14,13 +14,16 @@ const KOREAN: &str = "새로운 버전이 나왔습니다! 보스. 콘솔 창에
 /// The default notice in English.
 const ENGLISH: &str = "A new version is out, boss. Run `cataly update` in a terminal.\n\
                        {current} -> {latest} {url}";
-
-/// The language of the owner's fixed notices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Language {
-    Korean,
-    English,
-}
+/// After the hub first runs a newer version, in Korean and English; `{previous}`, `{latest}` and
+/// `{sessions}` (the sessions resumed, a sentence or nothing).
+const UPDATED_KOREAN: &str = "{latest} 버전으로 업데이트했습니다. 보스, 감사합니다!\n\
+                              {previous} -> {latest}\n{sessions}";
+const UPDATED_ENGLISH: &str =
+    "Updated to {latest}. Thanks, boss!\n{previous} -> {latest}\n{sessions}";
+/// After the hub first runs an older version (a rollback).
+const ROLLED_BACK_KOREAN: &str =
+    "{latest} 버전으로 되돌렸습니다.\n{previous} -> {latest}\n{sessions}";
+const ROLLED_BACK_ENGLISH: &str = "Rolled back to {latest}.\n{previous} -> {latest}\n{sessions}";
 
 /// `[update]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +34,10 @@ pub(crate) struct UpdateSettings {
     pub(crate) api_base: Option<Base>,
     /// The first check after the hub starts (IR req. 36: 10 minutes).
     pub(crate) first_after: Duration,
-    /// The language of the default notice.
-    pub(crate) language: Language,
-    /// The owner's notice wording, checked at load; `None` is the default for `language`.
+    /// The owner's notice wording, checked at load; `None` is the default in `[hub] language`.
     pub(crate) template: Option<String>,
+    /// The owner's wording after an update, checked at load; `None` is the default.
+    pub(crate) updated_template: Option<String>,
     /// Named destinations; `None` posts to the owner's home room.
     pub(crate) destinations: Option<Vec<String>>,
 }
@@ -45,8 +48,8 @@ impl Default for UpdateSettings {
             check: true,
             api_base: None,
             first_after: Duration::from_mins(10),
-            language: Language::Korean,
             template: None,
+            updated_template: None,
             destinations: None,
         }
     }
@@ -62,12 +65,29 @@ impl UpdateSettings {
     }
 
     /// The notice wording: the owner's, else the default in the owner's language.
-    pub(crate) fn template(&self) -> Result<Template, String> {
-        let text = self.template.as_deref().unwrap_or(match self.language {
+    pub(crate) fn template(&self, language: Language) -> Result<Template, String> {
+        let text = self.template.as_deref().unwrap_or(match language {
             Language::Korean => KOREAN,
             Language::English => ENGLISH,
         });
         Template::parse(text, EventKind::UpdateAvailable)
+    }
+
+    /// The message after the hub first runs a new version: the owner's update wording, else the
+    /// default in the owner's language; a rollback always has its default.
+    pub(crate) fn updated(
+        &self,
+        language: Language,
+        rolled_back: bool,
+    ) -> Result<Template, String> {
+        let (kind, text) = match (rolled_back, language, self.updated_template.as_deref()) {
+            (true, Language::Korean, _) => (EventKind::UpdateRolledBack, ROLLED_BACK_KOREAN),
+            (true, Language::English, _) => (EventKind::UpdateRolledBack, ROLLED_BACK_ENGLISH),
+            (false, _, Some(own)) => (EventKind::UpdateDone, own),
+            (false, Language::Korean, None) => (EventKind::UpdateDone, UPDATED_KOREAN),
+            (false, Language::English, None) => (EventKind::UpdateDone, UPDATED_ENGLISH),
+        };
+        Template::parse(text, kind)
     }
 }
 
@@ -106,16 +126,16 @@ pub(super) fn parse(
         ) {
             update.first_after = d;
         }
-        match u.string(errors, "language") {
-            None => {}
-            Some("ko") => update.language = Language::Korean,
-            Some("en") => update.language = Language::English,
-            Some(_) => errors.push(u.error("language", "expected \"ko\" or \"en\"")),
-        }
         if let Some(text) = u.string(errors, "template") {
             match Template::parse(text, EventKind::UpdateAvailable) {
                 Ok(_) => update.template = Some(text.to_string()),
                 Err(e) => errors.push(u.error("template", &e)),
+            }
+        }
+        if let Some(text) = u.string(errors, "updated_template") {
+            match Template::parse(text, EventKind::UpdateDone) {
+                Ok(_) => update.updated_template = Some(text.to_string()),
+                Err(e) => errors.push(u.error("updated_template", &e)),
             }
         }
         if let Some(names) = u.strings(errors, "destinations") {

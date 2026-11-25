@@ -62,6 +62,7 @@ pub(crate) struct Config {
     pub(crate) coord: coord::CoordSettings,
     pub(crate) update: release::UpdateSettings,
     pub(crate) usage: release::UsageSettings,
+    pub(crate) setup: SetupSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
     pub(crate) voice: voice::VoiceConfig,
@@ -73,6 +74,7 @@ impl Default for Config {
         Self {
             hub: HubSettings {
                 log_level: Level::Info,
+                language: Language::Korean,
             },
             omp: OmpSettings { path: "omp".into() },
             discord: DiscordSettings::default(),
@@ -81,6 +83,7 @@ impl Default for Config {
             context: relays::ContextSettings::default(),
             update: release::UpdateSettings::default(),
             usage: release::UsageSettings::default(),
+            setup: SetupSettings::default(),
             outgoing: Checks::default(),
             limits: LimitsSettings {
                 enabled: false,
@@ -101,9 +104,32 @@ impl Default for Config {
     }
 }
 
+/// `[hub]`.
 #[derive(Debug, Clone)]
 pub(crate) struct HubSettings {
     pub(crate) log_level: Level,
+    /// The owner's one language for every fixed owner-facing text (DESIGN 12.2 A19).
+    pub(crate) language: Language,
+}
+
+/// The owner's language (DESIGN 12.2 A19): the default wording of owner-facing notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Language {
+    Korean,
+    English,
+}
+
+/// `[setup]`: what `cataly setup` remembers between runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SetupSettings {
+    /// Off once the owner turned the home backup off; a plain re-run then leaves it off.
+    pub(crate) backup: bool,
+}
+
+impl Default for SetupSettings {
+    fn default() -> Self {
+        Self { backup: true }
+    }
 }
 
 /// `[omp]`: the executable, an absolute path or a name looked up on `PATH` (HOST req. 17).
@@ -406,7 +432,17 @@ pub(crate) fn parse(text: &str) -> Result<Config, Vec<ConfigError>> {
                 }
             }
         }
+        match hub.string(&mut errors, "language") {
+            None => {}
+            Some("ko") => config.hub.language = Language::Korean,
+            Some("en") => config.hub.language = Language::English,
+            Some(_) => errors.push(hub.error("language", "expected \"ko\" or \"en\"")),
+        }
         hub.finish(&mut errors);
+    }
+    if let Some(mut setup) = root.table(&mut errors, "setup") {
+        config.setup.backup = setup.bool(&mut errors, "backup").unwrap_or(true);
+        setup.finish(&mut errors);
     }
     sections(&mut errors, &mut root, &mut config);
     if let Some(mut dests) = root.table(&mut errors, "destinations") {

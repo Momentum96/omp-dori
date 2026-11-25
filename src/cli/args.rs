@@ -125,16 +125,16 @@ pub(crate) const COMMANDS: [Spec; 54] = [
     Spec {
         path: &["update"],
         args: &[],
-        flags: &["--restart"],
+        flags: &["--no-restart"],
         values: &["--from", "--tag", "--prefix"],
-        summary: "install the latest stable release (or --tag, or --from <folder>); --restart restarts a running hub",
+        summary: "install the latest stable release (or --tag, or --from <folder>) and restart a running hub on it; --no-restart leaves the hub on the old version until it restarts",
     },
     Spec {
         path: &["rollback"],
         args: &[],
-        flags: &["--restart"],
+        flags: &["--no-restart"],
         values: &["--expect", "--prefix"],
-        summary: "switch back to the previous version (--expect <version> to assert which)",
+        summary: "switch back to the previous version (--expect <version> to assert which) and restart a running hub on it; --no-restart leaves the hub as it is",
     },
     Spec {
         path: &["check"],

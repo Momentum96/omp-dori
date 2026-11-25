@@ -1238,6 +1238,16 @@ impl<R: Runtime> Lead<R> {
         self.current().map(|s| s.snapshot())
     }
 
+    /// After start-up recovery and the automatic start: whether the lead runs. `None` while it may
+    /// still come up.
+    pub(crate) fn settled(&self) -> Option<bool> {
+        if self.snapshot().is_some() {
+            return Some(true);
+        }
+        let coming = self.wants_autostart() || matches!(self.phase().0, Phase::Starting);
+        (self.recovered.load(Ordering::Acquire) && !coming).then_some(false)
+    }
+
     pub(crate) async fn view(&self) -> View {
         let (phase, reason) = self.phase().clone();
         let entries = self.mailbox.list().await.unwrap_or_default();

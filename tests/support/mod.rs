@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 pub mod discord;
 pub mod github;
 pub mod model;
+pub mod release;
 pub mod slack;
 pub mod telegram;
 

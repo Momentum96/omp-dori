@@ -909,6 +909,8 @@ impl<R: Runtime> Lanes<R> {
                     .with("detail", lines.join("; ")),
             );
         }
+        let resumed = self.live_map().values().filter(|s| s.alive()).count();
+        let _ = self.resumed.set(resumed);
         self.nudge.notify_one();
     }
 

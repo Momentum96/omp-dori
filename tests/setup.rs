@@ -253,11 +253,26 @@ fn a_hand_set_avatar_is_kept_until_profile_is_asked() {
     assert_eq!(done["applied"], true);
     let first = fake.image("avatar").unwrap();
 
-    // The owner sets his own avatar: a run keeps it and keeps Cataly's banner.
+    assert!(
+        read(&hub.config_path()).contains("[setup]\nbackup = false\n"),
+        "the turned-off backup is remembered"
+    );
+
+    // The owner sets his own avatar: a plain run keeps it and Cataly's banner, and does not offer
+    // the backup he turned off.
     fake.set_image("avatar", "mine");
-    let (ok, again, stderr) = json_run(&hub, &["--yes", "--backup", "off"]);
+    let (ok, again, stderr) = json_run(&hub, &["--yes"]);
     assert!(ok, "{stderr}");
     assert_eq!(again["action"], "keep", "{again}");
+    let backup = item(&again, "backup");
+    assert_eq!(backup["change"], false);
+    assert!(
+        backup["value"]
+            .as_str()
+            .unwrap()
+            .contains("you turned it off"),
+        "{backup}"
+    );
     let profile = item(&again, "profile");
     assert_eq!(profile["change"], false);
     assert!(

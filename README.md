@@ -46,6 +46,27 @@ Scripts use `cataly setup --yes` with the same flags, and `--json`.
 Put provider keys the service needs into `secrets/service.env` (setup names the missing ones).
 `cataly health` shows what still needs fixing.
 
+## Update
+
+When a new release is out, the hub tells you once in your home room. Then run, from any
+terminal:
+
+```sh
+cataly update
+```
+
+It downloads and checks the release, asks the running hub to stop in order, switches to the new
+version, starts the hub the way it ran before (the user service, or in the background), and waits
+30 s for the new version to answer; otherwise it switches back. The new hub resumes the lead and
+every lane on their own session files, so their conversations and goals carry on (a paused lane
+stays paused), and posts once in your home room that it was updated and which sessions it
+resumed. A session that is working or waiting for your answer is never stopped: the update waits
+up to 60 s, then says which session it waits for and changes nothing; run it again once that work
+is done. OMP sessions you started yourself are not the hub's and are never touched.
+
+`cataly update --no-restart` installs without touching a running hub; the new version runs from
+the hub's next start. `cataly rollback` goes back to the previous version the same way.
+
 ## Where things live
 
 - Config: `~/.config/cataly/config.toml`, tokens in `~/.config/cataly/secrets/` (owner-only files).

@@ -19,8 +19,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use support::TestHub;
 use support::model::{FakeModel, models_yml};
+use support::release::{
+    V1, bump, command_link, hub_version, installed_hub, release, run, stop_hub, text,
+    trust_test_key, variant,
+};
+use support::{BIN, TestHub};
 
 const WAIT: Duration = Duration::from_secs(90);
 
@@ -52,6 +56,11 @@ struct Lanes {
 
 impl Lanes {
     fn new() -> Self {
+        Self::with_config("")
+    }
+
+    /// The sandbox with `extra` appended to the config (`{work}` names the work directory).
+    fn with_config(extra: &str) -> Self {
         let hub = TestHub::new("");
         let agent = hub.root.join("agent");
         let work = hub.root.join("work");
@@ -65,10 +74,11 @@ impl Lanes {
         .unwrap();
         let mut hub = hub;
         hub.env.push(("PI_CODING_AGENT_DIR".into(), agent));
+        let extra = extra.replace("{work}", &work.display().to_string());
         hub.write_config(&format!(
             "[omp]\npath = \"{}\"\n[sessions]\nextra_flags = [\"--no-skills\", \"--no-rules\", \
              \"--no-context-files\"]\n[lanes]\nmodel = \"fake/primary\"\ncwd = \"{}\"\nobjection = \"2s\"\n\
-             [lanes.shell]\ndeny = [\"echo cataly-denied.*\"]\n",
+             [lanes.shell]\ndeny = [\"echo cataly-denied.*\"]\n{extra}",
             installed_omp().display(),
             work.display()
         ));
@@ -250,6 +260,128 @@ fn hub_restart_brings_three_stock_lanes_back() {
     assert!(text.contains("r-1: restarted; goal active"), "{text}");
     assert!(l.model.seen().iter().all(|m| m == "primary"));
     assert!(l.hub.stop().success());
+}
+
+/// The newest request body the fake model received whose text contains `marker`, as JSON text.
+fn body_with(model: &FakeModel, marker: &str) -> Option<String> {
+    model
+        .bodies()
+        .iter()
+        .rev()
+        .map(Value::to_string)
+        .find(|b| b.contains(marker))
+}
+
+/// A plain `cataly update` with live sessions in stock OMP: the new hub resumes the lead and both
+/// lanes on their exact session files, an active goal stays active and a paused one paused, the
+/// next prompt of each session carries its earlier turn, and the CLI says which sessions came back.
+#[test]
+fn update_resumes_the_lead_and_lanes_with_their_history() {
+    if !enabled() {
+        return;
+    }
+    let mut l = Lanes::with_config("[lead]\nmodel = \"fake/primary\"\ncwd = \"{work}\"\n");
+    trust_test_key(&mut l.hub);
+    let hub = &l.hub;
+    let v2 = bump(V1, 1);
+    let r1 = release(&hub.root.join("r1"), &variant(V1, false), V1);
+    let r2 = release(&hub.root.join("r2"), &variant(&v2, false), &v2);
+    // The installed bridge replaces the sandbox's own link.
+    std::fs::remove_file(hub.root.join("agent/extensions/cataly.ts")).unwrap();
+    let out = run(
+        hub,
+        BIN.as_ref(),
+        &["install", "--from", r1.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+
+    let mut old = installed_hub(hub);
+    hub.until(WAIT, || {
+        (hub_version(hub).as_deref() == Some(V1)).then_some(())
+    });
+    hub.until(WAIT, || {
+        hub.json(&["status", "--json"])["omp"]
+            .is_object()
+            .then_some(())
+    });
+    let lead = |h: &TestHub| h.json(&["lead", "status", "--json"]);
+    let settled =
+        |v: &Value| v["sent"] == 0 && v["waiting"] == 0 && v["session"]["status"] == "idle";
+    hub.until(WAIT, || (lead(hub)["phase"] == "live").then_some(()));
+    assert!(
+        hub.cli(&["lead", "send", "remember PELICAN-1"])
+            .status
+            .success()
+    );
+    let lead_before = hub.until(WAIT, || {
+        let v = lead(hub);
+        (settled(&v) && body_with(&l.model, "PELICAN-1").is_some()).then_some(v)
+    });
+    for key in ["u-1", "u-2"] {
+        l.open(key);
+        hub.until(WAIT, || {
+            (l.goal(key).as_deref() == Some("active")).then_some(())
+        });
+    }
+    l.lane(
+        "pause",
+        &json!({ "key": "u-2", "reason": "owner said wait" }),
+    )
+    .unwrap();
+    let lanes_before: Vec<Value> = ["u-1", "u-2"].iter().map(|k| l.record(k)).collect();
+
+    let out = run(
+        hub,
+        &command_link(hub),
+        &["update", "--from", r2.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        said.contains("lead와 lane 2개를 이어서 열었습니다."),
+        "{said}"
+    );
+    let _ = old.wait();
+    assert_eq!(hub_version(hub).as_deref(), Some(v2.as_str()));
+
+    let lead_after = hub.until(WAIT, || {
+        let v = lead(hub);
+        (v["phase"] == "live").then_some(v)
+    });
+    for field in ["session_id", "session_file"] {
+        assert_eq!(
+            lead_after["session"][field], lead_before["session"][field],
+            "{lead_after}"
+        );
+    }
+    for before in &lanes_before {
+        let key = before["key"].as_str().unwrap();
+        let after = l.record(key);
+        assert_eq!(after["session_id"], before["session_id"], "{after}");
+        assert_eq!(after["session_file"], before["session_file"], "{after}");
+        assert_eq!(after["live"], true, "{after}");
+    }
+    hub.until(WAIT, || {
+        (l.goal("u-1").as_deref() == Some("active")).then_some(())
+    });
+    assert_eq!(l.goal("u-2").as_deref(), Some("paused"));
+
+    // The conversations came back: each next prompt carries the earlier turn.
+    assert!(
+        hub.cli(&["lead", "send", "and now PELICAN-2"])
+            .status
+            .success()
+    );
+    let next = hub.until(WAIT, || body_with(&l.model, "PELICAN-2"));
+    assert!(next.contains("PELICAN-1"), "the lead's history: {next}");
+    l.lane(
+        "send",
+        &json!({ "key": "u-1", "text": "next step HERON-2" }),
+    )
+    .unwrap();
+    let next = hub.until(WAIT, || body_with(&l.model, "HERON-2"));
+    assert!(next.contains("Work u-1"), "the lane's history: {next}");
+    stop_hub(hub);
 }
 
 /// The text OMP returned to the model for each tool call it made, by tool name, over every request.
