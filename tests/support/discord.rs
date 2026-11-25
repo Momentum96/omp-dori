@@ -65,6 +65,12 @@ struct State {
     /// "identify" or "resume", one per connection.
     connections: Vec<String>,
     gateway: Option<mpsc::UnboundedSender<Gw>>,
+    /// Voice: the voice server endpoint answered to op 4, the guild snapshot sent after READY
+    /// when the guilds intent is requested, the op 4 frames and the intents of each identify.
+    voice_endpoint: Option<String>,
+    guild: Option<Value>,
+    voice_ops: Vec<Value>,
+    intents: Vec<u64>,
 }
 
 pub struct FakeDiscord {
@@ -260,6 +266,24 @@ impl FakeDiscord {
         self.state.lock().unwrap().no_ack = on;
     }
 
+    /// Answers op 4 with voice-state and voice-server updates naming `endpoint`, and sends `guild`
+    /// as `GUILD_CREATE` after `READY` when the guilds intent is requested.
+    pub fn set_voice(&self, endpoint: &str, guild: Value) {
+        let mut s = self.state.lock().unwrap();
+        s.voice_endpoint = Some(endpoint.into());
+        s.guild = Some(guild);
+    }
+
+    /// The op 4 frames the bot sent.
+    pub fn voice_ops(&self) -> Vec<Value> {
+        self.state.lock().unwrap().voice_ops.clone()
+    }
+
+    /// The intents of each identify.
+    pub fn intents(&self) -> Vec<u64> {
+        self.state.lock().unwrap().intents.clone()
+    }
+
     pub fn set_resume_url(&self, url: &str) {
         self.state.lock().unwrap().resume_url = Some(url.into());
     }
@@ -322,6 +346,12 @@ async fn gateway(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>, port: 
                         }
                     }
                     Some(2) => {
+                        let guild = {
+                            let mut s = state.lock().unwrap();
+                            let intents = frame["d"]["intents"].as_u64().unwrap_or(0);
+                            s.intents.push(intents);
+                            s.guild.clone().filter(|_| intents & 1 != 0)
+                        };
                         let resume = {
                             let mut s = state.lock().unwrap();
                             s.connections.push("identify".into());
@@ -331,6 +361,30 @@ async fn gateway(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>, port: 
                         let ready = json!({"op": 0, "s": seq, "t": "READY", "d": {"session_id": "fake-session",
                             "resume_gateway_url": resume, "user": {"id": BOT, "bot": true}}});
                         let _ = ws.send(Message::text(ready.to_string())).await;
+                        if let Some(g) = guild {
+                            let seq = next_seq(&state);
+                            let create = json!({"op": 0, "s": seq, "t": "GUILD_CREATE", "d": g});
+                            let _ = ws.send(Message::text(create.to_string())).await;
+                        }
+                    }
+                    Some(4) => {
+                        let endpoint = {
+                            let mut s = state.lock().unwrap();
+                            s.voice_ops.push(frame["d"].clone());
+                            s.voice_endpoint.clone()
+                        };
+                        let channel = frame["d"]["channel_id"].clone();
+                        let vs = json!({"guild_id": GUILD, "channel_id": channel, "user_id": BOT,
+                            "session_id": "fake-voice-session"});
+                        let seq = next_seq(&state);
+                        let update = json!({"op": 0, "s": seq, "t": "VOICE_STATE_UPDATE", "d": vs});
+                        let _ = ws.send(Message::text(update.to_string())).await;
+                        if let (Some(endpoint), false) = (endpoint, channel.is_null()) {
+                            let seq = next_seq(&state);
+                            let server = json!({"op": 0, "s": seq, "t": "VOICE_SERVER_UPDATE",
+                                "d": {"guild_id": GUILD, "token": "fake-voice-token", "endpoint": endpoint}});
+                            let _ = ws.send(Message::text(server.to_string())).await;
+                        }
                     }
                     Some(6) => {
                         state.lock().unwrap().connections.push("resume".into());

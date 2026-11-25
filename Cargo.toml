@@ -67,6 +67,11 @@ webpki-roots = { version = "1.0.12", default-features = false }
 
 [dev-dependencies]
 hyper = { version = "1.12", default-features = false, features = ["server", "http1"] }
+# The fake realtime and Discord voice servers of the hub's voice tests (crates the voice build
+# already links; dev-only, never in the product).
+audiopus = { version = "0.3.0-rc.0", default-features = false, features = ["coder"] }
+audiopus_sys = { version = "0.2.2", default-features = false, features = ["static"] }
+str0m = { version = "0.26.0", default-features = false, features = ["rust-crypto"] }
 
 [profile.release]
 panic = "unwind"
