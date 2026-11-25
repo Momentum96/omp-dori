@@ -12,6 +12,8 @@ mod streams;
 pub(crate) mod supervisor;
 mod to_lead;
 mod tool;
+#[cfg(feature = "voice")]
+pub(crate) mod voice;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -69,6 +71,8 @@ pub(crate) struct Hub {
     pub(crate) slack: Arc<crate::relay::intake::Shared>,
     links: Arc<crate::host::bridge::Links>,
     streams: Arc<streams::Streams>,
+    #[cfg(feature = "voice")]
+    pub(crate) voice: Arc<voice::Voice<Headless>>,
 }
 
 impl Hub {
@@ -260,6 +264,11 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
         }
     };
     log::set_level(config.hub.log_level);
+    // A voice build's voice task reports this itself, with the missing key named too.
+    #[cfg(not(feature = "voice"))]
+    if let Some(why) = config.voice.refusal() {
+        log::warn("voice is off", &[("reason", &why)]);
+    }
     let (store, writer) = match Store::open(&paths.db_file(), &paths.backup_dir) {
         Ok(opened) => opened,
         Err(e) => {
@@ -322,6 +331,7 @@ fn stream_cwd(config: &Config) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     let (signals, listener) = match open(paths) {
         Ok(opened) => opened,
@@ -390,6 +400,8 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         slack: relays.slack,
         links,
         streams: Arc::clone(&streams),
+        #[cfg(feature = "voice")]
+        voice: relays.voice,
     });
     {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
@@ -432,6 +444,8 @@ pub(crate) struct RelayShares {
     discord: Arc<crate::relay::intake::Shared>,
     telegram: Arc<crate::relay::intake::Shared>,
     slack: Arc<crate::relay::intake::Shared>,
+    #[cfg(feature = "voice")]
+    voice: Arc<voice::Voice<Headless>>,
 }
 
 /// What `sessions` starts: the lead, the lanes, the `agent_start` ring and the relays' shared state.
@@ -495,6 +509,18 @@ fn sessions(
             Arc::clone(&lanes).plan_loop(stop.clone())
         });
     }
+    #[cfg(feature = "voice")]
+    let (voice, tap) = voice_task(
+        paths,
+        jobs,
+        (&lead, &lanes),
+        config,
+        store,
+        supervisor,
+        shutdown,
+    );
+    #[cfg(not(feature = "voice"))]
+    let tap = None;
     let discord = discord(
         paths,
         jobs,
@@ -502,7 +528,7 @@ fn sessions(
         &events,
         config,
         store,
-        supervisor,
+        (supervisor, tap),
         shutdown,
     );
     let env = Arc::new(crate::relay::intake::Env {
@@ -536,8 +562,44 @@ fn sessions(
             discord,
             telegram,
             slack,
+            #[cfg(feature = "voice")]
+            voice,
         },
     )
+}
+
+/// The voice task and its tap on the Discord Gateway connection (DESIGN 5.2).
+#[cfg(feature = "voice")]
+fn voice_task(
+    paths: &Paths,
+    jobs: &Jobs,
+    (lead, lanes): (&Arc<Lead<Headless>>, &Arc<crate::lanes::Lanes<Headless>>),
+    config: &watch::Receiver<Arc<Config>>,
+    store: &Store,
+    supervisor: &Supervisor,
+    shutdown: &watch::Receiver<bool>,
+) -> (
+    Arc<voice::Voice<Headless>>,
+    Option<Arc<crate::relay::discord::tap::Tap>>,
+) {
+    let (ops_tx, ops) = mpsc::channel(16);
+    let (rest_jobs, rest_config) = (jobs.clone(), config.clone());
+    let voice = voice::Voice::new(
+        config.clone(),
+        paths.config_file.clone(),
+        crate::host::voice::HubVoice {
+            store: store.clone(),
+            lead: Arc::clone(lead),
+            lanes: Arc::clone(lanes),
+            config: config.clone(),
+            rest: Arc::new(move || rest_jobs.ctx().discord(&rest_config.borrow())),
+            ops: ops_tx,
+        },
+    );
+    let tap = voice.tap(ops);
+    let (task, stop) = (Arc::clone(&voice), shutdown.clone());
+    supervisor.spawn("voice", move || Arc::clone(&task).run(stop.clone()));
+    (voice, Some(tap))
 }
 
 /// How the hub starts a headless session (DESIGN 4.2); the lead and every lane use it.
@@ -652,7 +714,7 @@ fn discord(
     events: &Events,
     config: &watch::Receiver<Arc<Config>>,
     store: &Store,
-    supervisor: &Supervisor,
+    (supervisor, tap): (&Supervisor, Option<Arc<crate::relay::discord::tap::Tap>>),
     shutdown: &watch::Receiver<bool>,
 ) -> Arc<crate::relay::intake::Shared> {
     use crate::relay::discord::intake::{Env, Shared, run};
@@ -666,6 +728,7 @@ fn discord(
         events: Arc::clone(events),
         rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
         spill_dir: paths.files_dir.join("relay"),
+        tap,
     });
     let (task, stop) = (Arc::clone(&shared), shutdown.clone());
     supervisor.spawn("discord", move || {

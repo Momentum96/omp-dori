@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 51] = [
+pub(crate) const COMMANDS: [Spec; 54] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -390,6 +390,27 @@ pub(crate) const COMMANDS: [Spec; 51] = [
         flags: &["--json"],
         values: &["--thread"],
         summary: "upload a file into a Slack conversation, named <workspace>/<conversation> (optionally a thread)",
+    },
+    Spec {
+        path: &["voice", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show voice: running or off and why, hold, today's usage and waiting replies",
+    },
+    Spec {
+        path: &["voice", "restart"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "lift a voice hold and start voice again",
+    },
+    Spec {
+        path: &["voice", "reply"],
+        args: &["request", "reply"],
+        flags: &["--json"],
+        values: &["--subject"],
+        summary: "queue the lead's reply to a voice request; it is read aloud at the next pause",
     },
 ];
 

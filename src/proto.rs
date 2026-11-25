@@ -63,6 +63,9 @@ pub(crate) mod method {
     pub(crate) const SLACK_UPLOAD: &str = "slack.upload";
     /// The orderly stop the restart option of `cataly update` asks for.
     pub(crate) const HUB_STOP: &str = "hub.stop";
+    pub(crate) const VOICE_STATUS: &str = "voice.status";
+    pub(crate) const VOICE_RESTART: &str = "voice.restart";
+    pub(crate) const VOICE_REPLY: &str = "voice.reply";
     /// A held slot request (a stream for the life of the connection).
     pub(crate) const SLOT: &str = "slot";
 }

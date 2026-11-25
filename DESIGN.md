@@ -626,6 +626,14 @@ checked on crates.io on 2026-11-25.
 | audiopus (bundled libopus) | ISC; libopus BSD-3-Clause | The Opus codec |
 | str0m (`rust-crypto` backend, no default features) | MIT OR Apache-2.0 | Sans-I/O WebRTC (ICE, DTLS, SRTP) for the realtime model's WebRTC transport, with no C crypto |
 
+Milestone 5 note (`docs/notes/voice.md`): the voice build pulls in three things this table does not name.
+(1) chacha20poly1305 (Apache-2.0 OR MIT) for Discord's XChaCha20 transport mode, the fallback when a voice
+server offers no AES-256-GCM. (2) str0m's DTLS comes from dimpl, which links AWS-LC (aws-lc-rs/aws-lc-sys,
+ISC and Apache-2.0 family), so "no C crypto" does not hold for the WebRTC transport; every licence is on the
+allow list. (3) davey's MLS stack uses the hpke-rs crates, licensed MPL-2.0 (file-level copyleft), used
+unmodified with their source published; `deny.toml` allows MPL-2.0 for the hpke-rs crates alone. All three
+compile only into voice builds.
+
 | Crate (dev only) | Licence | What it saves |
 | --- | --- | --- |
 | proptest | MIT OR Apache-2.0 | Property tests with shrinking for the splitter, tables, cron and owner gate |

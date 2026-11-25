@@ -35,10 +35,15 @@ const RATE_LIMITED: Duration = Duration::from_secs(60);
 
 type Socket = WebSocketStream<Box<dyn Io>>;
 
-/// Intents: guild messages, direct messages, message content, and guilds when threads are followed.
-pub(crate) fn intents(follow_threads: bool) -> u64 {
-    (1 << 9) | (1 << 12) | (1 << 15) | u64::from(follow_threads)
+/// Intents: guild messages, direct messages, message content, and guilds when threads are followed;
+/// voice adds guilds and voice states (VOICE req. 51).
+pub(crate) fn intents(follow_threads: bool, voice: bool) -> u64 {
+    (1 << 9) | (1 << 12) | (1 << 15) | u64::from(follow_threads || voice) | (u64::from(voice) << 7)
 }
+
+/// Frames other parts of the hub send on the connection (voice's op 4), sent only once READY or
+/// RESUMED arrived; one connection holds the receiver at a time.
+pub(crate) type Ops = std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Value>>>;
 
 /// A WebSocket URL: `wss://host[:port][/path]`, or `ws://` for a loopback host only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +211,7 @@ pub(crate) struct Gateway {
     pub(crate) url: WsUrl,
     pub(crate) token: String,
     pub(crate) intents: u64,
+    pub(crate) ops: Option<Ops>,
 }
 
 impl Gateway {
@@ -330,6 +336,7 @@ impl Gateway {
     }
 
     /// One connection: returns how it ended.
+    #[allow(clippy::too_many_lines)]
     async fn connect<H: Handler>(&self, handler: &H, session: &mut Option<Session>) -> End {
         let url = session.as_ref().map_or(&self.url, |s| &s.url);
         let mut ws = match timeout(CONNECT, Self::open(url)).await {
@@ -346,10 +353,25 @@ impl Gateway {
         let mut awaiting_ack = false;
         let handshake = Instant::now() + HANDSHAKE;
         let mut ready = false;
+        // Another connection still holding the receiver means it has not wound down yet; this one
+        // then sends nothing on its behalf.
+        let mut ops = self
+            .ops
+            .as_ref()
+            .and_then(|o| std::sync::Arc::clone(o).try_lock_owned().ok());
         loop {
             tokio::select! {
                 () = sleep_until(handshake), if !ready => {
                     return End::Resume("no READY or RESUMED within 20 s".into());
+                }
+                op = next_op(ops.as_deref_mut()), if ready => {
+                    let Some(op) = op else {
+                        ops = None;
+                        continue;
+                    };
+                    if let Err(e) = send(&mut ws, &op).await {
+                        return End::Resume(e);
+                    }
                 }
                 () = sleep_until(next_beat) => {
                     if awaiting_ack {
@@ -430,6 +452,14 @@ fn presence() -> Value {
     json!({"status": "online", "since": null, "activities": [], "afk": false})
 }
 
+/// The next queued op, or never when there is no queue.
+async fn next_op(ops: Option<&mut tokio::sync::mpsc::Receiver<Value>>) -> Option<Value> {
+    match ops {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn send(ws: &mut Socket, value: &Value) -> Result<(), String> {
     match timeout(WRITE, ws.send(Message::text(value.to_string()))).await {
         Ok(Ok(())) => Ok(()),
@@ -461,7 +491,11 @@ mod tests {
         assert_eq!(close_end(4008), End::RateLimited);
         assert!(matches!(close_end(4009), End::Identify(_)));
         assert!(matches!(close_end(4000), End::Resume(_)));
-        assert_eq!(intents(true), (1 << 9) | (1 << 12) | (1 << 15) | 1);
+        assert_eq!(intents(true, false), (1 << 9) | (1 << 12) | (1 << 15) | 1);
+        assert_eq!(
+            intents(false, true),
+            (1 << 9) | (1 << 12) | (1 << 15) | (1 << 7) | 1
+        );
     }
 
     /// What the fake server does after HELLO on each connection.
@@ -572,7 +606,8 @@ mod tests {
         let gateway = Gateway {
             url: WsUrl::parse(&format!("ws://127.0.0.1:{port}")).unwrap(),
             token: "t".into(),
-            intents: intents(true),
+            intents: intents(true, false),
+            ops: None,
         };
         let seen = Arc::new(Seen::default());
         let (_tx, rx) = watch::channel(false);

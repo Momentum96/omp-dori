@@ -21,6 +21,7 @@ pub(crate) mod form;
 pub(crate) mod gateway;
 pub(crate) mod intake;
 pub(crate) mod questions;
+pub(crate) mod tap;
 pub(crate) mod threads;
 pub(crate) mod types;
 

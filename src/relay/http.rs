@@ -208,7 +208,7 @@ impl Base {
             || self.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 
-    fn authority(&self) -> String {
+    pub(crate) fn authority(&self) -> String {
         let host = if self.host.contains(':') {
             format!("[{}]", self.host)
         } else {
@@ -486,6 +486,13 @@ where
             .map_err(|e| Attempt::Unknown(format!("request failed: {e}")))?;
         let status = response.status();
         let headers = response.headers().clone();
+        let declared = headers
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok());
+        if declared.is_some_and(|n| n > cap) {
+            return Err(Attempt::Unknown(format!("declared body over {cap} bytes")));
+        }
         let body = Limited::new(response.into_body(), cap)
             .collect()
             .await

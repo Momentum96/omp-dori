@@ -188,6 +188,95 @@ impl<R: Runtime> Lanes<R> {
         body
     }
 
+    /// Voice's lane status read (VOICE req. 69): every open lane with its live state and since
+    /// when, then the sessions that are not lanes (`others`).
+    #[cfg_attr(not(feature = "voice"), allow(dead_code))]
+    pub(crate) async fn status_lines(&self, others: &[String]) -> Result<String, String> {
+        let rows = self
+            .env
+            .store
+            .read(|r| r.lanes(true))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        for row in &rows {
+            let Ok(rec) = serde_json::from_str::<Record>(&row.record) else {
+                let _ = writeln!(text, "{}: record damaged", row.key);
+                continue;
+            };
+            let line = match self.session(&rec.key).map(|s| s.snapshot()) {
+                Some(s) => format!(
+                    "{}: {}, agent {} since {}{}",
+                    rec.key,
+                    rec.status(),
+                    format!("{:?}", s.status).to_lowercase(),
+                    crate::jobs::instant_text(s.updated_ms),
+                    if s.dialogs.is_empty() {
+                        ""
+                    } else {
+                        ", approval pending"
+                    }
+                ),
+                None => format!(
+                    "{}: {}, no live agent, opened {}",
+                    rec.key,
+                    rec.status(),
+                    crate::jobs::instant_text(rec.opened_ms)
+                ),
+            };
+            let _ = writeln!(text, "{line}");
+        }
+        if rows.is_empty() {
+            text.push_str("no open lanes\n");
+        }
+        for other in others {
+            let _ = writeln!(text, "{other}");
+        }
+        Ok(text.trim_end().to_string())
+    }
+
+    /// Voice's report read (VOICE req. 69): the newest report of up to `count` lanes, newest
+    /// first, each cut to `each` characters.
+    #[cfg_attr(not(feature = "voice"), allow(dead_code))]
+    pub(crate) async fn newest_reports(&self, count: usize, each: usize) -> Result<String, String> {
+        let rows = self
+            .env
+            .store
+            .read(|r| r.lanes(true))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut newest = Vec::new();
+        for row in rows {
+            let key = row.key.clone();
+            let last = self
+                .env
+                .store
+                .read(move |r| r.reports(&key, None, 1))
+                .await
+                .map_err(|e| e.to_string())?;
+            newest.extend(last);
+        }
+        newest.sort_by_key(|r| std::cmp::Reverse(r.at_ms));
+        let lines: Vec<String> = newest
+            .iter()
+            .take(count)
+            .map(|r| {
+                format!(
+                    "{} ({}, {}): {}",
+                    r.key,
+                    r.kind,
+                    crate::jobs::instant_text(r.at_ms),
+                    super::evidence::cut(&super::evidence::display(&r.text), each)
+                )
+            })
+            .collect();
+        Ok(if lines.is_empty() {
+            "no reports yet".into()
+        } else {
+            lines.join("\n")
+        })
+    }
+
     /// One board pass over every destination; returns the next time one is due.
     pub(super) async fn board_tick(&self) -> Option<i64> {
         let destinations = self.cfg().coord.board.clone();

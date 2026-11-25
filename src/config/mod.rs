@@ -9,6 +9,7 @@ pub(crate) mod owner;
 pub(crate) mod relays;
 pub(crate) mod release;
 pub(crate) mod session;
+pub(crate) mod voice;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -60,6 +61,8 @@ pub(crate) struct Config {
     pub(crate) usage: release::UsageSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
+    pub(crate) voice: voice::VoiceConfig,
+    pub(crate) transcribe: voice::TranscribeSettings,
 }
 
 impl Default for Config {
@@ -89,6 +92,8 @@ impl Default for Config {
             coord: coord::CoordSettings::default(),
             destinations: BTreeMap::new(),
             jobs: BTreeMap::new(),
+            voice: voice::VoiceConfig::default(),
+            transcribe: voice::TranscribeSettings::default(),
         }
     }
 }
@@ -591,6 +596,8 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         &mut config.context,
     );
     release::parse(errors, root, &mut config.update, &mut config.usage);
+    config.voice = voice::parse(root, &config.discord);
+    voice::parse_transcribe(errors, root, &mut config.transcribe);
 }
 
 fn job(

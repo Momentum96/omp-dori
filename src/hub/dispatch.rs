@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 40] = [
+const METHODS: [Method; 43] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -220,6 +220,22 @@ const METHODS: [Method; 40] = [
     },
     Method {
         name: method::SLACK_UPLOAD,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::VOICE_STATUS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    // The hold is lifted only by the owner (VOICE req. 83).
+    Method {
+        name: method::VOICE_RESTART,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::VOICE_REPLY,
         needs: Authority::Owner,
         mutating: true,
     },
@@ -447,11 +463,31 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
             relay_method(hub, relay, raw).await
         }
         method::HUB_STOP => hub.request_stop().map(|()| Value::Null).map_err(refused),
+        voice if voice.starts_with("voice.") => voice_method(hub, voice, raw).await,
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),
         }),
     }
+}
+
+#[cfg(feature = "voice")]
+async fn voice_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
+    hub.voice.call_method(name, raw).await.map_err(refused)
+}
+
+/// A build without voice answers status with why voice is off and refuses the rest.
+#[cfg(not(feature = "voice"))]
+#[allow(clippy::unused_async)]
+async fn voice_method(hub: &Hub, name: &str, _raw: Value) -> Result<Value, Failure> {
+    let config = hub.config();
+    let reason = config.voice.refusal().unwrap_or_else(|| {
+        "this build has no voice support (build with the `voice` feature)".into()
+    });
+    if name == method::VOICE_STATUS {
+        return ok(&serde_json::json!({ "state": "off", "reason": reason }));
+    }
+    Err(refused(format!("voice is off: {reason}")))
 }
 
 fn refused(message: String) -> Failure {
