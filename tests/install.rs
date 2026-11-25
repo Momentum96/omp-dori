@@ -598,6 +598,16 @@ fn restart_holds_while_a_session_is_busy() {
         &["install", "--from", r1.to_str().unwrap()],
     );
     assert!(out.status.success(), "{}", text(&out));
+    let out = run(
+        &hub,
+        &command_link(&hub),
+        &["update", "--from", r2.to_str().unwrap()],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    // Back on V1 (its extension matches the test hub), with v2 kept as the previous version.
+    let out = run(&hub, &command_link(&hub), &["rollback"]);
+    assert!(out.status.success(), "{}", text(&out));
+    std::fs::remove_file(root(&hub).join("silenced")).unwrap();
     hub.start();
     hub.until(Duration::from_secs(20), || {
         (hub.json(&["lead", "status", "--json"])["phase"] == "live").then_some(())
@@ -613,11 +623,8 @@ fn restart_holds_while_a_session_is_busy() {
     });
     let before = snapshot(&hub);
     let started = Instant::now();
-    let out = run(
-        &hub,
-        BIN.as_ref(),
-        &["update", "--restart", "--from", r2.to_str().unwrap()],
-    );
+    // This build, not the installed variant (variants are cached builds of an earlier tree).
+    let out = run(&hub, BIN.as_ref(), &["rollback", "--restart"]);
     assert_eq!(out.status.code(), Some(6), "{}", text(&out));
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("dialog"),
@@ -626,6 +633,10 @@ fn restart_holds_while_a_session_is_busy() {
     );
     assert!(started.elapsed() >= Duration::from_mins(1));
     assert_eq!(snapshot(&hub), before, "held: nothing changed");
+    assert!(
+        !root(&hub).join("silenced").exists(),
+        "a held rollback does not silence the version"
+    );
     assert_eq!(
         hub_version(&hub).as_deref(),
         Some(V1),

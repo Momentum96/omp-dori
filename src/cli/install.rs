@@ -78,7 +78,7 @@ pub(crate) fn run(p: &Parsed, paths: &Paths) -> Option<Result<(), Failure>> {
     Some(outcome.into())
 }
 
-fn block_on<T>(work: impl Future<Output = T>) -> T {
+pub(super) fn block_on<T>(work: impl Future<Output = T>) -> T {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -542,14 +542,18 @@ async fn rollback(p: &Parsed, paths: &Paths) -> Outcome {
     if running && !p.flag("--restart") {
         return Outcome::Held("the hub is running; stop it first or add --restart".into());
     }
-    // The version rolled back from is never announced again (IR req. 37).
+    if running && let Err(why) = stop_hub(paths).await {
+        return Outcome::Held(format!("{why}; nothing changed"));
+    }
+    // Only now is the restart known not to be held: the version rolled back from is never
+    // announced again (IR req. 37).
     if let Err(e) = crate::sys::fs::write_atomic(&l.silenced(), current.as_bytes()) {
+        if running && start_and_wait(&l, paths, &current).await.is_err() {
+            return Outcome::NeedsAttention(format!("{e}; the hub did not start again"));
+        }
         return Outcome::Held(e.to_string());
     }
     if running {
-        if let Err(why) = stop_hub(paths).await {
-            return Outcome::Held(format!("{why}; nothing changed"));
-        }
         return restart_switch(&l, paths, &previous.version, &current, Instant::now()).await;
     }
     match layout_ops::switch(&l, &previous.version)
