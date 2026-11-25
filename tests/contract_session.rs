@@ -392,12 +392,15 @@ fn effective_settings(sandbox: &Sandbox, overlay: &Path) -> Value {
     .unwrap();
     let mut global = String::new();
     for section in ["codexResets", "claudeResets"] {
-        global.push_str(&format!("{section}:\n"));
+        global.push_str(section);
+        global.push_str(":\n");
         for key in RESET_KEYS
             .iter()
             .filter_map(|k| k.strip_prefix(section)?.strip_prefix('.'))
         {
-            global.push_str(&format!("  {key}: yes\n"));
+            global.push_str("  ");
+            global.push_str(key);
+            global.push_str(": yes\n");
         }
     }
     std::fs::write(agent.join("config.yml"), global).unwrap();

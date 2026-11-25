@@ -8,6 +8,7 @@
 //! squash-merges pinned to that head. Event commands are argv templates run in the background, at
 //! most four at once, never through a shell.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -130,21 +131,25 @@ fn review_text(repo: &str, number: u64, head: &str, pr: &Value, files: &[Value])
     );
     let total = pr.get("changed_files").and_then(Value::as_u64).unwrap_or(0);
     if total > files.len() as u64 {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\nOnly the first {} of {total} changed files are listed here.\n",
             files.len()
-        ));
+        );
     }
     for f in files {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n### {} ({}, +{} -{})\n\n",
             text_of(f, "filename"),
             text_of(f, "status"),
             f.get("additions").and_then(Value::as_u64).unwrap_or(0),
             f.get("deletions").and_then(Value::as_u64).unwrap_or(0)
-        ));
+        );
         match f.get("patch").and_then(Value::as_str) {
-            Some(patch) => out.push_str(&format!("~~~~diff\n{patch}\n~~~~\n")),
+            Some(patch) => {
+                let _ = write!(out, "~~~~diff\n{patch}\n~~~~\n");
+            }
             None => out.push_str("No patch from GitHub (binary, renamed only or too large).\n"),
         }
     }

@@ -374,7 +374,18 @@ fn home_backup_setup_and_restore() {
     let again = hub.json(&["setup", "--backup", "--json"]);
     assert_eq!(again["backup"]["state"], "private");
     assert_eq!(again["action"], "keep", "applying twice changes nothing");
+    let (bare, config, events) = snapshot_follows_visibility(&mut hub, &state, &config);
+    restore_and_open(&mut hub, &bare, &config, events);
+}
 
+/// The scheduled snapshot checks the repository's visibility before every push: refused while it is
+/// public, pushed once it is private again. Returns the bare repository, the config and the event
+/// count of the snapshot.
+fn snapshot_follows_visibility(
+    hub: &mut TestHub,
+    state: &std::path::Path,
+    config: &str,
+) -> (std::path::PathBuf, String, usize) {
     // Snapshot: the remote stays the GitHub URL, which git redirects to a local bare repository, so
     // every push goes through the visibility check (decision 16).
     let bare = hub.root.join("bare.git");
@@ -384,7 +395,7 @@ fn home_backup_setup_and_restore() {
         &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
     );
     git(
-        &state,
+        state,
         &[
             "config",
             &format!("url.{}.insteadOf", bare.display()),
@@ -392,11 +403,7 @@ fn home_backup_setup_and_restore() {
         ],
     );
     // Safety finding 8: the repository was made public after setup; the tick refuses the push.
-    gh_json(
-        &hub,
-        "repos_owner_cataly-home",
-        &json!({ "private": false }),
-    );
+    gh_json(hub, "repos_owner_cataly-home", &json!({ "private": false }));
     hub.start();
     let refused = hub.until(Duration::from_secs(30), || {
         hub.events()
@@ -415,7 +422,7 @@ fn home_backup_setup_and_restore() {
     assert!(hub.stop().success());
 
     // Private again: a changed interval registers the job afresh, and its first tick pushes.
-    gh_json(&hub, "repos_owner_cataly-home", &json!({ "private": true }));
+    gh_json(hub, "repos_owner_cataly-home", &json!({ "private": true }));
     let config = config.replace("[jobs.home]\n", "[jobs.home]\nevery = \"20m\"\n");
     assert!(config.contains("every = \"20m\""), "{config}");
     hub.write_config(&config);
@@ -439,7 +446,7 @@ fn home_backup_setup_and_restore() {
     let events = hub.events().len();
     assert!(events > 0);
     assert!(hub.stop().success());
-    restore_and_open(&mut hub, &bare, &config, events);
+    (bare, config, events)
 }
 
 /// Change (the config is edited, the live store is lost), then restore from the bare repository:
