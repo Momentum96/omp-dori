@@ -35,9 +35,12 @@ the owner's DM channel is listed by ID like any other room), `m1/discord_types.r
 (`relay::discord::types`: message gate, normalisation and button presses; the owner-only decision with
 its stamp is in `relay::discord::questions`, which defines the approval card from DISC-OUT req. 81-83).
 
-| File | Target module | Known gaps |
-| --- | --- | --- |
-| `m3/discord_threads.rs` | `relay::discord` thread discovery and parent routes | Route state becomes actor state. Log discovery errors. Mapping a message to its earlier-conversation space is not imported; write it from DISC-IN if that feature is built. |
+Adapted and deleted in milestone 3 slice 3a: `m3/discord_threads.rs` (`relay::discord::threads`:
+thread discovery and parent routes for lane threads; mapping a message to its earlier-conversation
+space was not imported).
+
+Nothing else is left in `import/`: every vetted file has been adapted and deleted; only this README
+remains.
 
 The lint and release-profile settings the owner used before match `DESIGN.md` 10.3 and are already
 in `Cargo.toml`.

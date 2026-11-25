@@ -61,6 +61,7 @@ pub(crate) struct Hub {
     shutdown: watch::Receiver<bool>,
     supervisor: Supervisor,
     lead: Arc<Lead<Headless>>,
+    lanes: Arc<crate::lanes::Lanes<Headless>>,
     agent_start: Latency,
     pub(crate) discord: Arc<crate::relay::discord::intake::Shared>,
     links: Arc<crate::host::bridge::Links>,
@@ -115,6 +116,7 @@ impl Hub {
             agent_start_latency: self.agent_start.summary().map(Into::into),
             discord_wake_latency: self.discord.wake_latency.summary().map(Into::into),
             discord_catch_up_latency: self.discord.catch_up_latency.summary().map(Into::into),
+            lane_start_latency: self.lanes.start_latency.summary().map(Into::into),
         }
     }
 
@@ -329,7 +331,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         lead_cwd,
         paths.files_dir.clone(),
     );
-    let (lead, agent_start, discord) = sessions(
+    let (lead, lanes, agent_start, discord) = sessions(
         paths,
         &jobs,
         &omp,
@@ -351,6 +353,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         shutdown: shutdown_rx.clone(),
         supervisor: supervisor.clone(),
         lead: Arc::clone(&lead),
+        lanes: Arc::clone(&lanes),
         agent_start,
         discord,
         links,
@@ -383,14 +386,24 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     let _ = shutdown_tx.send(true);
     // The lead closes cleanly so the next start resumes the same session (check 12).
     lead.shutdown().await;
+    // Lanes end their input; the next hub brings them back on their files (decision 9).
+    lanes.shutdown().await;
     // Running job children get TERM, then KILL after the grace; their real end is recorded.
     jobs.drain(KILL_GRACE * 2 + Duration::from_secs(2)).await;
     let _ = std::fs::remove_file(&paths.socket);
     code
 }
 
-/// The lead and Discord intake, each under its supervised task; returns the lead, its `agent_start`
-/// latency ring and intake's shared state.
+/// What `sessions` starts: the lead, the lanes, the `agent_start` ring and intake's shared state.
+type Sessions = (
+    Arc<Lead<Headless>>,
+    Arc<crate::lanes::Lanes<Headless>>,
+    Latency,
+    Arc<crate::relay::discord::intake::Shared>,
+);
+
+/// The lead, the lanes and Discord intake, each under its supervised task; returns the lead, the
+/// lanes, the `agent_start` latency ring and intake's shared state.
 #[allow(clippy::too_many_arguments)]
 fn sessions(
     paths: &Paths,
@@ -401,14 +414,25 @@ fn sessions(
     supervisor: &Supervisor,
     shutdown: &watch::Receiver<bool>,
     links: &Arc<crate::host::bridge::Links>,
-) -> (
-    Arc<Lead<Headless>>,
-    Latency,
-    Arc<crate::relay::discord::intake::Shared>,
-) {
+) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
-    let lead = lead(
+    let gate = jobs.clone();
+    let lead = Lead::new(LeadEnv {
+        config: config.clone(),
+        omp: Arc::clone(omp),
+        gate_held: Arc::new(move || gate.gate().held),
+        bridge_link: Arc::new(crate::omp::extension::check),
+        events: Arc::clone(&events),
+        store: store.clone(),
+        state_dir: paths.state_dir.clone(),
+        make: runtime(paths, &agent_start, links),
+    });
+    {
+        let (lead, stop) = (Arc::clone(&lead), shutdown.clone());
+        supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
+    }
+    let lanes = lanes(
         paths,
         jobs,
         omp,
@@ -417,15 +441,80 @@ fn sessions(
         &agent_start,
         &events,
         links,
+        &lead,
     );
     {
-        let (lead, stop) = (Arc::clone(&lead), shutdown.clone());
-        supervisor.spawn("lead", move || Arc::clone(&lead).run(stop.clone()));
+        let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
+        supervisor.spawn("lanes", move || Arc::clone(&lanes).run(stop.clone()));
     }
     let discord = discord(
-        paths, jobs, &lead, &events, config, store, supervisor, shutdown,
+        paths,
+        jobs,
+        (&lead, &lanes),
+        &events,
+        config,
+        store,
+        supervisor,
+        shutdown,
     );
-    (lead, agent_start, discord)
+    (lead, lanes, agent_start, discord)
+}
+
+/// How the hub starts a headless session (DESIGN 4.2); the lead and every lane use it.
+fn runtime(
+    paths: &Paths,
+    agent_start: &Latency,
+    links: &Arc<crate::host::bridge::Links>,
+) -> crate::host::lead::Factory<Headless> {
+    let (state, socket, logs) = (
+        paths.state_dir.clone(),
+        paths.socket.clone(),
+        paths.logs_dir.join("sessions"),
+    );
+    let agent_start = agent_start.clone();
+    let links = Arc::clone(links);
+    Box::new(move |config: &Config, exe: &Path| Headless {
+        exe: exe.to_path_buf(),
+        state: state.clone(),
+        socket: socket.clone(),
+        logs: logs.clone(),
+        credentials: config.sessions.credentials.clone(),
+        extra_flags: config.sessions.extra_flags.clone(),
+        spend_phrases: config.sessions.spend_phrases.clone(),
+        agent_start: agent_start.clone(),
+        links: Arc::clone(&links),
+    })
+}
+
+/// The lanes (milestone 3a) with their oversight task.
+#[allow(clippy::too_many_arguments)]
+fn lanes(
+    paths: &Paths,
+    jobs: &Jobs,
+    omp: &Arc<Omp>,
+    config: &watch::Receiver<Arc<Config>>,
+    store: &Store,
+    agent_start: &Latency,
+    events: &Events,
+    links: &Arc<crate::host::bridge::Links>,
+    lead: &Arc<Lead<Headless>>,
+) -> Arc<crate::lanes::Lanes<Headless>> {
+    let (gate, rest, lead) = (jobs.clone(), jobs.clone(), Arc::clone(lead));
+    crate::lanes::Lanes::new(crate::lanes::Env {
+        config: config.clone(),
+        omp: Arc::clone(omp),
+        store: store.clone(),
+        state_dir: paths.state_dir.clone(),
+        events: Arc::clone(events),
+        make: runtime(paths, agent_start, links),
+        gate_held: Arc::new(move || gate.gate().held),
+        bridge_link: Arc::new(crate::omp::extension::check),
+        lead_live: Arc::new(move || lead.snapshot().is_some()),
+        threads: Arc::new(crate::relay::discord::threads::DiscordThreads {
+            config: config.clone(),
+            rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
+        }),
+    })
 }
 
 /// Events to the lead, owed-reply reminders and the unanswered watch, each a supervised task.
@@ -468,55 +557,13 @@ fn hub_events(jobs: &Jobs) -> Events {
     })
 }
 
-/// The standing lead with its headless runtime (DESIGN 4.2), started by its supervised task.
-#[allow(clippy::too_many_arguments)]
-fn lead(
-    paths: &Paths,
-    jobs: &Jobs,
-    omp: &Arc<Omp>,
-    config: &watch::Receiver<Arc<Config>>,
-    store: &Store,
-    agent_start: &Latency,
-    events: &Events,
-    links: &Arc<crate::host::bridge::Links>,
-) -> Arc<Lead<Headless>> {
-    let gate = jobs.clone();
-    let (state, socket, logs) = (
-        paths.state_dir.clone(),
-        paths.socket.clone(),
-        paths.logs_dir.join("sessions"),
-    );
-    let agent_start = agent_start.clone();
-    let links = Arc::clone(links);
-    Lead::new(LeadEnv {
-        config: config.clone(),
-        omp: Arc::clone(omp),
-        gate_held: Arc::new(move || gate.gate().held),
-        bridge_link: Arc::new(crate::omp::extension::check),
-        events: Arc::clone(events),
-        store: store.clone(),
-        state_dir: paths.state_dir.clone(),
-        make: Box::new(move |config: &Config, exe: &Path| Headless {
-            exe: exe.to_path_buf(),
-            overlay: state.join("omp-overlay.yml"),
-            socket: socket.clone(),
-            logs: logs.clone(),
-            credentials: config.sessions.credentials.clone(),
-            extra_flags: config.sessions.extra_flags.clone(),
-            spend_phrases: config.sessions.spend_phrases.clone(),
-            agent_start: agent_start.clone(),
-            links: Arc::clone(&links),
-        }),
-    })
-}
-
 /// Discord intake and replies (DESIGN 5.1), a supervised task that idles until the config names the
 /// owner and channels.
 #[allow(clippy::too_many_arguments)]
 fn discord(
     paths: &Paths,
     jobs: &Jobs,
-    lead: &Arc<Lead<Headless>>,
+    (lead, lanes): (&Arc<Lead<Headless>>, &Arc<crate::lanes::Lanes<Headless>>),
     events: &Events,
     config: &watch::Receiver<Arc<Config>>,
     store: &Store,
@@ -530,6 +577,7 @@ fn discord(
         config: config.clone(),
         store: store.clone(),
         lead: Arc::clone(lead),
+        lanes: Arc::clone(lanes),
         events: Arc::clone(events),
         rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
         spill_dir: paths.files_dir.join("relay"),

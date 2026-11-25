@@ -94,12 +94,11 @@ test("a launched session is accepted, gets its tool and guidance, forwards calls
 	expect(sent[0].params).toMatchObject({ ext: 1, token: "tok", session: "s1", agent: "main" });
 	expect(b.token).toBeUndefined();
 	expect(pi.tools.map(t => t.name)).toEqual(["cataly"]);
-	expect(pi.active()).toContain("cataly");
-	expect(pi.entries.some(e => e.customType === "cataly")).toBe(true);
-	const prompt = await pi.emit("before_agent_start", { systemPrompt: "BASE" }, ctx);
-	expect(prompt).toEqual({ systemPrompt: "BASE\n\nGUIDE" });
-	expect(await pi.emit("before_agent_start", { systemPrompt: "BASE\n\nGUIDE" }, ctx)).toBeUndefined();
-	expect(await pi.emit("before_agent_start", { systemPrompt: "BASE" }, ctxOf(pi, "sub"))).toBeUndefined();
+	const prompt = await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctx);
+	expect(prompt).toEqual({ systemPrompt: ["BASE", "GUIDE"] });
+	expect(await pi.emit("before_agent_start", { systemPrompt: ["BASE", "GUIDE"] }, ctx)).toBeUndefined();
+	expect(await pi.emit("before_agent_start", { systemPrompt: "BASE" }, ctx)).toBeUndefined();
+	expect(await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctxOf(pi, "sub"))).toBeUndefined();
 	const result = await pi.tools[0].execute("call-1", { op: "requests" }, undefined, undefined, ctx);
 	expect(result.content[0].text).toBe("did requests");
 	expect(sent.find(m => m.method === "bridge.tool").params).toMatchObject({ call: "call-1", tool: "cataly", session: "s1" });
@@ -137,4 +136,82 @@ test("fingerprints ignore timing and the socket path follows the hub's rule", ()
 		"/run/user/1/cataly/hub.sock",
 	);
 	expect(socketPath({ env: {}, connect: fakeHub("x", [], { n: 0 }), uid: () => 7 })).toBe("/tmp/cataly-7/hub.sock");
+});
+
+/** A fake hub for a lane: the pin, and verdicts as the hub gives them (it blocks `git push`, a
+ * spawn from an unsaved session and any model but the pin or the announced fallback). */
+function laneHub(sent: any[], wires: { close?: () => void }): Deps["connect"] {
+	return async (_path, onLine, onClose): Promise<Wire> => {
+		wires.close = onClose;
+		return {
+			write(line: string) {
+				const msg = JSON.parse(line);
+				sent.push(msg);
+				const reply = (ok: unknown) => queueMicrotask(() => onLine(JSON.stringify({ v: 1, id: msg.id, ok })));
+				const p = msg.params;
+				if (msg.method === "bridge.hello")
+					reply({
+						role: "lane",
+						key: "k2",
+						guidance: "LANE",
+						tools: [{ name: "cataly_lane", parameters: { type: "object" }, timeout_ms: 10_000 }],
+						pin: "fake/primary",
+						shell: true,
+					});
+				if (msg.method === "bridge.shell") {
+					const allow = p.tool === "task" ? p.saved : typeof p.command === "string" && !p.command.includes("git push");
+					reply({ allow, reason: allow ? "" : "Blocked by shell rule 1 (command sha256 ab)" });
+				}
+				if (msg.method === "bridge.model") reply({ allow: p.model === "fake/primary" || p.model === p.fallback });
+			},
+			close() {},
+		};
+	};
+}
+
+function laneCtx(pi: ReturnType<typeof fakePi>, model: { provider: string; id: string }, aborts: { n: number }) {
+	return { ...ctxOf(pi), models: { current: () => model }, abort: () => (aborts.n += 1) };
+}
+
+test("a lane gets its tool, its shell veto fails closed, and the model barrier allows only the pin or the announced fallback", async () => {
+	const pi = fakePi();
+	const sent: any[] = [];
+	const wires: { close?: () => void } = {};
+	const aborts = { n: 0 };
+	bridge(pi, { env: { CATALY_LAUNCH: "lane-token" }, connect: laneHub(sent, wires), uid: () => 1 });
+	const model = { provider: "fake", id: "primary" };
+	const ctx = laneCtx(pi, model, aborts);
+	await pi.emit("session_start", {}, ctx);
+	expect(pi.tools.map(t => t.name)).toEqual(["cataly_lane"]);
+	expect(pi.handlers.has("tool_call")).toBe(true);
+	// Shell rules: the hub decides; a denied command is blocked with the hub's reason.
+	expect(await pi.emit("tool_call", { toolName: "bash", toolCallId: "c1", input: { command: "ls" } }, ctx)).toBeUndefined();
+	const denied = await pi.emit("tool_call", { toolName: "bash", toolCallId: "c2", input: { command: "git push" } }, ctx);
+	expect(denied).toEqual({ block: true, reason: "Blocked by shell rule 1 (command sha256 ab)" });
+	expect(sent.filter(m => m.method === "bridge.shell").length).toBe(2);
+	const malformed = await pi.emit("tool_call", { toolName: "bash", toolCallId: "c3", input: {} }, ctx);
+	expect(malformed.block).toBe(true);
+	// A subagent spawn is refused while the session is not on disk (EXT req. 34); the hub judges it.
+	const spawn = await pi.emit("tool_call", { toolName: "task", toolCallId: "c4", input: {} }, ctx);
+	expect(spawn.block).toBe(true);
+	expect(sent.findLast(m => m.method === "bridge.shell").params).toMatchObject({ tool: "task", saved: false });
+	// Other tools pay no round trip (EXT req. 35).
+	const before = sent.length;
+	expect(await pi.emit("tool_call", { toolName: "read", toolCallId: "c6", input: {} }, ctx)).toBeUndefined();
+	expect(sent.length).toBe(before);
+	// Model barrier: the hub judges the facts; a hold aborts the turn, the announced fallback passes.
+	await pi.emit("turn_start", {}, ctx);
+	expect(aborts.n).toBe(0);
+	model.id = "other";
+	await pi.emit("turn_start", {}, ctx);
+	expect(aborts.n).toBe(1);
+	expect(sent.findLast(m => m.method === "bridge.model").params).toMatchObject({ model: "fake/other", fallback: "" });
+	await pi.emit("retry_fallback_applied", { to: "fake/other" }, ctx);
+	await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctx);
+	expect(aborts.n).toBe(1);
+	// A bridge disconnect blocks every shell call (check 7).
+	wires.close?.();
+	const offline = await pi.emit("tool_call", { toolName: "bash", toolCallId: "c5", input: { command: "ls" } }, ctx);
+	expect(offline.block).toBe(true);
+	expect(offline.reason).toContain("No command ran");
 });

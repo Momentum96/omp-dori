@@ -2,9 +2,10 @@
 //! `models.yml` custom provider with `api: openai-completions`. Never a real model.
 //!
 //! The reply depends on the last user text: `SLOW` streams for about 4 s (follow-up, steer and abort
-//! cases), `TOOL` asks for a `bash` call first (an approval dialog under always-ask), anything else
-//! answers `ok` at once. `ASK` calls the `ask` tool with one question whose recommended choice is
-//! the second. The model ID `limited` answers 429 with a usage-limit error.
+//! cases), `TOOL` asks for a `bash` call first (an approval dialog under always-ask), a line
+//! `CALL <tool> <json arguments>` calls that tool once, anything else answers `ok` at once. `ASK`
+//! calls the `ask` tool with one question whose recommended choice is the second. The model ID
+//! `limited` answers 429 with a usage-limit error.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -156,7 +157,17 @@ async fn answer(
     tokio::spawn(async move {
         let role = json!({"role": "assistant", "content": ""});
         let _ = tx.send(chunk(&model, &role, None)).await;
-        if text.contains("ASK") && !after_tool {
+        if let Some((name, args)) = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("CALL "))
+            .and_then(|rest| rest.split_once(' '))
+            .filter(|_| !after_tool)
+        {
+            let call = json!({"tool_calls": [{"index": 0, "id": "call_named", "type": "function",
+                "function": {"name": name, "arguments": args}}]});
+            let _ = tx.send(chunk(&model, &call, None)).await;
+            let _ = tx.send(chunk(&model, &json!({}), Some("tool_calls"))).await;
+        } else if text.contains("ASK") && !after_tool {
             let args = json!({"questions": [{"id": "color", "question": "Pick a color",
                 "options": [{"label": "Red"}, {"label": "Blue"}], "recommended": 1}]});
             let call = json!({"tool_calls": [{"index": 0, "id": "call_ask", "type": "function",

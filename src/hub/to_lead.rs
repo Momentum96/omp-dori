@@ -21,7 +21,7 @@ use crate::sys::now_ms;
 /// Event kinds the lead hears (WS req. 3, A24, OJ req. 7, 52). A held room is told to the lead once
 /// (DESIGN 9.3, COORD-13), besides the reply the relay posts in the room; intake stops are the
 /// owner's to fix and stay with him.
-const TO_LEAD: [EventKind; 13] = [
+const TO_LEAD: [EventKind; 20] = [
     EventKind::ModelFallback,
     EventKind::ModelRestored,
     EventKind::ModelUnexpected,
@@ -35,6 +35,13 @@ const TO_LEAD: [EventKind; 13] = [
     EventKind::PrMerged,
     EventKind::PrClosed,
     EventKind::RelayHeld,
+    EventKind::LaneStarted,
+    EventKind::LaneReport,
+    EventKind::LaneClaimed,
+    EventKind::LaneClosed,
+    EventKind::LaneLost,
+    EventKind::LaneAlert,
+    EventKind::LaneRecap,
 ];
 /// A body over this size goes to a private file (WS req. 5, OJ req. 52).
 const BODY_INLINE: usize = 64 * 1024;

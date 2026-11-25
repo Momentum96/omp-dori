@@ -9,6 +9,7 @@ mod config;
 mod host;
 mod hub;
 mod jobs;
+mod lanes;
 mod log;
 mod omp;
 mod proto;

@@ -91,25 +91,15 @@ impl Gh<'_, '_> {
     pub(super) async fn json(&self, args: &[&str]) -> Result<Value, String> {
         let mut line = vec![self.program.to_string()];
         line.extend(args.iter().map(|a| (*a).to_string()));
-        let env = [("GH_PROMPT_DISABLED", "1"), ("NO_COLOR", "1")];
         let done = self
             .t
-            .command(&line, None, &env, GH_TIMEOUT, GH_CAP)
+            .command(&line, None, &super::GH_ENV, GH_TIMEOUT, GH_CAP)
             .await?;
-        if !done.success() {
-            return Err(format!(
-                "gh {} failed: {}",
-                args.join(" "),
-                super::said(&done)
-            ));
-        }
-        serde_json::from_slice(&done.stdout)
-            .map_err(|_| format!("gh {} printed no JSON", args.join(" ")))
+        super::gh_answer(args, &done)
     }
 
     async fn api(&self, path: &str) -> Result<Value, String> {
-        self.json(&["api", "-H", "Accept: application/vnd.github+json", path])
-            .await
+        self.json(&super::gh_api(path)).await
     }
 
     /// Every row of a list endpoint, 100 per page, at most 30 pages (WS req. 46). `key` names the

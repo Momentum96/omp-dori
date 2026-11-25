@@ -46,10 +46,49 @@ struct Hello {
     session: String,
     agent: String,
     marker: bool,
+    /// A separate-realm subagent names its parent session (EXT req. 9).
+    parent: String,
+}
+
+/// The guidance appended to a lane's system prompt (EXT req. 36-37, OPC lane part).
+pub(crate) const LANE_GUIDANCE: &str = include_str!("../../assets/lane.md");
+
+/// The lane's tool (EVR req. 1, 30; LANE req. 53, 61).
+fn lane_tool() -> Value {
+    let text = |d: &str| json!({ "type": "string", "description": d });
+    let list =
+        |d: &str| json!({ "type": "array", "items": { "type": "string" }, "description": d });
+    json!({
+        "name": "cataly_lane",
+        "label": "Cataly lane",
+        // A report hashes evidence files; the bridge waits this long for the answer.
+        "timeout_ms": 10_000,
+        "description": "Report to Cataly as this lane. op report: kind (progress, stuck, waiting, stopped, finished), \
+    text, summary? (for the owner, at most 500 characters), files? and calls? as evidence. op step: name, result, \
+    evidence (a link or path), receipts? (push commit, merge link, deploy ID), files?, calls?. op steps: list recorded \
+    steps. op claim: evidence (report IDs and shareable receipts). op worktree: path (a worktree you created).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "op": text("report, step, steps, claim or worktree"),
+                "kind": text("report kind"),
+                "text": text("what happened, finished and next"),
+                "summary": text("one short line for the owner"),
+                "files": list("files whose content is evidence, relative to the working directory"),
+                "calls": list("tool call IDs whose results are evidence"),
+                "name": text("step name, unique in the lane"),
+                "result": text("step result"),
+                "evidence": text("step evidence or claim evidence"),
+                "receipts": list("remote-effect receipts"),
+                "path": text("worktree path")
+            },
+            "required": ["op"]
+        }
+    })
 }
 
 /// Who the hello is, if anyone: the session handle and role, and whether this is a fresh start.
-fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String> {
+async fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String> {
     if hello.ext != PROTOCOL {
         return Err(format!(
             "bridge protocol {} where this hub speaks {PROTOCOL}; install the matching bridge",
@@ -57,7 +96,11 @@ fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String> {
         ));
     }
     if hello.agent == "sub" {
-        return Err("subagents have no role".into());
+        // A worker in its own realm takes its parent lane's role for shell rules only (EXT req. 9).
+        return match hub.lanes.handle_of_session(&hello.parent).await {
+            Some(handle) => Ok((handle, Role::Lane, false)),
+            None => Err("unknown parent".into()),
+        };
     }
     if let Some(token) = hello.token.as_deref().filter(|t| !t.is_empty()) {
         return hub
@@ -97,7 +140,18 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
     mut writer: OwnedWriteHalf,
 ) {
     let hello: Hello = serde_json::from_value(params).unwrap_or_default();
-    let (handle, role, fresh) = match decide(hub, &hello) {
+    let decided = decide(hub, &hello).await;
+    let lane_pin = match &decided {
+        Ok((handle, Role::Lane, _)) => hub.lanes.hello(handle).await,
+        _ => None,
+    };
+    let decided = match decided {
+        Ok((_, Role::Lane, _)) if lane_pin.is_none() => {
+            Err("no open lane holds this session".to_string())
+        }
+        other => other,
+    };
+    let (handle, role, fresh) = match decided {
         Ok(found) => found,
         Err(reason) => {
             if hello.ext != PROTOCOL {
@@ -115,14 +169,12 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         }
     };
     let key = crate::host::random_hex(16);
-    hub.links.connect(&handle, role, &key, &hello.session);
-    let answer = json!({
-        "role": "lead",
-        "key": key,
-        "guidance": LEAD_GUIDANCE,
-        "tools": [super::tool::definition()],
-        "status": "",
-    });
+    let sub = hello.agent == "sub";
+    if !sub {
+        hub.links.connect(&handle, role, &key, &hello.session);
+    }
+    let role_name = if role == Role::Lane { "lane" } else { "lead" };
+    let answer = welcome(&key, sub, lane_pin.as_ref());
     if !write(&mut writer, &Response::ok(id, answer)).await {
         hub.links.disconnect(&handle, &key);
         return;
@@ -131,23 +183,12 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         "bridge accepted",
         &[("session", &hello.session), ("handle", &handle)],
     );
-    if fresh {
+    if fresh && role == Role::Lead {
         recap(hub, &handle, "start").await;
     }
-    let (tx, mut rx) = mpsc::channel::<Response>(64);
-    let writer_task = tokio::spawn(async move {
-        let mut beat = tokio::time::interval(HEARTBEAT);
-        beat.tick().await;
-        loop {
-            let response = tokio::select! {
-                next = rx.recv() => match next { Some(r) => r, None => return },
-                _ = beat.tick() => Response::item(0, json!({ "ping": true })),
-            };
-            if !write(&mut writer, &response).await {
-                return;
-            }
-        }
-    });
+    let mut session = hello.session.clone();
+    let (tx, rx) = mpsc::channel::<Response>(64);
+    let writer_task = tokio::spawn(pump(writer, rx));
     loop {
         let line = match tokio::time::timeout(SILENT, read_line(reader)).await {
             Ok(Line::Text(line)) => line,
@@ -156,28 +197,22 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         let Ok(request) = crate::proto::decode(&line) else {
             continue;
         };
-        match request.method.as_str() {
+        let method = request.method.clone();
+        match method.as_str() {
             "bridge.ping" => {}
-            "bridge.event" => event(hub, &handle, &request.params).await,
+            "bridge.event" => event(hub, &handle, role, &request.params).await,
             "bridge.switch" => {
-                let session = request.params.get("session").and_then(Value::as_str);
-                hub.links.observe(&handle, 0, session, 0);
+                let switched = request.params.get("session").and_then(Value::as_str);
+                hub.links.observe(&handle, 0, switched, 0);
+                if let Some(s) = switched {
+                    session = s.to_string();
+                }
                 let _ = tx
-                    .send(Response::ok(request.id, json!({ "role": "lead" })))
+                    .send(Response::ok(request.id, json!({ "role": role_name })))
                     .await;
             }
-            "bridge.tool" | "bridge.stop" => {
-                let (hub, tx) = (Arc::clone(hub), tx.clone());
-                tokio::spawn(async move {
-                    let reply = if request.method == "bridge.tool" {
-                        tool(&hub, &request.params).await
-                    } else {
-                        let answered =
-                            request.params.get("answered").and_then(Value::as_bool) == Some(true);
-                        json!({ "context": stop_gate(&hub, answered).await })
-                    };
-                    let _ = tx.send(Response::ok(request.id, reply)).await;
-                });
+            "bridge.shell" | "bridge.model" | "bridge.tool" | "bridge.stop" => {
+                answer_later(hub, &tx, role, (&handle, &session), request);
             }
             other => {
                 let reply = Response::err(
@@ -194,7 +229,83 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
     log::info("bridge closed", &[("handle", &handle)]);
 }
 
-async fn event(hub: &Arc<Hub>, handle: &str, params: &Value) {
+/// Writes queued responses to the bridge, with a heartbeat while nothing else is queued.
+async fn pump(mut writer: OwnedWriteHalf, mut rx: mpsc::Receiver<Response>) {
+    let mut beat = tokio::time::interval(HEARTBEAT);
+    beat.tick().await;
+    loop {
+        let response = tokio::select! {
+            next = rx.recv() => match next { Some(r) => r, None => return },
+            _ = beat.tick() => Response::item(0, json!({ "ping": true })),
+        };
+        if !write(&mut writer, &response).await {
+            return;
+        }
+    }
+}
+
+/// The hello answer: the role with its guidance and tools and, for a lane, its pin and shell rules.
+/// A worker in its own realm gets only the rules, no guidance and no tool.
+fn welcome(key: &str, sub: bool, lane: Option<&(String, String)>) -> Value {
+    match lane {
+        Some((lane_key, pin)) => json!({
+            "role": "lane",
+            "key": key,
+            "lane": lane_key,
+            "guidance": if sub { "" } else { LANE_GUIDANCE },
+            "tools": if sub { json!([]) } else { json!([lane_tool()]) },
+            "pin": pin,
+            "shell": true,
+            "sub": sub,
+            "status": format!("lane {lane_key}"),
+        }),
+        None => json!({
+            "role": "lead",
+            "key": key,
+            "guidance": LEAD_GUIDANCE,
+            "tools": [super::tool::definition()],
+            "status": "",
+        }),
+    }
+}
+
+/// Answers a request off the read loop, so a slow lane action never stalls the connection. Shell
+/// and spawn calls and the model barrier carry facts the hub judges (EXT req. 32-35, 38-39; the
+/// lead has no shell rules and no pin); tool calls and the stop gate go to their owners.
+fn answer_later(
+    hub: &Arc<Hub>,
+    tx: &mpsc::Sender<Response>,
+    role: Role,
+    (handle, session): (&str, &str),
+    request: crate::proto::Incoming,
+) {
+    let (hub, tx) = (Arc::clone(hub), tx.clone());
+    let caller = (role == Role::Lane).then(|| crate::lanes::Caller::Lane {
+        handle: handle.to_string(),
+        session: session.to_string(),
+    });
+    let handle = handle.to_string();
+    tokio::spawn(async move {
+        let verdict = |(allow, reason): (bool, String)| json!({ "allow": allow, "reason": reason });
+        let reply = match (request.method.as_str(), &caller) {
+            ("bridge.shell" | "bridge.model", None) => verdict((true, String::new())),
+            ("bridge.shell", Some(_)) => verdict(hub.lanes.veto(&handle, &request.params).await),
+            ("bridge.model", Some(_)) => {
+                verdict(hub.lanes.model_check(&handle, &request.params).await)
+            }
+            ("bridge.tool", _) => tool(&hub, caller, &request.params).await,
+            (_, Some(_)) => json!({}),
+            (_, None) => {
+                let answered =
+                    request.params.get("answered").and_then(Value::as_bool) == Some(true);
+                json!({ "context": stop_gate(&hub, answered).await })
+            }
+        };
+        let _ = tx.send(Response::ok(request.id, reply)).await;
+    });
+}
+
+async fn event(hub: &Arc<Hub>, handle: &str, role: Role, params: &Value) {
     let seq = params.get("seq").and_then(Value::as_u64).unwrap_or(0);
     let session = params.get("session").and_then(Value::as_str);
     let kind = params
@@ -207,13 +318,13 @@ async fn event(hub: &Arc<Hub>, handle: &str, params: &Value) {
         0
     };
     hub.links.observe(handle, seq, session, dropped);
-    if kind == "session_compact" {
+    if role == Role::Lead && kind == "session_compact" {
         recap(hub, handle, &format!("compact:{seq}")).await;
     }
 }
 
 /// One tool call, answered once per call ID (EXT req. 18).
-async fn tool(hub: &Arc<Hub>, params: &Value) -> Value {
+async fn tool(hub: &Arc<Hub>, caller: Option<crate::lanes::Caller>, params: &Value) -> Value {
     let call = params
         .get("call")
         .and_then(Value::as_str)
@@ -224,8 +335,21 @@ async fn tool(hub: &Arc<Hub>, params: &Value) -> Value {
     {
         return json!({ "text": text });
     }
-    let input = params.get("input").cloned().unwrap_or(Value::Null);
-    let (text, error) = match super::tool::call(hub, &input).await {
+    let mut input = params.get("input").cloned().unwrap_or(Value::Null);
+    let result = match caller {
+        Some(caller) => {
+            // The bridge's facts about the named calls travel with the input (EXT req. 22).
+            if let (Some(map), Some(facts)) = (input.as_object_mut(), params.get("evidence")) {
+                map.insert("evidence".into(), facts.clone());
+            }
+            hub.lanes.call(caller, &input).await.map(|v| match v {
+                Value::String(s) => s,
+                other => other.to_string(),
+            })
+        }
+        None => super::tool::call(hub, &input).await,
+    };
+    let (text, error) = match result {
         Ok(text) => (text, false),
         Err(text) => (text, true),
     };

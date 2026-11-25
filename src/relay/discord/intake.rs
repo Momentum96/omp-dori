@@ -104,6 +104,7 @@ pub(crate) struct Env<T: Runtime> {
     pub(crate) config: watch::Receiver<Arc<Config>>,
     pub(crate) store: Store,
     pub(crate) lead: Arc<Lead<T>>,
+    pub(crate) lanes: Arc<crate::lanes::Lanes<T>>,
     pub(crate) events: Events,
     /// The REST client for the token the config names (shared with job posting).
     pub(crate) rest: RestFor,
@@ -397,6 +398,7 @@ impl<T: Runtime> Intake<T> {
             relay,
             env.store.clone(),
             Arc::clone(&env.lead),
+            Arc::clone(&env.lanes),
             env.spill_dir.clone(),
             Arc::clone(&env.events),
             shared.wake_latency.clone(),

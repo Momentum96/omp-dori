@@ -46,6 +46,8 @@ pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     pub(crate) relay: Arc<R>,
     store: Store,
     lead: Arc<Lead<T>>,
+    /// The owning lane of a thread takes its owner messages (DISC-IN-14).
+    lanes: Arc<crate::lanes::Lanes<T>>,
     spill_dir: PathBuf,
     events: Events,
     /// Sources whose stuck delivery was logged (once per request, DISC-OUT req. 27).
@@ -63,6 +65,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         relay: Arc<R>,
         store: Store,
         lead: Arc<Lead<T>>,
+        lanes: Arc<crate::lanes::Lanes<T>>,
         spill_dir: PathBuf,
         events: Events,
         wake_latency: Latency,
@@ -71,6 +74,7 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             relay,
             store,
             lead,
+            lanes,
             spill_dir,
             events,
             stuck: Mutex::default(),
@@ -259,20 +263,55 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                 })
                 .collect()
         };
+        // A thread one open lane names goes to that lane; two claimants hold the room (DISC-IN
+        // req. 41-42). Lanes never answer the owner, so no reply is owed for it (OPC-57).
+        let route = self.lanes.route(R::NAME, &row.room).await;
+        if let Some(Err(why)) = &route {
+            return self.hold(&row.room, &row.message, "failed", why).await;
+        }
+        let lane = route.and_then(Result::ok);
         self.store
             .relay(RelayWrite::Handed {
                 relay: R::NAME.into(),
                 room: row.room.clone(),
                 message: row.message.clone(),
                 seq: row.seq,
-                target: inbox::LEAD.into(),
+                target: lane.clone().unwrap_or_else(|| inbox::LEAD.into()),
                 request_id: request_id.clone(),
                 digest,
-                owed: Some(owed),
+                owed: lane.is_none().then_some(owed),
             })
             .await
             .map_err(|e| e.to_string())?;
         self.mark_seen(&row.room, &row.message);
+        if let Some(key) = lane {
+            let message = Message {
+                sender: "owner".into(),
+                text,
+                urgent: true,
+                owner: true,
+                identity: None,
+                request_id: Some(request_id),
+            };
+            return match self.lanes.hand_off(&key, message).await {
+                Ok(r) => {
+                    self.apply(&row.room, &row.message, r.state, r.reason.as_deref())
+                        .await
+                }
+                Err(refused) => self.hold(&row.room, &row.message, "failed", &refused).await,
+            };
+        }
+        self.to_lead(row, text, request_id, read_at).await
+    }
+
+    /// Delivers a handed-off owner message to the lead and records its receipt.
+    async fn to_lead(
+        self: &Arc<Self>,
+        row: &QueueRow,
+        text: String,
+        request_id: String,
+        read_at: Option<Instant>,
+    ) -> Result<Step, String> {
         let idle = self
             .lead
             .snapshot()
@@ -316,7 +355,12 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         h: &HandoffRow,
         inbound: &Inbound,
     ) -> Result<Step, String> {
-        match self.lead.receipt(&h.request_id).await? {
+        let receipt = if h.target == inbox::LEAD {
+            self.lead.receipt(&h.request_id).await?
+        } else {
+            self.lanes.receipt(&h.target, &h.request_id).await
+        };
+        match receipt {
             Some(r) => {
                 self.apply(&row.room, &row.message, r.state, r.reason.as_deref())
                     .await

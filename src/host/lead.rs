@@ -564,6 +564,8 @@ impl<R: Runtime> Lead<R> {
             target,
             expected_id: expected.clone(),
             instructions: settings.instructions.clone(),
+            max_cost: None,
+            tools: None,
         };
         match runtime.start(spec).await {
             Ok((session, started)) => {
@@ -816,13 +818,13 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
-    /// Writes the overlay once per hub run (DESIGN 4.2).
+    /// Writes the lead's overlay once per hub run (DESIGN 4.2): goal mode off (OPC-36).
     fn overlay(&self, config: &Config) -> Result<PathBuf, String> {
         if let Some(path) = self.overlay.get() {
             return Ok(path.clone());
         }
-        let path = self.env.state_dir.join("omp-overlay.yml");
-        crate::omp::launch::write_overlay(&path, &config.fallback).map_err(|e| e.to_string())?;
+        let path = crate::omp::launch::write_overlay(&self.env.state_dir, &config.fallback, false)
+            .map_err(|e| e.to_string())?;
         Ok(self.overlay.get_or_init(|| path).clone())
     }
 

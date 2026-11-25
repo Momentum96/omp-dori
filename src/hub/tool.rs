@@ -31,7 +31,13 @@ pub(crate) fn definition() -> Value {
     options, recommended?, settle owner|lead, thread?, request?, room?), question.answer (id, text, message), \
     question.choose (id, option, reason, message), question.withdraw (id, reason); jobs, job.start (name, argv, \
     filter, restarts?, delay?, silence?, low?), job.stop (name), job.run (name: one dry run of an owner job); \
-    digest (since?); recap; profile.read, profile.save (text), profile.undo.",
+    digest (since?); recap; profile.read, profile.save (text), profile.undo. Lanes: lane.open (key, title, brief or \
+    brief_file, checks: list of {kind: pr_merged|issue_closed|command|file|web|pr_policy, ...}, thread? or \
+    thread_from? discord:<room>/<message>, cwd?, model?, origin?, look_only?, ceilings?, worktree?, preview?), \
+    lane.list (all?), lane.board (key?), lane.pause|resume (key, reason?), lane.park|abandon (key, reason, \
+    condition?), lane.object (key, reason), lane.close (key, note?, lesson?), lane.reopen (key, note?), lane.send \
+    (key, text, id?, steer?), lane.release (key, note), lane.read (key, count?), lane.answer (key, dialog, answer), \
+    lane.grant (key, rule, reason), lane.drift, lane.spend (key?).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -100,6 +106,20 @@ fn done(d: LeadDone, ok: String) -> Result<String, String> {
 /// Runs one call; `Err` is shown to the model as a tool error.
 pub(crate) async fn call(hub: &Arc<Hub>, input: &Value) -> Result<String, String> {
     let op = s(input, "op").unwrap_or_default();
+    if let Some(lane_op) = op.strip_prefix("lane.") {
+        let mut lane_input = input.clone();
+        if let Some(map) = lane_input.as_object_mut() {
+            map.insert("op".into(), json!(lane_op));
+        }
+        return hub
+            .lanes
+            .call(crate::lanes::Caller::Lead, &lane_input)
+            .await
+            .map(|v| match v {
+                Value::String(s) => s,
+                other => other.to_string(),
+            });
+    }
     match op {
         "requests" => {
             let all = input.get("all").and_then(Value::as_bool).unwrap_or(false);

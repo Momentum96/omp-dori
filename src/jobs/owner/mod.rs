@@ -107,6 +107,26 @@ pub(crate) fn said(done: &Finished) -> String {
     super::event::one_line(&crate::sys::secrets::mask(&first), 160)
 }
 
+/// How Cataly talks to `gh`, for owner jobs and lane done checks alike (decision 13): prompts and
+/// colour off, the REST media type, the answer read as JSON. Each caller bounds the command its own
+/// way: owner jobs inside a tick's command slot, done checks inside a lane action, which holds the
+/// lane's turn and so must not wait for a slot.
+pub(crate) const GH_ENV: [(&str, &str); 2] = [("GH_PROMPT_DISABLED", "1"), ("NO_COLOR", "1")];
+
+/// The `gh` arguments of one REST read.
+pub(crate) fn gh_api(path: &str) -> [&str; 4] {
+    ["api", "-H", "Accept: application/vnd.github+json", path]
+}
+
+/// `gh`'s answer to `args`: its output as JSON, else why not.
+pub(crate) fn gh_answer(args: &[&str], done: &Finished) -> Result<serde_json::Value, String> {
+    if !done.success() {
+        return Err(format!("gh {} failed: {}", args.join(" "), said(done)));
+    }
+    serde_json::from_slice(&done.stdout)
+        .map_err(|_| format!("gh {} printed no JSON", args.join(" ")))
+}
+
 /// Runs one tick of an owner job and returns its events.
 pub(crate) async fn tick(
     ctx: &Ctx,

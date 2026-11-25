@@ -30,6 +30,7 @@ use crate::omp::launch::Target;
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Role {
     Lead,
+    Lane,
 }
 
 /// One session start (HOST req. 6, 9).
@@ -45,6 +46,10 @@ pub(crate) struct StartSpec {
     /// The OMP session ID a resume must bind (HOST req. 10).
     pub(crate) expected_id: Option<String>,
     pub(crate) instructions: Option<PathBuf>,
+    /// `--max-cost` in US dollars: OMP's own backstop to a lane's cost ceiling (WS-18).
+    pub(crate) max_cost: Option<f64>,
+    /// `--tools`: the look-only tool set of a review lane (OPC-46).
+    pub(crate) tools: Option<String>,
 }
 
 /// A bound session (DESIGN 4.1 `Started`).
@@ -248,6 +253,13 @@ pub(crate) trait Control: Send + Sync + 'static {
     fn deliver(&self, delivery: Delivery) -> impl Future<Output = DeliverOutcome> + Send;
     fn interrupt(&self) -> impl Future<Output = Result<String, String>> + Send;
     fn set_model(&self, selector: &str) -> impl Future<Output = Result<String, String>> + Send;
+    /// One OMP goal operation (`create`, `pause`, `resume`, `drop`, `get`) followed by a fresh
+    /// readback; returns the goal the readback shows (HOST-19).
+    fn goal(
+        &self,
+        op: &str,
+        objective: Option<&str>,
+    ) -> impl Future<Output = Result<Goal, String>> + Send;
     fn answer(
         &self,
         session_id: &str,

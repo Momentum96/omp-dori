@@ -416,6 +416,7 @@ async fn answer(
                 .unwrap_or(json!({ "id": id, "type": 0, "guild_id": GUILD }));
             reply(200, &channel)
         }
+        ("PATCH", ["channels", id]) => patch_channel(&mut s, id, &body),
         ("GET", ["guilds", _, "threads", "active"]) => {
             reply(200, &json!({ "threads": s.threads, "members": [] }))
         }
@@ -445,21 +446,7 @@ async fn answer(
             }
         }
         ("POST", ["channels", id, "messages"]) => create(&mut s, id, &body),
-        ("PATCH", ["channels", id, "messages", mid]) => {
-            if let Some(m) = s
-                .history
-                .get_mut(*id)
-                .and_then(|l| l.iter_mut().find(|m| m["id"] == *mid))
-            {
-                if let Some(c) = body.get("content") {
-                    m["content"] = c.clone();
-                }
-                if let Some(c) = body.get("components") {
-                    m["components"] = c.clone();
-                }
-            }
-            reply(200, &json!({ "id": mid, "channel_id": id }))
-        }
+        ("PATCH", ["channels", id, "messages", mid]) => edit_message(&mut s, id, mid, &body),
         ("PUT", ["channels", _, "messages", _, "reactions", _, "@me"]) => reply(204, &Value::Null),
         ("POST", ["channels", _, "typing"] | ["interactions", _, _, "callback"]) => {
             reply(204, &Value::Null)
@@ -467,6 +454,42 @@ async fn answer(
         _ => reply(404, &json!({ "message": "Unknown", "code": 0 })),
     };
     Ok(response)
+}
+
+/// A channel edit: a thread's name or archived flag.
+fn patch_channel(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
+    let channel = s
+        .channels
+        .entry(id.to_string())
+        .or_insert_with(|| json!({ "id": id, "type": 11, "guild_id": GUILD }));
+    for key in ["name", "archived"] {
+        if let Some(v) = body.get(key) {
+            if key == "archived" {
+                channel["thread_metadata"] = json!({ "archived": v });
+            } else {
+                channel[key] = v.clone();
+            }
+        }
+    }
+    let channel = channel.clone();
+    reply(200, &channel)
+}
+
+/// A message edit: its content and components.
+fn edit_message(s: &mut State, id: &str, mid: &str, body: &Value) -> Response<Full<Bytes>> {
+    if let Some(m) = s
+        .history
+        .get_mut(id)
+        .and_then(|l| l.iter_mut().find(|m| m["id"] == mid))
+    {
+        if let Some(c) = body.get("content") {
+            m["content"] = c.clone();
+        }
+        if let Some(c) = body.get("components") {
+            m["components"] = c.clone();
+        }
+    }
+    reply(200, &json!({ "id": mid, "channel_id": id }))
 }
 
 /// A message create: deduplicated by enforced nonce, a reply gets type 19 and its reference.

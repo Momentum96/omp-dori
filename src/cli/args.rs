@@ -15,7 +15,15 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 35] = [
+pub(crate) const COMMANDS: [Spec; 36] = [
+    Spec {
+        path: &["lane"],
+        args: &["op"],
+        flags: &["--json"],
+        values: &["--params"],
+        summary: "one lane operation (open, list, board, pause, resume, park, abandon, claim, object, close, \
+                  reopen, send, release, read, interrupt, model, answer, grant, drift, spend); --params '<json>'",
+    },
     Spec {
         path: &["hub"],
         args: &[],

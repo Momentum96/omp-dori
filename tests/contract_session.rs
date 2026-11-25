@@ -407,6 +407,10 @@ fn lead_end_to_end_and_resume() {
     .unwrap();
     assert_eq!(overlay["retry"]["modelFallback"], true);
     assert_eq!(overlay["codexResets"]["autoRedeem"], "no");
+    assert_eq!(
+        overlay["goal"]["enabled"], false,
+        "the lead holds no standing goal (OPC-36)"
+    );
 
     // A clean stop (hub shutdown) and a restart resume the same session and file.
     assert!(hub.stop().success());

@@ -679,6 +679,197 @@ pub(crate) async fn verify(
         .map_err(|e| TranscriptError::Io(format!("verify task: {e}")))?
 }
 
+/// A session file larger than this is an issue for spend reading (WS req. 34).
+const SPEND_FILE_MAX: u64 = 64 * 1024 * 1024;
+
+/// Token and cost totals of one session file, read incrementally (WS-20; WS req. 30-35): from the
+/// last offset while the file identity is unchanged, from the start again when it shrank or was
+/// replaced. Only numbers are kept, never content. Any issue makes the totals unknown. Lanes read
+/// it through [`SpendTree`].
+#[derive(Debug, Default)]
+struct Spend {
+    identity: Option<(u64, u64)>,
+    offset: u64,
+    /// Billed calls by record ID: tokens and cost, to tell a repeat from a conflict.
+    calls: HashMap<String, (u64, u64)>,
+    tokens: u64,
+    /// Cost in micro-dollars, so sums stay exact.
+    micros: u64,
+    issue: Option<String>,
+}
+
+impl Spend {
+    /// Reads what was appended since the last call. Calls before `since_ms` are not charged.
+    pub(crate) fn read(&mut self, path: &Path, since_ms: i64) {
+        if let Err(e) = self.step(path, since_ms) {
+            self.issue = Some(e);
+        }
+    }
+
+    fn step(&mut self, path: &Path, since_ms: i64) -> std::result::Result<(), String> {
+        let meta = fs::symlink_metadata(path).map_err(|e| format!("unreadable: {e}"))?;
+        if !meta.is_file() || meta.nlink() != 1 || meta.uid() != rustix::process::getuid().as_raw()
+        {
+            return Err("not a regular single-link file of this user".into());
+        }
+        if meta.len() > SPEND_FILE_MAX {
+            return Err("larger than 64 MiB".into());
+        }
+        let identity = (meta.dev(), meta.ino());
+        if self.identity != Some(identity) || meta.len() < self.offset {
+            *self = Self {
+                identity: Some(identity),
+                ..Self::default()
+            };
+        }
+        let mut file = File::open(path).map_err(|e| format!("unreadable: {e}"))?;
+        file.seek(SeekFrom::Start(self.offset))
+            .map_err(|e| format!("unreadable: {e}"))?;
+        let mut reader = BufReader::new(file.take(meta.len() - self.offset));
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let n = reader
+                .read_until(b'\n', &mut line)
+                .map_err(|e| format!("unreadable: {e}"))?;
+            // A line without its end is read again next time.
+            if n == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            self.offset += n as u64;
+            if let Ok(entry) = serde_json::from_slice::<Value>(&line) {
+                self.entry(&entry, since_ms)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn entry(&mut self, entry: &Value, since_ms: i64) -> std::result::Result<(), String> {
+        let usage = match entry.get("type").and_then(Value::as_str) {
+            Some("message") => entry
+                .get("message")
+                .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+                .and_then(|m| m.get("usage")),
+            Some("model_usage") => entry.get("usage").or(Some(entry)),
+            _ => None,
+        };
+        let Some(usage) = usage else {
+            return Ok(());
+        };
+        let at = entry
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+            .map(jiff::Timestamp::as_millisecond);
+        if at.is_some_and(|at| at < since_ms) {
+            return Ok(());
+        }
+        let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let tokens = n("input") + n("output") + n("cacheWrite");
+        let cost = usage
+            .pointer("/cost/total")
+            .or_else(|| usage.get("cost"))
+            .and_then(Value::as_f64)
+            .filter(|c| c.is_finite() && *c >= 0.0)
+            .unwrap_or(0.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let micros = (cost * 1_000_000.0).round() as u64;
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .map_or_else(|| format!("@{}", self.offset), str::to_string);
+        match self.calls.get(&id) {
+            Some(seen) if *seen == (tokens, micros) => Ok(()),
+            Some(_) => Err(format!("call {id} seen twice with different numbers")),
+            None => {
+                self.calls.insert(id, (tokens, micros));
+                self.tokens += tokens;
+                self.micros += micros;
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Entries a directory of a session's artifact tree may hold before spend reading gives up (WS
+/// req. 34), and how deep subagent spawns nest.
+const TREE_DIR_MAX: usize = 4096;
+const TREE_DEPTH_MAX: usize = 8;
+
+/// Totals of a session file and of every subagent and advisor transcript OMP keeps next to it
+/// (WS-20, WS req. 33). OMP stores those in the session's artifact directory, the session file's
+/// path without `.jsonl`, as `<agent>.jsonl`, nested in `<agent>/` per spawn; a child is found by
+/// its place in that tree, which only its parent session writes. Each file is read incrementally;
+/// any issue in any file makes the totals unknown.
+#[derive(Debug, Default)]
+pub(crate) struct SpendTree {
+    files: HashMap<PathBuf, Spend>,
+}
+
+impl SpendTree {
+    /// Reads what every file of the tree appended since the last call: tokens and US dollars over
+    /// all of them, and how many child transcripts there are.
+    pub(crate) fn read(
+        &mut self,
+        main: &Path,
+        since_ms: i64,
+    ) -> std::result::Result<(f64, f64, usize), String> {
+        let mut paths = vec![main.to_path_buf()];
+        children(&main.with_extension(""), 0, &mut paths)?;
+        self.files.retain(|p, _| paths.contains(p));
+        let (mut tokens, mut micros) = (0u64, 0u64);
+        for path in &paths {
+            let spend = self.files.entry(path.clone()).or_default();
+            spend.read(path, since_ms);
+            if let Some(issue) = &spend.issue {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                return Err(format!("{name}: {issue}"));
+            }
+            tokens += spend.tokens;
+            micros += spend.micros;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        Ok((tokens as f64, micros as f64 / 1_000_000.0, paths.len() - 1))
+    }
+}
+
+/// Every `*.jsonl` below `dir`, depth first; a missing directory has none. Spill output under
+/// `local/` holds no transcripts and is skipped.
+fn children(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> std::result::Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: unreadable: {e}", dir.display())),
+    };
+    let mut found: Vec<(PathBuf, bool)> = Vec::new();
+    for (n, entry) in entries.enumerate() {
+        if n >= TREE_DIR_MAX {
+            return Err(format!("{}: over {TREE_DIR_MAX} entries", dir.display()));
+        }
+        let entry = entry.map_err(|e| format!("{}: unreadable: {e}", dir.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("{}: unreadable: {e}", dir.display()))?;
+        let path = entry.path();
+        if kind.is_dir() && entry.file_name() != "local" {
+            found.push((path, true));
+        } else if kind.is_file() && path.extension().is_some_and(|x| x == "jsonl") {
+            found.push((path, false));
+        }
+    }
+    found.sort();
+    for (path, is_dir) in found {
+        if !is_dir {
+            out.push(path);
+        } else if depth + 1 < TREE_DEPTH_MAX {
+            children(&path, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +983,77 @@ mod tests {
         let string_content = serde_json::json!({"type": "message", "message": {"role": "user", "content": "[cataly:ccc] x"}});
         fs::write(&path, format!("{string_content}\n")).unwrap();
         assert_eq!(find_marker(&path, "[cataly:ccc]").unwrap(), Found::Yes);
+    }
+
+    #[test]
+    fn spend_counts_subagent_and_advisor_transcripts() {
+        let dir = crate::sys::fs::tests::scratch("spend-tree");
+        let main = dir.join("2026-11-25T00-00-00-000Z_s1.jsonl");
+        let call = |id: &str, cost: f64| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "message", "id": id, "message": {"role": "assistant", "usage": {"input": 10, "output": 5, "cost": {"total": cost}}}})
+            )
+        };
+        fs::write(&main, call("m1", 0.5)).unwrap();
+        let mut tree = SpendTree::default();
+        assert_eq!(tree.read(&main, 0).unwrap(), (15.0, 0.5, 0));
+        let artifacts = dir.join("2026-11-25T00-00-00-000Z_s1");
+        fs::create_dir_all(artifacts.join("Scout/local")).unwrap();
+        fs::write(artifacts.join("Scout.jsonl"), call("s1", 0.25)).unwrap();
+        fs::write(artifacts.join("Scout/Helper.jsonl"), call("h1", 0.125)).unwrap();
+        fs::write(artifacts.join("__advisor.jsonl"), call("a1", 0.0625)).unwrap();
+        fs::write(artifacts.join("Scout/local/1.log"), "spill").unwrap();
+        fs::write(artifacts.join("Scout/local/2.jsonl"), call("x", 9.0)).unwrap();
+        assert_eq!(tree.read(&main, 0).unwrap(), (60.0, 0.9375, 3));
+        let mut more = fs::OpenOptions::new()
+            .append(true)
+            .open(artifacts.join("Scout.jsonl"))
+            .unwrap();
+        std::io::Write::write_all(&mut more, call("s2", 1.0).as_bytes()).unwrap();
+        assert_eq!(tree.read(&main, 0).unwrap(), (75.0, 1.9375, 3));
+        std::io::Write::write_all(&mut more, call("s2", 2.0).as_bytes()).unwrap();
+        assert!(
+            tree.read(&main, 0).unwrap_err().contains("Scout.jsonl"),
+            "one bad child makes the total unknown"
+        );
+    }
+
+    /// Slice-3a measurement: the first read of a 10 MiB session file, then an incremental read of
+    /// one appended call. Run with `cargo test --release -- --ignored --nocapture spend_read_cost`.
+    #[test]
+    #[ignore = "measurement"]
+    fn spend_read_cost() {
+        let dir = crate::sys::fs::tests::scratch("spend-cost");
+        let main = dir.join("2026-11-25T00-00-00-000Z_s1.jsonl");
+        let text = "x".repeat(1500);
+        let mut body = String::new();
+        let mut n = 0;
+        while body.len() < 10 << 20 {
+            n += 1;
+            let line = if n % 2 == 0 {
+                serde_json::json!({"type": "message", "id": format!("m{n}"), "timestamp": "2026-11-25T00:00:01Z", "message": {"role": "assistant", "content": [{"type": "text", "text": text}], "usage": {"input": 10, "output": 5, "cost": {"total": 0.001}}}})
+            } else {
+                serde_json::json!({"type": "message", "id": format!("u{n}"), "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+            };
+            body.push_str(&line.to_string());
+            body.push('\n');
+        }
+        fs::write(&main, &body).unwrap();
+        let mut tree = SpendTree::default();
+        let began = std::time::Instant::now();
+        tree.read(&main, 0).unwrap();
+        let full = began.elapsed();
+        let mut more = fs::OpenOptions::new().append(true).open(&main).unwrap();
+        let call = serde_json::json!({"type": "message", "id": "last", "message": {"role": "assistant", "usage": {"input": 1, "output": 1, "cost": {"total": 0.0}}}});
+        std::io::Write::write_all(&mut more, format!("{call}\n").as_bytes()).unwrap();
+        let began = std::time::Instant::now();
+        tree.read(&main, 0).unwrap();
+        let step = began.elapsed();
+        eprintln!(
+            "MEASURE spend_read bytes={} entries={n} first={full:?} incremental={step:?}",
+            body.len()
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

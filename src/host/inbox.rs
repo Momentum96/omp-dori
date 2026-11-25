@@ -445,6 +445,21 @@ impl Mailbox {
         Ok(())
     }
 
+    /// Ends every row not yet written; they belonged to a run that is over. Returns their count.
+    pub(crate) async fn retire(&self) -> Result<usize, String> {
+        let done = self
+            .store
+            .host(HostWrite::Retire {
+                target: self.target.clone(),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(match done {
+            HostDone::Rows(n) => n,
+            _ => 0,
+        })
+    }
+
     /// Whether a written batch still waits for its entry.
     pub(crate) async fn unconfirmed(&self) -> bool {
         let target = self.target.clone();

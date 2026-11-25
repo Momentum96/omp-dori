@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 31] = [
+const METHODS: [Method; 32] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -188,6 +188,13 @@ const METHODS: [Method; 31] = [
         needs: Authority::Owner,
         mutating: true,
     },
+    // A lane open's `request_id` is the lane's own dedupe with its digest rule (LANE req. 10), not
+    // the dispatcher's reply dedupe, which would answer other inputs with the earlier reply.
+    Method {
+        name: method::LANE,
+        needs: Authority::Owner,
+        mutating: false,
+    },
 ];
 
 /// Replies of recent mutating calls, by (method, caller request ID).
@@ -310,6 +317,11 @@ pub(crate) async fn dispatch(hub: &Hub, request: Incoming, caller: Authority) ->
 async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
     match name {
         method::STATUS => ok(&hub.status().await?),
+        method::LANE => hub
+            .lanes
+            .call(crate::lanes::Caller::Owner, &raw)
+            .await
+            .map_err(refused),
         method::STATS => ok(&hub.stats().await),
         method::EVENTS_SINCE => {
             let p: EventsParams = params(raw)?;

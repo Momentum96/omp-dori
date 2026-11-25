@@ -61,7 +61,8 @@ const SPEND_LIMIT: usize = 3;
 #[derive(Clone, Debug)]
 pub(crate) struct Headless {
     pub(crate) exe: PathBuf,
-    pub(crate) overlay: PathBuf,
+    /// The state directory, which holds the overlay of each session kind.
+    pub(crate) state: PathBuf,
     pub(crate) socket: PathBuf,
     /// Directory of the per-session stderr logs.
     pub(crate) logs: PathBuf,
@@ -80,14 +81,17 @@ impl Runtime for Headless {
     async fn start(&self, spec: StartSpec) -> Result<(Arc<Session>, Started), StartError> {
         let token = super::random_hex(16);
         self.links.issue(&token, &spec.handle, spec.role);
+        let overlay = crate::omp::launch::overlay_path(&self.state, spec.role == super::Role::Lane);
         let argv = Launch {
             exe: &self.exe,
             model: &spec.model,
             thinking: spec.thinking.as_deref(),
             target: &spec.target,
-            overlay: &self.overlay,
+            overlay: &overlay,
             instructions: spec.instructions.as_deref(),
             extra: &self.extra_flags,
+            max_cost: spec.max_cost,
+            tools: spec.tools.as_deref(),
         }
         .argv();
         let env = session_env(&self.credentials, &self.socket, &token);
@@ -1181,6 +1185,36 @@ impl Control for Session {
                 other.unwrap_or_else(|| "none".into())
             )),
         }
+    }
+
+    async fn goal(&self, op: &str, objective: Option<&str>) -> Result<dialogs::Goal, String> {
+        let _busy = self.begin()?;
+        let inner = &self.inner;
+        let mut fields = vec![("op", json!(op))];
+        if let Some(objective) = objective {
+            fields.push(("objective", json!(objective)));
+        }
+        match inner.call("goal", &fields).await {
+            Ok(reply) if reply.success => {}
+            Ok(reply) => {
+                return Err(reply
+                    .error
+                    .unwrap_or_else(|| format!("OMP refused goal {op}")));
+            }
+            Err(e) => return Err(format!("goal {op} unconfirmed: {e}")),
+        }
+        {
+            let mut st = inner.lock();
+            st.fresh = false;
+            inner.publish(&mut st);
+        }
+        inner.readback().await?;
+        inner
+            .lock()
+            .latest
+            .as_ref()
+            .map(|s| s.goal.clone())
+            .ok_or_else(|| "no goal readback".to_string())
     }
 
     async fn answer(

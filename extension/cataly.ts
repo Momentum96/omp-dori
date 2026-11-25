@@ -15,6 +15,7 @@ const BUFFER_BYTES = 1 << 20;
 const TEXT_CUT = 2_048;
 const BACKOFF_S = [1, 2, 4, 8, 16, 30];
 const TOOL_MS = 5_000;
+const SHELL_MS = 2_000;
 const STOP_MS = 1_000;
 const SHUTDOWN_MS = 500;
 const CALLS_KEPT = 4_096;
@@ -156,8 +157,15 @@ interface Call {
 	tool: string;
 	cwd: string;
 	starts: number;
+	command?: string;
 	fingerprint?: string;
 	error?: boolean;
+}
+
+/** The model OMP runs for this context, `provider/id`, or "" when unknown. */
+function modelOf(ctx: Ctx): string {
+	const m = safe(() => ctx?.models?.current?.() ?? ctx?.model);
+	return m ? `${m.provider}/${m.id}` : "";
 }
 
 /** The bridge state of one OMP process. */
@@ -185,6 +193,9 @@ export class Bridge {
 	warned = false;
 	calls = new Map<string, Call>();
 	lastAnswer = false;
+	pin: string | undefined;
+	shell = false;
+	fallbackTo = "";
 
 	constructor(pi: Pi, deps: Deps) {
 		this.pi = pi;
@@ -227,11 +238,7 @@ export class Bridge {
 		if (this.connecting || this.shutting) return;
 		this.connecting = true;
 		try {
-			this.wire = await this.deps.connect(
-				socketPath(this.deps),
-				line => this.receive(line),
-				() => this.closed(),
-			);
+			this.wire = await this.deps.connect(socketPath(this.deps), line => this.receive(line), () => this.closed());
 		} catch {
 			this.wire = undefined;
 		}
@@ -244,7 +251,7 @@ export class Bridge {
 			this.wire?.close();
 			return;
 		}
-		if (answer.role !== "lead") {
+		if (answer.role !== "lead" && answer.role !== "lane") {
 			// Role none: inert for this session (EXT req. 4).
 			this.role = "none";
 			this.key = undefined;
@@ -267,6 +274,8 @@ export class Bridge {
 		if (!answer) return;
 		this.role = String(answer.role ?? this.role);
 		if (typeof answer.guidance === "string") this.guidance = answer.guidance;
+		if (typeof answer.pin === "string") this.pin = answer.pin;
+		if (answer.shell !== undefined) this.shell = Boolean(answer.shell);
 		if (this.role !== "none") this.mark();
 	}
 
@@ -277,10 +286,7 @@ export class Bridge {
 			session: this.session,
 			role: this.role,
 			idle: Boolean(this.ctx?.isIdle?.()),
-			model: safe(() => {
-				const m = this.ctx?.models?.current?.() ?? this.ctx?.model;
-				return m ? `${m.provider}/${m.id}` : undefined;
-			}),
+			model: modelOf(this.ctx) || undefined,
 			last_seq: this.seq,
 		});
 		const queued = this.queue;
@@ -389,13 +395,15 @@ export class Bridge {
 			const name = String(def.name ?? "");
 			if (!name) continue;
 			names.push(name);
+			// The hub sets each tool's answer deadline (a lane report reads evidence files).
+			const ms = Number(def.timeout_ms) || TOOL_MS;
 			pi.registerTool({
 				name,
 				label: String(def.label ?? name),
 				description: String(def.description ?? ""),
 				parameters: def.parameters ?? { type: "object" },
 				execute: (callId: string, params: Json, _signal: unknown, _update: unknown, ctx: Ctx) =>
-					this.tool(name, callId, params, ctx),
+					this.tool(name, ms, callId, params, ctx),
 			});
 		}
 		try {
@@ -404,7 +412,13 @@ export class Bridge {
 		} catch {}
 		this.status(answer.status as string | undefined);
 		this.timer(() => this.beat(), HEARTBEAT_MS, true);
-		pi.on("before_agent_start", (e: Json, ctx: Ctx) => this.guide(e, ctx));
+		pi.on("before_agent_start", async (e: Json, ctx: Ctx) => {
+			await this.barrier(ctx);
+			return this.guide(e, ctx);
+		});
+		// Lane hooks, added only once the hub said they apply (EXT req. 1, 32, 34, 38).
+		if (this.shell) pi.on("tool_call", (e: Json, ctx: Ctx) => this.veto(e, ctx));
+		if (this.pin) pi.on("retry_fallback_applied", (e: Json) => void (this.fallbackTo = String(e.to ?? "")));
 		pi.on("session_stop", (_e: Json, ctx: Ctx) => this.stop(ctx));
 		pi.on("session_shutdown", (_e: Json, ctx: Ctx) => this.shutdown(ctx));
 		pi.on("session_compact", (_e: Json, ctx: Ctx) => this.main(ctx) && this.event("session_compact"));
@@ -419,7 +433,10 @@ export class Bridge {
 			this.main(ctx) &&
 			this.event("agent_end", { will_continue: e.willContinue ?? e.yielded, awaiting: e.awaitingAsyncWork }),
 		);
-		pi.on("turn_start", (_e: Json, ctx: Ctx) => this.main(ctx) && this.event("turn_start"));
+		pi.on("turn_start", async (_e: Json, ctx: Ctx) => {
+			await this.barrier(ctx);
+			this.main(ctx) && this.event("turn_start");
+		});
 		pi.on("turn_end", (_e: Json, ctx: Ctx) => this.main(ctx) && this.event("turn_end"));
 		pi.on("message_end", (e: Json, ctx: Ctx) => this.message(e, ctx));
 		pi.on("tool_execution_start", (e: Json, ctx: Ctx) => this.toolStart(e, ctx));
@@ -451,23 +468,33 @@ export class Bridge {
 		this.event(kind, { file: this.file(), reason: e.reason });
 	}
 
-	/** Appends the hub's guidance once to the prompt OMP passes in (EXT req. 36). */
+	/** Shell and spawn calls (EXT req. 32-35): the hub judges their facts; no answer blocks. */
+	async veto(e: Json, ctx: Ctx): Promise<Json | undefined> {
+		const tool = String(e.toolName ?? "");
+		if (tool !== "bash" && tool !== "task") return undefined;
+		const file = this.file();
+		const saved = tool === "task" && file !== "" && (await Bun.file(file).exists());
+		const command = (e.input as Json | undefined)?.command;
+		const params = { session: this.session, agent: ctx?.agent?.id, call: e.toolCallId, tool, command, saved };
+		const answer = await this.request("bridge.shell", params, SHELL_MS);
+		if (answer?.allow) return undefined;
+		return { block: true, reason: String(answer?.reason || "No command ran: Cataly did not answer within 2 s. Report a blocker (kind waiting).") };
+	}
+
+	/** Model barrier (EXT req. 38-39): the hub judges what OMP runs; a hold or no answer aborts. */
+	async barrier(ctx: Ctx): Promise<void> {
+		if (!this.pin || ctx?.agent?.kind === "sub") return;
+		const thinking = safe(() => this.pi.getThinkingLevel?.());
+		const facts = { session: this.session, model: modelOf(ctx), thinking, fallback: this.fallbackTo };
+		const answer = await this.request("bridge.model", facts, SHELL_MS);
+		if (!answer?.allow) safe(() => ctx?.abort?.());
+	}
+
+	/** Appends the hub's guidance once to the prompt list OMP passes in (EXT req. 36). */
 	guide(e: Json, ctx: Ctx): Json | undefined {
-		if (!this.main(ctx) || !this.guidance) return undefined;
 		const prompt = e.systemPrompt;
-		if (typeof prompt === "string") {
-			return prompt.includes(this.guidance) ? undefined : { systemPrompt: `${prompt}\n\n${this.guidance}` };
-		}
-		if (!Array.isArray(prompt)) return undefined;
-		const blocks = prompt as unknown[];
-		if (blocks.every(b => typeof b === "string")) {
-			return blocks.includes(this.guidance) ? undefined : { systemPrompt: [...blocks, this.guidance] };
-		}
-		if (blocks.every(b => (b as Json)?.type === "text" && typeof (b as Json).text === "string")) {
-			if (blocks.some(b => (b as Json).text === this.guidance)) return undefined;
-			return { systemPrompt: [...blocks, { type: "text", text: this.guidance }] };
-		}
-		return undefined;
+		if (!this.main(ctx) || !this.guidance || !Array.isArray(prompt) || prompt.includes(this.guidance)) return;
+		return prompt.every(b => typeof b === "string") ? { systemPrompt: [...prompt, this.guidance] } : undefined;
 	}
 
 	message(e: Json, ctx: Ctx): void {
@@ -478,14 +505,8 @@ export class Bridge {
 		const visible = cut(textOf(m.content));
 		const stop = m.stopReason as string | undefined;
 		if (role === "assistant") this.lastAnswer = visible.text.trim() !== "" && stop === "stop";
-		this.event("message_end", {
-			role,
-			text: visible.text,
-			truncated: visible.truncated,
-			stop,
-			entry: e.entryId ?? m.id,
-			at: m.timestamp,
-		});
+		const entry = e.entryId ?? m.id;
+		this.event("message_end", { role, ...visible, stop, entry, at: m.timestamp });
 	}
 
 	toolStart(e: Json, ctx: Ctx): void {
@@ -494,7 +515,10 @@ export class Bridge {
 		const tool = String(e.toolName ?? "");
 		const seen = this.calls.get(id);
 		if (seen) seen.starts += 1;
-		else this.calls.set(id, { tool, cwd: String(ctx.cwd ?? ""), starts: 1 });
+		else {
+			const command = tool === "bash" ? String((e.args as Json | undefined)?.command ?? "").slice(0, TEXT_CUT) : undefined;
+			this.calls.set(id, { tool, cwd: String(ctx.cwd ?? ""), starts: 1, command });
+		}
 		while (this.calls.size > CALLS_KEPT) {
 			const oldest = this.calls.keys().next().value;
 			if (oldest === undefined) break;
@@ -521,37 +545,17 @@ export class Bridge {
 		const ids = params?.calls;
 		if (!Array.isArray(ids)) return undefined;
 		return ids.slice(0, 64).map(raw => {
-			const id = String(raw);
-			const call = this.calls.get(id);
-			if (!call) return { call: id, seen: false };
-			return {
-				call: id,
-				seen: true,
-				tool: call.tool,
-				cwd: call.cwd,
-				error: call.error,
-				fingerprint: call.fingerprint,
-				ambiguous: call.starts > 1,
-			};
+			const call = this.calls.get(String(raw));
+			return call ? { call: String(raw), seen: true, ...call, ambiguous: call.starts > 1 } : { call: String(raw), seen: false };
 		});
 	}
 
 	/** Forwards one tool call and returns the hub's text unchanged (EXT req. 18). */
-	async tool(name: string, callId: string, params: Json, ctx: Ctx): Promise<Json> {
+	async tool(name: string, ms: number, callId: string, params: Json, ctx: Ctx): Promise<Json> {
 		if (!this.main(ctx)) throw new Error(`${name} is not available in this session.`);
-		const answer = await this.request(
-			"bridge.tool",
-			{
-				session: this.session,
-				agent: ctx?.agent?.id,
-				call: callId,
-				tool: name,
-				input: params,
-				evidence: this.evidence(params),
-			},
-			TOOL_MS,
-		);
-		if (!answer) throw new Error(`Cataly did not answer within 5 s: ${UNSURE}`);
+		const call = { session: this.session, agent: ctx?.agent?.id, call: callId, tool: name, input: params };
+		const answer = await this.request("bridge.tool", { ...call, evidence: this.evidence(params) }, ms);
+		if (!answer) throw new Error(`Cataly did not answer in time: ${UNSURE}`);
 		const text = String(answer.text ?? "");
 		if (answer.error) throw new Error(text);
 		return { content: [{ type: "text", text }] };
@@ -570,9 +574,7 @@ export class Bridge {
 		if (ctx?.agent?.kind === "sub") return;
 		this.event("session_shutdown");
 		this.shutting = true;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		setTimeout(resolve, this.wire ? SHUTDOWN_MS / 10 : 0);
-		await promise;
+		if (this.wire) await Bun.sleep(SHUTDOWN_MS / 10);
 		this.wire?.close();
 		this.wire = undefined;
 	}
@@ -587,9 +589,5 @@ export function bridge(pi: Pi, deps: Deps): Bridge {
 }
 
 export default function cataly(pi: Pi): void {
-	bridge(pi, {
-		env: process.env,
-		connect: unixConnect,
-		uid: () => process.getuid?.() ?? 0,
-	});
+	bridge(pi, { env: process.env, connect: unixConnect, uid: () => process.getuid?.() ?? 0 });
 }

@@ -435,6 +435,32 @@ fn print_gate(g: &GateView) {
     out::line(&format!("quota    {line}"));
 }
 
+/// `cataly lane <op> [--params <json>]`: one request per lane operation; `op` and the JSON object's
+/// fields are the same as the lead's `lane.<op>` tool operations.
+fn lane(hub: &mut Client, p: &Parsed, as_json: bool) -> Result<(), Failure> {
+    // A start or reopen may take the whole start deadline (LANE req. 15, default 180 s).
+    const LANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
+    let mut params: Value = match p.value("--params") {
+        Some(text) => {
+            serde_json::from_str(text).map_err(|e| Failure::Usage(format!("--params: {e}")))?
+        }
+        None => json!({}),
+    };
+    let map = params
+        .as_object_mut()
+        .ok_or_else(|| Failure::Usage("--params must be a JSON object".into()))?;
+    map.insert(
+        "op".into(),
+        json!(p.args.first().cloned().unwrap_or_default()),
+    );
+    let value = hub.call(method::LANE, params, LANE_TIMEOUT)?;
+    match value {
+        Value::String(text) if !as_json => out::line(&text),
+        other => out::json(&other),
+    }
+    Ok(())
+}
+
 /// `health`, `limits`, `quota`, `pr` and `lead` verbs; `None` for anything else.
 fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(), Failure>> {
     if let Some(done) = lead::verbs(p, hub, as_json) {
@@ -446,6 +472,7 @@ fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(),
     let target = p.args.first().cloned();
     let result = match p.spec.path {
         ["health"] => health(hub, as_json),
+        ["lane"] => lane(hub, p, as_json),
         ["limits"] => limits(hub, p.flag("--refresh"), as_json),
         ["quota"] => hub
             .call(method::QUOTA, json!({}), CALL_TIMEOUT)

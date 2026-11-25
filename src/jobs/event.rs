@@ -89,6 +89,14 @@ pub(crate) enum EventKind {
     /// A stream job's output line matched (WS-02).
     StreamLine,
     StreamEnded,
+    /// Lanes (LANE, EVR, WS oversight; milestone 3a).
+    LaneStarted,
+    LaneReport,
+    LaneClaimed,
+    LaneClosed,
+    LaneLost,
+    LaneAlert,
+    LaneRecap,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -99,7 +107,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 53] = [
+const KINDS: [KindRow; 60] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -428,6 +436,48 @@ const KINDS: [KindRow; 53] = [
         "stream.ended",
         &["job", "reason"],
         "{job} stopped: {reason}",
+    ),
+    (
+        EventKind::LaneStarted,
+        "lane.started",
+        &["lane", "detail"],
+        "lane {lane} {detail}",
+    ),
+    (
+        EventKind::LaneReport,
+        "lane.report",
+        &["lane", "kind", "report", "text"],
+        "lane {lane} {kind} report {report}: {text}",
+    ),
+    (
+        EventKind::LaneClaimed,
+        "lane.claimed",
+        &["lane", "closes", "evidence"],
+        "lane {lane} claims completion ({evidence}); it closes at {closes} unless you object",
+    ),
+    (
+        EventKind::LaneClosed,
+        "lane.closed",
+        &["lane", "outcome", "detail"],
+        "lane {lane} closed {outcome}: {detail}",
+    ),
+    (
+        EventKind::LaneLost,
+        "lane.lost",
+        &["lane", "detail"],
+        "lane {lane} lost its process: {detail}; reopen it to continue",
+    ),
+    (
+        EventKind::LaneAlert,
+        "lane.alert",
+        &["lane", "what", "detail"],
+        "lane {lane} {what}: {detail}",
+    ),
+    (
+        EventKind::LaneRecap,
+        "lane.recap",
+        &["detail"],
+        "lanes after the hub start: {detail}",
     ),
 ];
 

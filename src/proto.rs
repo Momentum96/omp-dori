@@ -21,6 +21,8 @@ pub(crate) const MAX_LINE: usize = 1024 * 1024;
 /// Method names.
 pub(crate) mod method {
     pub(crate) const STATUS: &str = "status";
+    /// Every lane operation; `params.op` names it (LANE, EVR, COORD of milestone 3a).
+    pub(crate) const LANE: &str = "lane";
     pub(crate) const STATS: &str = "stats";
     pub(crate) const EVENTS_SINCE: &str = "events.since";
     pub(crate) const EVENTS_FOLLOW: &str = "events.follow";
@@ -230,6 +232,9 @@ pub(crate) struct Stats {
     /// Discord Gateway connection established to its catch-up read finished.
     #[serde(default)]
     pub(crate) discord_catch_up_latency: Option<LatencySummary>,
+    /// Lane spawn to its kickoff confirmed in the session file.
+    #[serde(default)]
+    pub(crate) lane_start_latency: Option<LatencySummary>,
 }
 
 /// Parameters of the `discord.*` methods.

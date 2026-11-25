@@ -483,3 +483,61 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   the tool, and the session file holds the marker. `tests/support/model.rs` now records request
   bodies.
 - `tests/contract_discord.rs` `rss_with_discord_lead_and_owner_jobs`: the RSS measurement below.
+
+# Milestone 3 slice 3a: lane lifecycle, reports, oversight
+
+## Choices
+
+- **Oversight is a supervised task.** The lanes' sweep (reminders, stall alert, stuck verdict,
+  ceilings, thread posts) runs inside `Lanes::run`, spawned under the hub's `Supervisor` next to the
+  lead and Discord intake, woken by a `Notify` on every lane event and by its own next-due time. It
+  is not a `[jobs.*]` instance: its timings are per lane and come from lane records, not a schedule,
+  and a crash restarts it with the other supervised tasks.
+- **Progress marks are computed from reports.** A lane's last progress is the newest report of the
+  current run (`store::lanes` reports) or the run's start, whichever is later; no separate mark is
+  stored. Turn activity (`watch.active_ms`) only feeds the quiet rule for thread posts. The decision
+  itself is the pure `oversight::decide` with unit tests.
+- **A lane does not wait for its bridge hello at start.** The start is confirmed by the kickoff entry
+  in the session file and the goal readback (HOST-19), as for the lead. Until the hub accepts the
+  lane's bridge hello, the bridge holds no shell rules from the hub and blocks every shell call (fail
+  closed, EXT req. 32); a disconnect blocks them again.
+- **The lane's handle is saved before OMP is spawned** (found by the stock-OMP contract case). The
+  bridge says hello during OMP's start; the record held the new handle only in memory until the start
+  returned, so the hello found no open lane, the bridge went inert for the session and the lane
+  never got its tool. The fake-OMP tests missed it because the test connects later.
+- **OMP asks before the lane tool runs.** Under the lane's approval mode, stock OMP 19.1.1 shows
+  "Allow tool: cataly_lane"; the lane is blocked until the lead answers it (the contract case
+  approves it with `lane answer`). Exempting Cataly's own tool from approval is left to the owner.
+- **Shared GitHub helpers.** `done` checks of kind `pr_merged` call `gh` the way the owner jobs do:
+  `jobs::owner::gh_api`, `GH_ENV` and `gh_answer` are shared, with the bound kept at the caller.
+- **A closed run's pending notes are retired.** On close, rows still pending in the lane's inbox (the
+  quiet claim notice) are ended (`HostWrite::Retire`, state `failed`) and counted in the close
+  receipt; a reopen starts a new run whose inbox holds only what the reopen sends. Written or
+  in-doubt rows are not touched: a close already waits until nothing that wakes the lane is unsent.
+- **Lane start time is in `cataly stats`** (`lane_start_latency`: spawn to kickoff confirmed).
+
+## Deviations
+
+- The board, slots and planner are slice 3b; `lanes::record::kickoff` takes an empty step list.
+
+## Lint fixes
+
+- Split: `relay::pipeline::hand_off` (lead delivery to `to_lead`), `lanes::call` (`ledger`,
+  `reasons`), `lanes::start` (`start_spec`), `life::reopen` (`new_run`), `config::lanes::parse`
+  (`parse_oversight`), `hub::bridge::serve` (`pump`), the fake Discord's `answer`; `hub::sessions`
+  returns the `Sessions` type. The rest were mechanical (`map_or`, `map_or_else`, a collapsed `if`,
+  `Self::build`, a synchronous `read`).
+
+## Tests
+
+- `tests/lanes.rs`: checks 1-10 on the fake OMP; check 4 also reopens the closed lane and asserts
+  the claim notice was retired and never reaches the new run. `oversight_cpu_with_eight_lanes`
+  (ignored) measures the hub's CPU.
+- `tests/contract_lanes.rs` (`CATALY_CONTRACT_OMP=1`): stock OMP lanes with the bridge linked. One
+  open-report-claim-close cycle, the report made by the lane's model through the bridge's
+  `cataly_lane` tool; and check 10 (three lanes, two with active goals resumed, one paused stays
+  paused, the recap). `tests/support/model.rs` answers `CALL <tool> <json>` with that tool call.
+- `omp::transcript::tests::spend_read_cost` (ignored) measures spend reading.
+- `tests/support/fake-omp`: the background-turn poller tested its parent with `kill -0`, which a
+  killed, unreaped parent (a zombie) passes; the poller then held stdout open, the hub never saw the
+  exit and `lead_restarts_on_its_session_after_omp_exits` timed out. It now treats a zombie as gone.

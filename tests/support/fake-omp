@@ -63,11 +63,16 @@ turn() {
 
 # Ends a turn with the JSON string $1 as the final answer, for the prompt with ID $2.
 finish() {
+    finish_quiet "$1"
+    printf '{"type":"prompt_result","id":"%s","agentInvoked":true,"status":"completed","sessionSettled":true}\n' "$2"
+    echo '{"type":"session_settled"}'
+}
+
+# The answer $1 (a JSON string) written to the session file, then the turn's end events.
+finish_quiet() {
     printf '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":%s}],"stopReason":"stop"}}\n' "$1" >> "$file"
     printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":%s}],"stopReason":"stop"}}\n' "$1"
     echo '{"type":"agent_end"}'
-    printf '{"type":"prompt_result","id":"%s","agentInvoked":true,"status":"completed","sessionSettled":true}\n' "$2"
-    echo '{"type":"session_settled"}'
 }
 
 rpc() {
@@ -96,10 +101,36 @@ rpc() {
         file=
     fi
     echo $$ >> "$dir/pids"
+    printf '%s\n' "$*" >> "$dir/argv"
     if [ -n "$file" ]; then
         state=$(printf '"sessionId":"%s","sessionFile":"%s"' "$id" "$file")
     else
         state=$(printf '"sessionId":"%s","sessionFile":null' "$id")
+    fi
+    [ -f "$dir/model" ] && model=$(cat "$dir/model")
+    # Goal state per session (fake goal feature): a resume restores an active goal paused, as OMP does.
+    gfile="$dir/goal-$id"
+    if [ -n "$resume" ] && [ "$(cat "$gfile" 2>/dev/null)" = active ]; then
+        echo paused > "$gfile"
+    fi
+    # The launch token, so a test can speak for this session's bridge.
+    [ -n "$CATALY_LAUNCH" ] && printf '%s %s %s\n' "$CATALY_LAUNCH" "$id" "$$" >> "$dir/launch"
+    # omp-data/background-<id>: the session runs one turn by itself, as OMP does when a background
+    # job's result arrives (no prompt, no prompt_result). The poller ends with this process: a killed
+    # process stays a zombie until the hub reaps it, and the hub reaps only after this poller lets go
+    # of stdout, so a zombie counts as gone.
+    if [ -n "$file" ]; then
+        (
+            while s=$(ps -o stat= -p $$ 2>/dev/null) && case "$s" in *Z*) false ;; *) true ;; esac; do
+                if [ -f "$dir/background-$id" ]; then
+                    rm -f "$dir/background-$id"
+                    echo '{"type":"agent_start"}'
+                    finish_quiet '"background result read"'
+                    echo '{"type":"session_settled"}'
+                fi
+                sleep 0.2
+            done
+        ) &
     fi
     state=$(printf '%s,"isStreaming":false,"isCompacting":false,"queuedMessageCount":0,"isSettled":true,"goal":null,"model":{"provider":"%s","id":"%s"}' \
         "$state" "${model%%/*}" "${model#*/}")
@@ -107,12 +138,25 @@ rpc() {
     while IFS= read -r line; do
         cid=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
         kind=$(printf '%s' "$line" | sed -n 's/.*"type":"\([a-z_]*\)".*/\1/p')
+        ok=true
         case "$kind" in
         get_state)
             streaming=false
             [ -f "$dir/busy" ] && streaming=true
-            data=$(printf '{%s}' "$state" | sed "s/\"isStreaming\":false/\"isStreaming\":$streaming/") ;;
+            goal=null
+            [ -s "$gfile" ] && goal=$(printf '{"goal":{"status":"%s","objective":"o"}}' "$(cat "$gfile")")
+            data=$(printf '{%s}' "$state" | sed "s/\"isStreaming\":false/\"isStreaming\":$streaming/; s/\"goal\":null/\"goal\":$goal/") ;;
         get_session_lease) data='{"held":[],"unknown":[]}' ;;
+        goal)
+            op=$(printf '%s' "$line" | sed -n 's/.*"op":"\([a-z]*\)".*/\1/p')
+            now=$(cat "$gfile" 2>/dev/null)
+            case "$op" in
+            create) if [ -z "$now" ]; then echo active > "$gfile"; else ok=false; fi ;;
+            pause) if [ "$now" = active ]; then echo paused > "$gfile"; else ok=false; fi ;;
+            resume) if [ "$now" = paused ]; then echo active > "$gfile"; else ok=false; fi ;;
+            drop) rm -f "$gfile" ;;
+            esac
+            data='{}' ;;
         *) data='{}' ;;
         esac
         if [ "$kind" = extension_ui_response ]; then
@@ -121,7 +165,7 @@ rpc() {
             finish "\"picked $picked\"" "$asked"
             continue
         fi
-        printf '{"type":"response","id":"%s","command":"%s","success":true,"data":%s}\n' "$cid" "$kind" "$data"
+        printf '{"type":"response","id":"%s","command":"%s","success":%s,"data":%s}\n' "$cid" "$kind" "$ok" "$data"
         case "$kind" in
         prompt | follow_up | steer) [ -f "$dir/turns" ] && turn "$line" "$cid" ;;
         esac

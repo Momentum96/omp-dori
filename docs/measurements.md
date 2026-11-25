@@ -207,3 +207,25 @@ the owner-jobs run with everything live is still 13.0 MiB, and part B's controll
 jobs was 0.8 MiB. The binary grew by 0.62 MiB with the
 bridge socket, the hub tool, lead records, the digest and unanswered watch and the question panel.
 Debug build of the same runs: 24.3 MiB and 24.4 MiB. macOS figures are not measured.
+
+## Slice 3a: lanes (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Commands: `cargo build --release`; `CATALY_CONTRACT_OMP=1 cargo test --release --test contract_lanes
+-- --nocapture --test-threads=1` (three stock-OMP lanes on the loopback fake model, the bridge
+linked; `cataly stats` before the first open and once all three run);
+`cargo test --release --test lanes -- --ignored --nocapture oversight_cpu` (eight open lanes on the
+fake OMP, hub CPU from `/proc/<pid>/stat` over 120 s idle, scaled to an hour);
+`cargo test --release --lib -- --ignored --nocapture spend_read_cost` (a generated 10 MiB session
+file, 6,381 entries of 1.5 KB text, half of them billed assistant messages; two runs).
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Lane start: spawn to kickoff confirmed in the session file (`lane_start_latency`, 3 starts) | p50 778 ms, max 815 ms (OMP's own start to `ready` is about 490-600 ms, slice 2c) | none set |
+| Hub RSS added per running lane (OMP excluded) | 0.49 MiB (12,804,096 to 14,331,904 bytes for three lanes) | none set |
+| Hub CPU with 8 open idle lanes (oversight sweeps, watches, spend reads) | 0.6 s per hour (2 clock ticks in 120 s; the tick resolution makes this 0.3 to 0.75 s) | none set |
+| Spend reading, 10 MiB session file, first read | 10.3 ms and 10.6 ms | none set |
+| Spend reading, one appended call after that (incremental) | 12 µs and 13 µs | none set |
+| Release binary (`cargo build --release`) | 11,499,416 bytes (10.97 MiB; slice 2c: 10,346,616) | none set |
+
+The CPU figure is with the fake OMP, which emits no events while idle; the same measure with eight
+stock OMP lanes was not taken. macOS figures are not measured.

@@ -211,6 +211,10 @@ pub(crate) enum HostWrite {
         inbox_id: i64,
         confirm: bool,
     },
+    /// Ends a target's unsent rows: they belonged to a run that is over (a closed lane's notes).
+    Retire {
+        target: String,
+    },
     /// A resent delivery now belongs to the process it was resent into.
     Rebind {
         id: String,
@@ -338,6 +342,13 @@ pub(super) fn write(
             }
             Ok(HostDone::Rows(rows))
         }
+        HostWrite::Retire { target } => tx
+            .execute(
+                "UPDATE inbox SET state = 'failed', updated_ms = ?2 \
+                 WHERE target = ?1 AND state = 'pending'",
+                params![target, now],
+            )
+            .map(HostDone::Rows),
         HostWrite::Rebind { id, handle } => tx
             .execute(
                 "UPDATE deliveries SET handle = ?2 WHERE id = ?1",
