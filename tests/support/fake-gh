@@ -3,12 +3,22 @@
 # appends each call to `gh-data/calls.log`. It never contacts GitHub.
 #   gh pr list ...        -> gh-data/pr-list.json
 #   gh api [-H h] PATH    -> gh-data/<PATH without query, leading / dropped, / as _>.json
-#                            pages after the first answer []
+#                            pages after the first answer []; a missing fixture answers HTTP 404
+#   gh repo create O/N --private -> writes repos_O_N.json as a private repository
 dir=$(cd "$(dirname "$0")" && pwd)/gh-data
 printf '%s\n' "$*" >> "$dir/calls.log"
 case "$1" in
 pr)
     file="$dir/pr-list.json"
+    ;;
+repo)
+    [ "$2" = create ] || { echo "fake gh: unsupported repo command $2" >&2; exit 2; }
+    owner=${3%%/*}
+    name=${3#*/}
+    case "$*" in *--private*) private=true ;; *) private=false ;; esac
+    printf '{"name":"%s","private":%s}\n' "$name" "$private" > "$dir/repos_${owner}_${name}.json"
+    echo "https://github.com/$3"
+    exit 0
     ;;
 api)
     for last in "$@"; do :; done
@@ -32,6 +42,9 @@ esac
 if [ -f "$file" ]; then
     cat "$file"
 else
-    echo "fake gh: no fixture $(basename "$file")" >&2
+    case "$1" in
+    api) echo "gh: Not Found (HTTP 404)" >&2 ;;
+    *) echo "fake gh: no fixture $(basename "$file")" >&2 ;;
+    esac
     exit 1
 fi

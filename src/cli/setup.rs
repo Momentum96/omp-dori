@@ -147,7 +147,7 @@ pub(crate) fn set_key(text: &str, section: &str, key: &str, value: &str) -> Stri
 }
 
 /// [`set_key`] with a value already written as TOML.
-fn set_rendered(text: &str, section: &str, key: &str, rendered: &str) -> String {
+pub(super) fn set_rendered(text: &str, section: &str, key: &str, rendered: &str) -> String {
     let line = format!("{key} = {rendered}");
     let header = format!("[{section}]");
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
@@ -375,6 +375,20 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
         None => NEW_FILE.to_string(),
     };
     let creating = before.bytes.is_none();
+    text = managed(p, text, creating)?;
+    let home = if p.flag("--backup") {
+        Some(super::install::block_on(super::home::plan(p, paths))?)
+    } else {
+        None
+    };
+    if let Some(h) = &home {
+        text = h.config(&text);
+    }
+    finish(p, paths, &before, creating, &text, home.as_ref(), as_json)
+}
+
+/// Sets the managed settings the flags name (a new file gets the ones OMP and the hub need).
+fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<String, Failure> {
     for (section, key, flag) in MANAGED {
         let value = match (p.value(flag), creating, section) {
             (Some(v), _, _) => Some(v.to_string()),
@@ -414,6 +428,20 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
             text = set_key(&text, section, key, v.trim());
         }
     }
+    Ok(text)
+}
+
+/// Validates, writes when applying (after the home backup is prepared), and reports.
+fn finish(
+    p: &Parsed,
+    paths: &Paths,
+    before: &Snapshot,
+    creating: bool,
+    text: &str,
+    home: Option<&super::home::Home>,
+    as_json: bool,
+) -> Result<(), Failure> {
+    let path = &paths.config_file;
     let after = sha256_hex(text.as_bytes());
     let action = if creating {
         "create"
@@ -422,7 +450,7 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
     } else {
         "update"
     };
-    let valid = config::parse(&text).map_err(|errors| config::describe(&errors));
+    let valid = config::parse(text).map_err(|errors| config::describe(&errors));
     let apply = p.flag("--apply");
     if apply {
         if let Err(e) = &valid {
@@ -439,8 +467,11 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
                 before.digest()
             )));
         }
+        if let Some(h) = home {
+            super::install::block_on(h.apply(p.flag("--create"))).map_err(Failure::Refused)?;
+        }
         if action != "keep" {
-            publish(path, &before, text.as_bytes())?;
+            publish(path, before, text.as_bytes())?;
         }
     }
     let hub = super::client::Client::connect(&paths.socket)
@@ -456,7 +487,8 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
         "managed": MANAGED.iter().map(|(s, k, _)| format!("{s}.{k}")).collect::<Vec<_>>(),
         "unknown_keys": "kept as they are",
         "valid": valid.as_ref().map_or_else(|e| Value::String(e.clone()), |_| Value::Bool(true)),
-        "sources": sources(paths, &text, hub.as_ref(), &after),
+        "sources": sources(paths, text, hub.as_ref(), &after),
+        "backup": home.map(super::home::Home::report),
     });
     if as_json {
         out::json(&report);
@@ -464,6 +496,11 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
     }
     let invalid = valid.as_ref().err().map(String::as_str);
     print_report(p, &report, apply, action, &before.digest(), &after, invalid);
+    if let Some(h) = home {
+        for l in h.lines(apply) {
+            out::line(&l);
+        }
+    }
     Ok(())
 }
 
@@ -491,13 +528,22 @@ fn print_report(
     if let Some(e) = invalid {
         out::line(&format!("  the result is not a valid config: {e}"));
     }
-    if !apply && action != "keep" {
+    if !apply && (action != "keep" || p.flag("--backup")) {
         out::line(&format!(
-            "  write it with: cataly setup --apply --expect {before}{}",
+            "  write it with: cataly setup --apply --expect {before}{}{}",
             MANAGED
                 .iter()
                 .filter_map(|(_, _, f)| p.value(f).map(|v| format!(" {f} {v}")))
-                .collect::<String>()
+                .collect::<String>(),
+            if p.flag("--backup") {
+                format!(
+                    " --backup{}",
+                    p.value("--backup-repo")
+                        .map_or_else(String::new, |r| format!(" --backup-repo {r}"))
+                )
+            } else {
+                String::new()
+            }
         ));
     }
     let text = |s: &Value, k: &str| {

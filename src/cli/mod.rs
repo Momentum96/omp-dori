@@ -2,6 +2,7 @@
 
 mod args;
 mod client;
+mod home;
 mod install;
 mod lead;
 pub(crate) mod out;

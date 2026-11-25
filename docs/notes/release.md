@@ -22,9 +22,21 @@
 - `install.sh`, `.github/workflows/release.yml` (tag gate, CI via `workflow_call`, two builds per
   target compared with `cmp`, format/version checks, digest hand-over, signing with openssl, draft →
   upload missing → read back → publish, upgrade-from-previous step), `ci.yml` gains `workflow_call`.
-- Home backup (decision 16), partial: `[jobs.x] include_cataly = true` makes each live backup tick
-  copy the config file to `config/cataly.toml` and write an online-backup snapshot of the store to
-  `store/cataly.db` before the secret scan.
+- Home backup (decision 16): `[jobs.x] include_cataly = true` makes each live backup tick copy the
+  config file to `config/cataly.toml` and write an online-backup snapshot of the store to
+  `store/cataly.db` before the secret scan. `cataly setup --backup [--backup-repo owner/name]`
+  reads the `gh` login (`gh api user`), defaults to `<login>/cataly-home`, reads the repository
+  (`gh api repos/<o>/<n>`): private is used, public is refused, absent is only offered in the
+  preview and created with `gh repo create --private` on `--apply --create` (then read back, fail
+  closed). Applying makes the state folder a git tree (`git init`), adds the missing ignore lines
+  (token and secret names, `*.pem`, `*.key`, `*.db` except `/store/cataly.db`, `*-wal`, `*-shm`,
+  `*-journal`, temp, lock and socket files), sets `origin`, and writes `[jobs.home]` through the
+  same snapshot/`--expect` path as the rest of setup.
+- Restore (tested in `tests/owner.rs`): clone the backup, copy `store/cataly.db` to
+  `<state>/cataly.db` with mode 0600 (the hub refuses group/other access), copy
+  `config/cataly.toml` to the config file, start the hub; it opens the store and runs migrations.
+- `rollback` writes the "do not announce again" mark only after the hub stopped (or none ran), so
+  a held `--restart` leaves nothing behind.
 
 ## Signing key (owner)
 
@@ -46,7 +58,4 @@ at run time (tests use this with a throwaway key).
 
 - Onboarding OPC-66..73 (a draft module exists outside the tree, not committed), check 8.
 - Slack workspace tag on destinations (SLACK-04).
-- Decision 16: `cataly setup --backup [--backup-repo]` (gh login, private repo check/create, git
-  init, `.gitignore`, remote), and the restore test.
 - Local reproducible-build run (check 5 is CI-only: the workflow step is written).
-- `rollback` writes the silenced version before it knows the restart is not held; move it after.

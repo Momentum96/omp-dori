@@ -167,7 +167,7 @@ pub(crate) const COMMANDS: [Spec; 51] = [
     Spec {
         path: &["setup"],
         args: &[],
-        flags: &["--json", "--apply"],
+        flags: &["--json", "--apply", "--backup", "--create"],
         values: &[
             "--expect",
             "--omp",
@@ -182,8 +182,9 @@ pub(crate) const COMMANDS: [Spec; 51] = [
             "--slack-role",
             "--slack-owner",
             "--log-level",
+            "--backup-repo",
         ],
-        summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview)",
+        summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview); --backup [--backup-repo owner/name] [--create] sets up the private home backup",
     },
     Spec {
         path: &["health"],
