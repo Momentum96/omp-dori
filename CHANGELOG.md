@@ -7,6 +7,18 @@
   next to the session file never blocks a resume.
 - The message after an update and the `cataly update` line say how the lead came back: resumed, or
   started fresh with the reason. Lanes that run again are named.
+- `#cataly-ops` is a status panel instead of a stream of one-line notices: one pinned embed in
+  your language with the host, usage per provider, the lead and lanes, job health and the last
+  three events, edited in place at most once a minute. Owner-only buttons refresh it, show the
+  full usage table and mute alerts for an hour. Alerts are separate small posts only for what is
+  worth a ping (the host over the alert level for five minutes, a quota hold, a job failing twice,
+  a refused backup, GitHub news, new mail), at most one per kind an hour, edited to "resolved"
+  when the condition clears. `[ops]` sets the room, the mute length and which alerts post.
+- The pressure job raises its alert after five minutes over the line, and ready, busy and alert
+  states change only once the load crosses back 10 points, so a load near a line no longer
+  flips them every tick.
+- Setup also gives the Discord application Cataly's avatar as its icon, under the same rule as
+  the bot's images: an icon you set yourself is kept until `cataly setup --profile`.
 
 ## 0.1.1 (2026-11-26)
 

@@ -189,8 +189,8 @@ fn append_events(
     events: Vec<NewEvent>,
 ) -> rusqlite::Result<Vec<EventRecord>> {
     let mut insert = tx.prepare_cached(
-        "INSERT INTO events (at_ms, job, subject, kind, severity, text, body, body_path, urgent, dry) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO events (at_ms, job, subject, kind, severity, text, body, body_path, urgent, dry, fields) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
     let mut route = tx.prepare_cached(
         "INSERT INTO event_deliveries (event_id, destination, state, updated_ms) VALUES (?1, ?2, 'waiting', ?3)",
@@ -207,7 +207,8 @@ fn append_events(
             e.body,
             e.body_path,
             e.urgent,
-            e.dry
+            e.dry,
+            e.fields
         ])?;
         let id = tx.last_insert_rowid();
         for dest in &e.destinations {
@@ -227,6 +228,7 @@ fn append_events(
             thread: None,
             urgent: e.urgent,
             dry: e.dry,
+            fields: e.fields,
         });
     }
     Ok(out)

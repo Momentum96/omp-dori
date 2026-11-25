@@ -184,13 +184,18 @@ struct Undelivered {
 }
 
 /// One attempt; the error class decides the receipt: in doubt is recorded as uncertain and never
-/// repeated, anything else as failed. A sent post keeps its message IDs as the receipt.
+/// repeated, anything else as failed. A sent post keeps its message IDs as the receipt. Events for
+/// the ops room go to its panel, which words them and decides on an alert.
 async fn attempt(
     ctx: &Ctx,
     name: &str,
     dest: &Destination,
     event: &EventRecord,
 ) -> (Delivery, Option<String>) {
+    if ctx.config().ops.destination.as_deref() == Some(name) {
+        ctx.ops.take(event.clone());
+        return (Delivery::Sent, Some("to the ops panel".into()));
+    }
     let result = match dest {
         Destination::Command { argv } => run_command(argv, event).await.map(|()| None),
         Destination::Discord { channel } => post_discord(ctx, name, channel, event).await.map(Some),

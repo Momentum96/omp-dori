@@ -14,7 +14,7 @@ struct Migration {
     additive: bool,
 }
 
-const MIGRATIONS: [Migration; 7] = [
+const MIGRATIONS: [Migration; 8] = [
     Migration {
         sql: include_str!("migrations/0001_init.sql"),
         additive: false,
@@ -41,6 +41,10 @@ const MIGRATIONS: [Migration; 7] = [
     },
     Migration {
         sql: include_str!("migrations/0007_relays.sql"),
+        additive: true,
+    },
+    Migration {
+        sql: include_str!("migrations/0008_event_fields.sql"),
         additive: true,
     },
 ];

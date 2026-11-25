@@ -11,7 +11,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use hyper::Method;
-use hyper::header::{AUTHORIZATION, HeaderValue};
+use hyper::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use ring::digest;
 use serde_json::{Value, json};
 use tokio::time::Instant;
@@ -250,7 +250,8 @@ impl Rest {
         body: Option<Value>,
         kind: Kind,
     ) -> Outcome {
-        self.request_as(route, method, path, body, kind, true).await
+        self.request_as(route, method, path, body.map(Body::Json), kind, true)
+            .await
     }
 
     async fn request_as(
@@ -258,7 +259,7 @@ impl Rest {
         route: &str,
         method: Method,
         path: &str,
-        body: Option<Value>,
+        body: Option<Body>,
         kind: Kind,
         auth: bool,
     ) -> Outcome {
@@ -276,15 +277,24 @@ impl Rest {
             }
             tokio::time::sleep(wait).await;
         }
+        let mut headers = if auth {
+            vec![(AUTHORIZATION, self.auth.clone())]
+        } else {
+            Vec::new()
+        };
+        let bytes = match body {
+            None => None,
+            Some(Body::Json(v)) => Some(v.to_string().into_bytes()),
+            Some(Body::Form(bytes, kind)) => {
+                headers.push((CONTENT_TYPE, kind));
+                Some(bytes)
+            }
+        };
         let req = http::Request {
             method,
             path,
-            headers: if auth {
-                vec![(AUTHORIZATION, self.auth.clone())]
-            } else {
-                Vec::new()
-            },
-            json: body.map(|b| b.to_string().into_bytes()),
+            headers,
+            json: bytes,
             kind,
         };
         http::call(&self.base, &req, Policy::RELAY, |resp| {
@@ -334,7 +344,7 @@ impl Rest {
     }
 
     /// An exact ID, or the one channel in the guild with that name (DISC-OUT req. 12).
-    async fn resolve(&self, dest: &ChannelRef) -> Result<Snowflake, String> {
+    pub(crate) async fn resolve(&self, dest: &ChannelRef) -> Result<Snowflake, String> {
         let name = match dest {
             ChannelRef::Id(id) => return Ok(*id),
             ChannelRef::Name(name) => name,
@@ -479,7 +489,19 @@ impl Rest {
         body: Option<Value>,
         kind: Kind,
     ) -> Result<Value, RestError> {
-        match self.request(route, method, path, body, kind).await {
+        self.call_with(route, method, path, body.map(Body::Json), kind)
+            .await
+    }
+
+    async fn call_with(
+        &self,
+        route: &str,
+        method: Method,
+        path: &str,
+        body: Option<Body>,
+        kind: Kind,
+    ) -> Result<Value, RestError> {
+        match self.request_as(route, method, path, body, kind, true).await {
             Outcome::Done(resp) if resp.body.is_empty() => Ok(Value::Null),
             Outcome::Done(resp) => serde_json::from_slice(&resp.body).map_err(|_| RestError {
                 status: Some(resp.status),
@@ -511,11 +533,17 @@ impl Rest {
 
     /// Sets the application's flags. Discord takes only the limited intent flags from a bot.
     pub(crate) async fn set_application_flags(&self, flags: u64) -> Result<Value, RestError> {
+        self.set_application(json!({ "flags": flags })).await
+    }
+
+    /// Edits the application (`flags`, or `icon` as an image data URI); returns it as Discord
+    /// answers.
+    pub(crate) async fn set_application(&self, fields: Value) -> Result<Value, RestError> {
         self.call(
             "PATCH applications/@me",
             Method::PATCH,
             "/applications/@me",
-            Some(json!({ "flags": flags })),
+            Some(fields),
             Kind::Idempotent,
         )
         .await
@@ -676,10 +704,17 @@ impl Rest {
 
     /// Creates a message from a full body; the caller sets the nonce. Confirmed only by a body
     /// naming a message in the channel (DISC-OUT req. 5).
-    pub(crate) async fn create(
+    pub(crate) async fn create(&self, channel: Snowflake, body: Value) -> Result<Value, RestError> {
+        self.create_with(channel, body, &[]).await
+    }
+
+    /// [`Rest::create`] with files attached (`multipart/form-data`); an embed shows one with
+    /// `attachment://<name>`.
+    pub(crate) async fn create_with(
         &self,
         channel: Snowflake,
         mut body: Value,
+        files: &[Upload<'_>],
     ) -> Result<Value, RestError> {
         put(
             &mut body,
@@ -687,8 +722,13 @@ impl Rest {
             json!({ "parse": [], "replied_user": false }),
         );
         put(&mut body, "enforce_nonce", json!(true));
+        let body = if files.is_empty() {
+            Body::Json(body)
+        } else {
+            form(&body, files)
+        };
         let v = self
-            .call(
+            .call_with(
                 "POST channels/messages",
                 Method::POST,
                 &format!("/channels/{channel}/messages"),
@@ -764,6 +804,23 @@ impl Rest {
         }
     }
 
+    /// Pins a message; refused without the permission to pin.
+    pub(crate) async fn pin(
+        &self,
+        channel: Snowflake,
+        message: Snowflake,
+    ) -> Result<(), RestError> {
+        self.call(
+            "PUT channels/messages/pins",
+            Method::PUT,
+            &format!("/channels/{channel}/messages/pins/{message}"),
+            None,
+            Kind::Idempotent,
+        )
+        .await
+        .map(drop)
+    }
+
     /// Answers an interaction with its own token, within 2.5 s (DISC-OUT req. 69, 82).
     pub(crate) async fn callback(
         &self,
@@ -776,7 +833,7 @@ impl Rest {
             "POST interactions/callback",
             Method::POST,
             &path,
-            Some(body),
+            Some(Body::Json(body)),
             Kind::Once,
             false,
         );
@@ -875,6 +932,58 @@ fn list(v: Value, what: &str) -> Result<Vec<Value>, RestError> {
             uncertain: false,
         }),
     }
+}
+
+/// A request body.
+enum Body {
+    Json(Value),
+    /// A `multipart/form-data` body and its content type with the boundary.
+    Form(Vec<u8>, HeaderValue),
+}
+
+/// A file uploaded with a message.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Upload<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) mime: &'a str,
+    pub(crate) bytes: &'a [u8],
+}
+
+/// The form Discord takes for a message with files: `payload_json`, then `files[n]`; the payload
+/// lists each file under `attachments`.
+fn form(payload: &Value, files: &[Upload<'_>]) -> Body {
+    let boundary = format!("cataly-{}", nonce(&payload.to_string(), files.len()));
+    let mut payload = payload.clone();
+    let listed: Vec<Value> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| json!({ "id": i, "filename": f.name }))
+        .collect();
+    put(&mut payload, "attachments", Value::Array(listed));
+    let mut out = Vec::new();
+    let mut part = |headers: String, bytes: &[u8]| {
+        out.extend_from_slice(format!("--{boundary}\r\n{headers}\r\n\r\n").as_bytes());
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(b"\r\n");
+    };
+    part(
+        "Content-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json"
+            .into(),
+        payload.to_string().as_bytes(),
+    );
+    for (i, f) in files.iter().enumerate() {
+        part(
+            format!(
+                "Content-Disposition: form-data; name=\"files[{i}]\"; filename=\"{}\"\r\nContent-Type: {}",
+                f.name, f.mime
+            ),
+            f.bytes,
+        );
+    }
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    let kind = HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+        .unwrap_or_else(|_| HeaderValue::from_static("multipart/form-data"));
+    Body::Form(out, kind)
 }
 
 /// Sets one key of a JSON object body.

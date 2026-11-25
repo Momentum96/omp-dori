@@ -60,6 +60,8 @@ pub(crate) struct Env<T: Runtime> {
     pub(crate) events: Events,
     /// The REST client for the token the config names (shared with job posting).
     pub(crate) rest: RestFor,
+    /// The job engine, for the ops panel's buttons.
+    pub(crate) jobs: crate::jobs::Jobs,
     pub(crate) spill_dir: std::path::PathBuf,
     /// Voice's tap on the Gateway connection (voice builds only).
     pub(crate) tap: Option<Arc<Tap>>,
@@ -249,6 +251,7 @@ pub(crate) struct Intake<T: Runtime> {
     pub(super) pipeline: Arc<Pipeline<DiscordRelay, T>>,
     pub(super) store: Store,
     pub(super) lead: Arc<Lead<T>>,
+    pub(super) jobs: crate::jobs::Jobs,
     shared: Arc<Shared>,
     gateway_url: WsUrl,
     token_intents: (String, u64),
@@ -361,6 +364,7 @@ impl<T: Runtime> Intake<T> {
             pipeline,
             store: env.store.clone(),
             lead: Arc::clone(&env.lead),
+            jobs: env.jobs.clone(),
             shared: Arc::clone(shared),
             gateway_url,
             scope: Mutex::new(scope),

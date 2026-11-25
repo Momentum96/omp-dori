@@ -201,11 +201,15 @@ fn first_run_at_a_terminal_then_a_second_run_changes_nothing() {
     let check = hub.cli(&["config", "check"]);
     assert!(check.status.success(), "{check:?}");
 
-    // The bot's avatar and banner are Cataly's.
-    for field in ["avatar", "banner"] {
+    // The bot's avatar and banner are Cataly's, and so is the application's icon (the avatar).
+    for field in ["avatar", "banner", "icon"] {
         let (_, data) = fake.image(field).unwrap();
         assert!(data.starts_with("data:image/jpeg;base64,/9j/"), "{field}");
     }
+    assert_eq!(
+        fake.image("icon").unwrap().1,
+        fake.image("avatar").unwrap().1
+    );
     // The home backup's private repository and the service.
     let gh = read(&hub.root.join("bin/gh-data/calls.log"));
     assert!(
@@ -223,6 +227,7 @@ fn first_run_at_a_terminal_then_a_second_run_changes_nothing() {
 
     // A second run shows what is set and changes nothing: no question, no request that writes.
     let patches = fake.calls("PATCH", "/users/@me").len();
+    let app_patches = fake.calls("PATCH", "/applications/@me").len();
     let (code, shown) = hub.pty(&["setup"], Vec::new(), RUN);
     assert_eq!(code, Some(0), "{shown}");
     assert!(shown.contains("nothing to change"), "{shown}");
@@ -230,6 +235,7 @@ fn first_run_at_a_terminal_then_a_second_run_changes_nothing() {
     assert_eq!(read(&hub.config_path()), text);
     assert_eq!(creates(&fake).len(), 2);
     assert_eq!(fake.calls("PATCH", "/users/@me").len(), patches);
+    assert_eq!(fake.calls("PATCH", "/applications/@me").len(), app_patches);
     assert_eq!(service(&hub).1, log);
 }
 
@@ -258,9 +264,10 @@ fn a_hand_set_avatar_is_kept_until_profile_is_asked() {
         "the turned-off backup is remembered"
     );
 
-    // The owner sets his own avatar: a plain run keeps it and Cataly's banner, and does not offer
-    // the backup he turned off.
+    // The owner sets his own avatar and application icon: a plain run keeps them and Cataly's
+    // banner, and does not offer the backup he turned off.
     fake.set_image("avatar", "mine");
+    fake.set_image("icon", "my-icon");
     let (ok, again, stderr) = json_run(&hub, &["--yes"]);
     assert!(ok, "{stderr}");
     assert_eq!(again["action"], "keep", "{again}");
@@ -279,10 +286,11 @@ fn a_hand_set_avatar_is_kept_until_profile_is_asked() {
         profile["value"]
             .as_str()
             .unwrap()
-            .contains("avatar: yours, kept"),
+            .contains("avatar and icon: yours, kept"),
         "{profile}"
     );
     assert_eq!(fake.image("avatar").unwrap().0, "mine");
+    assert_eq!(fake.image("icon").unwrap().0, "my-icon");
     assert_eq!(fake.calls("PATCH", "/users/@me").len(), 1);
 
     // `--profile` applies Cataly's images again, after the same one confirmation.
@@ -291,6 +299,9 @@ fn a_hand_set_avatar_is_kept_until_profile_is_asked() {
     let (hash, data) = fake.image("avatar").unwrap();
     assert_ne!(hash, "mine");
     assert_eq!(data, first.1);
+    let (icon, icon_data) = fake.image("icon").unwrap();
+    assert_ne!(icon, "my-icon");
+    assert_eq!(icon_data, first.1, "the icon is the avatar image");
 }
 
 #[test]

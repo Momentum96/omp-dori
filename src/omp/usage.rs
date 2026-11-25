@@ -334,6 +334,14 @@ pub(crate) struct Read {
 }
 
 impl Reader {
+    /// The newest good answer without reading again, for answers that must be quick.
+    pub(crate) fn last(&self) -> Option<Snapshot> {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Returns the cached answer when younger than `cache` (unless `force`), else fetches.
     pub(crate) async fn read(&self, omp: Option<&Path>, cache: Duration, force: bool) -> Read {
         let now = now_ms();

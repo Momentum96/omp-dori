@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use super::docs::{self, BOARD};
 use super::record::Record;
 use super::{BoxFut, Lanes, need};
-use crate::host::{Control, Runtime};
+use crate::host::{Control, Runtime, Status};
+use crate::store::Store;
 use crate::sys::now_ms;
 
 /// Discord's 2000 characters with a margin (EVR req. 51).
@@ -34,6 +35,10 @@ pub(crate) trait Board: Send + Sync {
         message: &'a str,
         text: &'a str,
     ) -> BoxFut<'a, Result<(), String>>;
+    /// Pins a newly created post where the messenger and the bot's permissions allow; best effort.
+    fn board_pin<'a>(&'a self, _channel: &'a str, _message: &'a str) -> BoxFut<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,11 +122,84 @@ where
     })
 }
 
+/// One step for the post recorded under `key`, its record kept in the store: unchanged content and
+/// a pending or doubtful post are left alone; a change within the minute returns when it is due;
+/// else [`step`] runs and a new post is pinned. `force` counts an unchanged body as a change (still
+/// at most once a minute).
+pub(crate) async fn publish<B: Board + ?Sized>(
+    store: &Store,
+    board: &B,
+    key: &str,
+    channel: &str,
+    body: &str,
+    now: i64,
+    force: bool,
+) -> Option<i64> {
+    // The update time alone is no change.
+    let content = |b: &str| {
+        b.rsplit_once("\nupdated ")
+            .map_or(b, |(c, _)| c)
+            .to_string()
+    };
+    let (mut post, version) = match docs::get::<Post>(store, BOARD, key).await {
+        Ok(Some(p)) => p,
+        Ok(None) => (Post::default(), 0),
+        Err(e) => {
+            crate::log::warn("board record unreadable", &[("error", &e)]);
+            return None;
+        }
+    };
+    if post.state.is_some() || (!force && content(&post.body) == content(body)) {
+        return None;
+    }
+    if now - post.at_ms < EVERY_MS {
+        return Some(post.at_ms + EVERY_MS);
+    }
+    if force {
+        post.body.clear();
+    }
+    let created = post.message.is_none();
+    let (s, k) = (store.clone(), key.to_string());
+    let write = |pending: Post| async move {
+        docs::put(&s, BOARD, &k, &pending, Some(version))
+            .await
+            .is_ok()
+    };
+    let stored = version + i64::from(created);
+    let posted = step(board, channel, &post, body, now, write).await?;
+    if created && let Some(id) = &posted.message {
+        board.board_pin(channel, id).await;
+    }
+    if let Err(e) = docs::put(store, BOARD, key, &posted, Some(stored)).await {
+        crate::log::warn("board record not saved", &[("error", &e)]);
+    }
+    None
+}
+
 fn cut(text: &str, max: usize) -> String {
     super::evidence::cut(&super::evidence::display(text), max)
 }
 
 impl<R: Runtime> Lanes<R> {
+    /// Lanes for the ops panel: working, the other open ones, and live lane sessions.
+    pub(crate) async fn ops_counts(&self) -> (usize, usize, usize) {
+        let rows = self
+            .env
+            .store
+            .read(|r| r.lanes(true))
+            .await
+            .unwrap_or_default();
+        let running = rows
+            .iter()
+            .filter(|row| {
+                self.session(&row.key)
+                    .is_some_and(|s| s.snapshot().status == Status::Working)
+            })
+            .count();
+        let live = self.live_map().values().filter(|s| s.alive()).count();
+        (running, rows.len() - running, live)
+    }
+
     /// The body (EVR req. 51), without the update time when `stamp` is false.
     async fn board_body(&self, now: i64) -> String {
         let rows = self
@@ -285,12 +363,6 @@ impl<R: Runtime> Lanes<R> {
         }
         let now = now_ms();
         let body = self.board_body(now).await;
-        // The update time alone is no change.
-        let content = |b: &str| {
-            b.rsplit_once("\nupdated ")
-                .map_or(b, |(c, _)| c)
-                .to_string()
-        };
         let mut next: Option<i64> = None;
         for dest in destinations {
             // Discord channels go through the thread client; Telegram and Slack through the chat
@@ -303,38 +375,10 @@ impl<R: Runtime> Lanes<R> {
                 } else {
                     continue;
                 };
-            let (post, version) = match docs::get::<Post>(&self.env.store, BOARD, &dest).await {
-                Ok(Some(p)) => p,
-                Ok(None) => (Post::default(), 0),
-                Err(e) => {
-                    crate::log::warn("board record unreadable", &[("error", &e)]);
-                    continue;
-                }
-            };
-            if post.state.is_some() || content(&post.body) == content(&body) {
-                continue;
-            }
-            if now - post.at_ms < EVERY_MS {
-                let due = post.at_ms + EVERY_MS;
-                next = Some(next.map_or(due, |n| n.min(due)));
-                continue;
-            }
-            let store = self.env.store.clone();
-            let d = dest.clone();
-            let mut stored = version;
-            let write = |pending: Post| async move {
-                docs::put(&store, BOARD, &d, &pending, Some(version))
-                    .await
-                    .is_ok()
-            };
-            if post.message.is_none() {
-                stored += 1;
-            }
-            let posted = step(board, channel, &post, &body, now, write).await;
-            if let Some(p) = posted
-                && let Err(e) = docs::put(&self.env.store, BOARD, &dest, &p, Some(stored)).await
+            if let Some(due) =
+                publish(&self.env.store, board, &dest, channel, &body, now, false).await
             {
-                crate::log::warn("board record not saved", &[("error", &e)]);
+                next = Some(next.map_or(due, |n| n.min(due)));
             }
         }
         next

@@ -699,6 +699,7 @@ pub(crate) fn build(
         text: one_line(&text, TEXT_MAX),
         body: emit.body,
         body_path: emit.body_path,
+        fields: fields_json(&emit.values),
         urgent: emit.urgent,
         dry,
         destinations: if dry {
@@ -707,6 +708,24 @@ pub(crate) fn build(
             destinations.to_vec()
         },
     }
+}
+
+/// The named fields as one JSON object, `None` when there are none.
+fn fields_json(values: &[(&'static str, String)]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let map: serde_json::Map<String, serde_json::Value> = values
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), serde_json::Value::String(v.clone())))
+        .collect();
+    Some(serde_json::Value::Object(map).to_string())
+}
+
+/// One named field of a stored event.
+pub(crate) fn field(fields: Option<&str>, name: &str) -> Option<String> {
+    let map: serde_json::Value = serde_json::from_str(fields?).ok()?;
+    map.get(name)?.as_str().map(str::to_string)
 }
 
 /// Flattens control characters, line separators and bidirectional overrides to spaces and cuts to

@@ -117,7 +117,8 @@ const fn headroom() -> Headroom {
     Headroom::NoLimit
 }
 
-fn disk_path(p: &Pressure) -> PathBuf {
+/// The file system the disk check reads: the configured path, else home, else `/`.
+pub(crate) fn disk_path(p: &Pressure) -> PathBuf {
     p.disk_path
         .clone()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
@@ -130,23 +131,48 @@ pub(super) async fn tick(t: &mut Tick<'_>, p: &Pressure) -> Result<(), String> {
     Ok(())
 }
 
+/// Load margin, in percentage points, the load must cross back over before a state changes again,
+/// so a load near a threshold cannot flip it every tick.
+pub(crate) const HYSTERESIS: f64 = 10.0;
+/// How long the host stays failing a check before the alert is raised.
+pub(crate) const ALERT_AFTER_MS: i64 = 5 * 60_000;
+
 fn evaluate(t: &mut Tick<'_>, p: &Pressure, s: &Sample) {
+    let was_alert = t.memory.get("host", "alert") == Some("1");
+    let over_since = t
+        .memory
+        .get("host", "over_since")
+        .and_then(|v| v.parse::<i64>().ok());
     let mut reasons = admission(s, p);
+    // Once over the alert line, the load must fall a margin below it to count as under.
+    let line = f64::from(p.alert_load)
+        - if over_since.is_some() {
+            HYSTERESIS
+        } else {
+            0.0
+        };
     match s.load_percent {
-        Some(l) if l > f64::from(p.alert_load) => {
+        Some(l) if l > line => {
             reasons.insert(0, format!("load {l:.0}% above {}%", p.alert_load));
         }
         Some(_) => {}
         None => reasons.insert(0, "load unknown".into()),
     }
-    let alert = if reasons.is_empty() { "0" } else { "1" };
-    let was_alert = t.memory.get("host", "alert").map(str::to_string);
-    t.memory.transition("host", "alert", alert);
-    let load = s
-        .load_percent
-        .map_or_else(|| "unknown".to_string(), |l| format!("{l:.0}"));
-    if !t.first && was_alert.as_deref() != Some(alert) {
-        if alert == "1" {
+    let since = if reasons.is_empty() {
+        t.memory.clear("host", "over_since");
+        None
+    } else {
+        let since = over_since.unwrap_or(t.now);
+        t.memory
+            .transition("host", "over_since", &since.to_string());
+        Some(since)
+    };
+    // The alert is raised after five minutes over and lasts until the host is under again.
+    let alert = since.is_some_and(|s| was_alert || t.now - s >= ALERT_AFTER_MS);
+    t.memory
+        .transition("host", "alert", if alert { "1" } else { "0" });
+    if !t.first && alert != was_alert {
+        if alert {
             t.emit(
                 Emit::new(EventKind::PressureAlert, Severity::Warning, true, "host")
                     .with("reasons", reasons.join("; ")),
@@ -160,19 +186,21 @@ fn evaluate(t: &mut Tick<'_>, p: &Pressure, s: &Sample) {
             ));
         }
     }
-    let ready = if s.load_percent.is_some_and(|l| l < f64::from(p.ready_load)) {
-        "1"
-    } else {
-        "0"
-    };
-    let was_ready = t.memory.get("host", "ready").map(str::to_string);
-    t.memory.transition("host", "ready", ready);
-    if !t.first && was_ready.as_deref() != Some(ready) {
-        let kind = if ready == "1" {
+    let was_ready = t.memory.get("host", "ready") == Some("1");
+    let ready_line = f64::from(p.ready_load) + if was_ready { HYSTERESIS } else { 0.0 };
+    let ready = s.load_percent.is_some_and(|l| l < ready_line);
+    let known = t.memory.get("host", "ready").is_some();
+    t.memory
+        .transition("host", "ready", if ready { "1" } else { "0" });
+    if !t.first && known && ready != was_ready {
+        let kind = if ready {
             EventKind::PressureReady
         } else {
             EventKind::PressureBusy
         };
+        let load = s
+            .load_percent
+            .map_or_else(|| "unknown".to_string(), |l| format!("{l:.0}"));
         t.emit(Emit::new(kind, Severity::Info, false, "host").with("load", load));
     }
 }
@@ -256,7 +284,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notices_only_on_change_after_the_baseline() {
+    async fn notices_after_five_minutes_with_hysteresis() {
         let (ctx, _stop, _dir) = ctx_with("[jobs.host]\nkind = \"pressure\"\n", "pressure-ctx");
         let job = ctx.config().jobs.get("host").cloned().unwrap();
         let mut t = Tick {
@@ -269,21 +297,47 @@ mod tests {
             now: 0,
             soft_failure: None,
         };
-        let busy = Sample {
-            load_percent: Some(200.0),
+        let load = |l: f64| Sample {
+            load_percent: Some(l),
             ..good()
         };
-        evaluate(&mut t, &limits(), &busy);
-        assert!(t.emits.is_empty(), "baseline");
+        let at = |t: &mut Tick<'_>, minute: i64, l: f64| -> Vec<EventKind> {
+            t.now = minute * 60_000;
+            let before = t.emits.len();
+            evaluate(t, &limits(), &load(l));
+            t.emits.iter().skip(before).map(|e| e.kind).collect()
+        };
+        assert!(at(&mut t, 0, 200.0).is_empty(), "baseline");
         t.first = false;
-        evaluate(&mut t, &limits(), &busy);
-        assert!(t.emits.is_empty(), "unchanged");
-        evaluate(&mut t, &limits(), &good());
-        let kinds: Vec<EventKind> = t.emits.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, [EventKind::PressureClear, EventKind::PressureReady]);
-        evaluate(&mut t, &limits(), &busy);
-        let kinds: Vec<EventKind> = t.emits.iter().skip(2).map(|e| e.kind).collect();
-        assert_eq!(kinds, [EventKind::PressureAlert, EventKind::PressureBusy]);
+        assert!(at(&mut t, 1, 200.0).is_empty(), "not five minutes yet");
+        assert!(
+            at(&mut t, 4, 145.0).is_empty(),
+            "inside the margin stays over"
+        );
+        assert_eq!(at(&mut t, 5, 200.0), [EventKind::PressureAlert]);
+        assert!(at(&mut t, 6, 200.0).is_empty(), "unchanged");
+        assert_eq!(
+            at(&mut t, 7, 40.0),
+            [EventKind::PressureClear, EventKind::PressureReady]
+        );
+        // Short spikes over the alert line never last five minutes: nothing is said.
+        for minute in 8..30 {
+            let l = if minute % 2 == 0 { 160.0 } else { 100.0 };
+            let said = at(&mut t, minute, l);
+            assert!(
+                said.iter().all(|k| *k != EventKind::PressureAlert),
+                "{said:?}"
+            );
+        }
+        // A load wobbling around the ready line does not flip ready and busy.
+        at(&mut t, 30, 40.0);
+        for minute in 32..50 {
+            let l = if minute % 2 == 0 { 79.0 } else { 86.0 };
+            assert!(at(&mut t, minute, l).is_empty(), "minute {minute}");
+        }
+        assert_eq!(at(&mut t, 50, 95.0), [EventKind::PressureBusy]);
+        assert!(at(&mut t, 51, 85.0).is_empty(), "busy until under the line");
+        assert_eq!(at(&mut t, 52, 79.0), [EventKind::PressureReady]);
         let live = sample(Path::new("/")).await;
         assert!(live.load_percent.is_some() && live.disk_free_gb.is_some());
     }

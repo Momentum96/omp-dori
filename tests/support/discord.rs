@@ -36,7 +36,10 @@ pub struct Seen {
     pub path: String,
     pub query: String,
     pub authorization: Option<String>,
+    /// A JSON body, or a multipart body's `payload_json`.
     pub body: Value,
+    /// A multipart body's files, by name, each with its size.
+    pub files: Vec<(String, usize)>,
 }
 
 /// A command for the Gateway connection.
@@ -319,7 +322,8 @@ impl FakeDiscord {
             .insert(field.into(), (hash.into(), String::new()));
     }
 
-    /// The bot's avatar or banner: its hash and the data URI it was set from.
+    /// The bot's avatar or banner, or the application's icon: its hash and the data URI it was set
+    /// from.
     pub fn image(&self, field: &str) -> Option<(String, String)> {
         self.state.lock().unwrap().profile.get(field).cloned()
     }
@@ -475,6 +479,7 @@ async fn gateway(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>, port: 
 /// The application object, owned by [`APP_OWNER`].
 fn application(s: &State) -> Value {
     json!({ "id": APP, "flags": s.app_flags, "interactions_endpoint_url": null,
+        "icon": s.profile.get("icon").map(|(h, _)| h.clone()),
         "owner": { "id": APP_OWNER, "username": "fake-owner" }, "team": null })
 }
 
@@ -509,9 +514,15 @@ fn setup_route(
     Some(match (method, parts) {
         ("PATCH", ["applications", "@me"]) => {
             // Only the limited intent flags may be changed by a bot.
-            let limited = (1 << 13) | (1 << 15) | (1 << 19);
-            let asked = body["flags"].as_u64().unwrap_or(0);
-            s.app_flags = (s.app_flags & !limited) | (asked & limited);
+            if let Some(asked) = body["flags"].as_u64() {
+                let limited = (1 << 13) | (1 << 15) | (1 << 19);
+                s.app_flags = (s.app_flags & !limited) | (asked & limited);
+            }
+            if let Some(data) = body["icon"].as_str() {
+                s.next_id += 1;
+                let hash = format!("icon-{}", s.next_id);
+                s.profile.insert("icon".into(), (hash, data.into()));
+            }
             reply(200, &application(s))
         }
         ("GET" | "PATCH", ["users", "@me"]) => {
@@ -563,8 +574,9 @@ async fn answer(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    let content_type = req.headers().get("content-type").cloned();
     let bytes = req.into_body().collect().await.unwrap().to_bytes();
-    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let (body, files) = decode(content_type.as_ref().and_then(|v| v.to_str().ok()), &bytes);
     let mut s = state.lock().unwrap();
     let refused = s
         .token
@@ -576,6 +588,7 @@ async fn answer(
         query: query.clone(),
         authorization,
         body: body.clone(),
+        files,
     });
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     if refused {
@@ -638,13 +651,28 @@ async fn answer(
         }
         ("POST", ["channels", id, "messages"]) => create(&mut s, id, &body),
         ("PATCH", ["channels", id, "messages", mid]) => edit_message(&mut s, id, mid, &body),
-        ("PUT", ["channels", _, "messages", _, "reactions", _, "@me"]) => reply(204, &Value::Null),
+        (
+            "PUT",
+            ["channels", _, "messages", _, "reactions", _, "@me"]
+            | ["channels", _, "messages", "pins", _],
+        ) => reply(204, &Value::Null),
         ("POST", ["channels", _, "typing"] | ["interactions", _, _, "callback"]) => {
             reply(204, &Value::Null)
         }
         _ => reply(404, &json!({ "message": "Unknown", "code": 0 })),
     };
     Ok(response)
+}
+
+/// A request body: JSON, or a multipart body's `payload_json` with its files.
+fn decode(content_type: Option<&str>, bytes: &[u8]) -> (Value, Vec<(String, usize)>) {
+    match content_type.and_then(|c| c.strip_prefix("multipart/form-data; boundary=")) {
+        Some(boundary) => multipart(bytes, boundary),
+        None => (
+            serde_json::from_slice(bytes).unwrap_or(Value::Null),
+            Vec::new(),
+        ),
+    }
 }
 
 /// A channel edit: a thread's name or archived flag.
@@ -673,11 +701,10 @@ fn edit_message(s: &mut State, id: &str, mid: &str, body: &Value) -> Response<Fu
         .get_mut(id)
         .and_then(|l| l.iter_mut().find(|m| m["id"] == mid))
     {
-        if let Some(c) = body.get("content") {
-            m["content"] = c.clone();
-        }
-        if let Some(c) = body.get("components") {
-            m["components"] = c.clone();
+        for key in ["content", "components", "embeds"] {
+            if let Some(c) = body.get(key) {
+                m[key] = c.clone();
+            }
         }
     }
     reply(200, &json!({ "id": mid, "channel_id": id }))
@@ -710,7 +737,8 @@ fn create(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
         s.nonces.insert(nonce, message);
     }
     let mut created = json!({ "id": message.to_string(), "channel_id": id, "content": body["content"],
-                "author": {"id": BOT, "bot": true}, "type": 0, "components": body["components"] });
+                "author": {"id": BOT, "bot": true}, "type": 0, "components": body["components"],
+                "embeds": body["embeds"], "attachments": body["attachments"] });
     if let Some(r) = &reference {
         created["type"] = json!(19);
         created["message_reference"] = json!({"message_id": r, "channel_id": id});
@@ -730,6 +758,42 @@ fn create(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
         return reply(status, &json!({ "message": "scripted" }));
     }
     reply(200, &created)
+}
+
+/// The `payload_json` part of a multipart body and the name and size of each file part.
+fn multipart(bytes: &[u8], boundary: &str) -> (Value, Vec<(String, usize)>) {
+    let delimiter = format!("--{boundary}");
+    let mut payload = Value::Null;
+    let mut files = Vec::new();
+    let find = |hay: &[u8], needle: &[u8], from: usize| {
+        hay.get(from..)?
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|p| p + from)
+    };
+    let mut at = 0;
+    while let Some(start) = find(bytes, delimiter.as_bytes(), at) {
+        let part_start = start + delimiter.len() + 2;
+        let Some(end) = find(bytes, delimiter.as_bytes(), part_start) else {
+            break;
+        };
+        let part = &bytes[part_start..end.saturating_sub(2).max(part_start)];
+        if let Some(split) = find(part, b"\r\n\r\n", 0) {
+            let headers = String::from_utf8_lossy(&part[..split]).to_string();
+            let data = &part[split + 4..];
+            if headers.contains("name=\"payload_json\"") {
+                payload = serde_json::from_slice(data).unwrap_or(Value::Null);
+            } else if let Some(name) = headers
+                .split("filename=\"")
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+            {
+                files.push((name.to_string(), data.len()));
+            }
+        }
+        at = end;
+    }
+    (payload, files)
 }
 
 impl FakeDiscord {

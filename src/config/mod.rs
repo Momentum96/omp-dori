@@ -5,6 +5,7 @@
 
 pub(crate) mod coord;
 pub(crate) mod lanes;
+pub(crate) mod ops;
 pub(crate) mod owner;
 pub(crate) mod relays;
 pub(crate) mod release;
@@ -62,6 +63,7 @@ pub(crate) struct Config {
     pub(crate) coord: coord::CoordSettings,
     pub(crate) update: release::UpdateSettings,
     pub(crate) usage: release::UsageSettings,
+    pub(crate) ops: ops::OpsSettings,
     pub(crate) setup: SetupSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
@@ -83,6 +85,7 @@ impl Default for Config {
             context: relays::ContextSettings::default(),
             update: release::UpdateSettings::default(),
             usage: release::UsageSettings::default(),
+            ops: ops::OpsSettings::default(),
             setup: SetupSettings::default(),
             outgoing: Checks::default(),
             limits: LimitsSettings {
@@ -453,6 +456,12 @@ pub(crate) fn parse(text: &str) -> Result<Config, Vec<ConfigError>> {
             }
         }
     }
+    ops::parse(
+        &mut errors,
+        &mut root,
+        &config.destinations,
+        &mut config.ops,
+    );
     for name in config.update.destinations.iter().flatten() {
         if !config.destinations.contains_key(name) {
             errors.push(ConfigError {

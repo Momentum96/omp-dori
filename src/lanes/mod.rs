@@ -9,7 +9,7 @@
 
 pub(crate) mod board;
 pub(crate) mod checks;
-mod docs;
+pub(crate) mod docs;
 pub(crate) mod evidence;
 mod git;
 mod life;
