@@ -90,7 +90,7 @@ impl Board for ChatBoards {
             }
             if let Some(channel) = dest.strip_prefix("slack:") {
                 let api = slack::Api::from_config(&config, &self.config_file)?;
-                return slack::edit(&api, channel, message, text)
+                return slack::edit(&api, &self.store, channel, message, text)
                     .await
                     .map_err(|e| e.to_string());
             }

@@ -196,6 +196,15 @@ impl<R: Runtime> Lanes<R> {
         self.live_map().get(key).filter(|s| s.alive()).cloned()
     }
 
+    /// Live lanes that may not be stopped now, with the reason.
+    pub(crate) fn busy(&self) -> Vec<(String, &'static str)> {
+        self.live_map()
+            .iter()
+            .filter(|(_, s)| s.alive())
+            .filter_map(|(key, s)| s.snapshot().busy().map(|why| (key.clone(), why)))
+            .collect()
+    }
+
     fn mailbox(&self, key: &str) -> Mailbox {
         Mailbox {
             target: key.to_string(),

@@ -76,7 +76,7 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
             "OMP's extension folder links this version's bridge",
             None,
         ),
-        Err(e) => check("bridge", "warn", e, Some("cataly bridge install")),
+        Err(e) => check("bridge", "warn", e, Some("cataly status --install")),
     });
     if config
         .destinations

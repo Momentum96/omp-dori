@@ -220,6 +220,19 @@ pub(crate) struct Snapshot {
     pub(crate) last_event: u64,
 }
 
+impl Snapshot {
+    /// Why this session may not be stopped now: a running turn or an open dialog (IR req. 33).
+    pub(crate) fn busy(&self) -> Option<&'static str> {
+        if !self.dialogs.is_empty() {
+            Some("waits on a dialog")
+        } else if self.status == Status::Working {
+            Some("is working")
+        } else {
+            None
+        }
+    }
+}
+
 /// A page of numbered events; `missed` when the caller's number is older than the oldest kept.
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct EventPage {

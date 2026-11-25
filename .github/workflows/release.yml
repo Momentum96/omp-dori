@@ -1,0 +1,238 @@
+name: release
+
+# Releases come only from here (DESIGN 11.4; IR req. 41-48): a pushed tag v<version> whose commit is
+# on main. The full CI runs on the tagged commit; each target builds twice on its native runner and
+# the two binaries must be identical; the publish job writes SHA256SUMS, signs it with the release
+# key, creates or continues a draft, uploads missing assets, reads every asset back, then publishes.
+#
+# The owner provides, once:
+#   secret   CATALY_SIGNING_KEY  the ed25519 private key, PEM (openssl genpkey -algorithm ed25519)
+#   variable CATALY_RELEASE_KEY  its public key, 64 hex digits; compiled into the binary and printed
+#                                in install.sh
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gate:
+    name: tag and ancestry
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: check
+        name: Tag equals v + package version; commit is on main; release key set
+        shell: bash
+        env:
+          RELEASE_KEY: ${{ vars.CATALY_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version" || { echo "tag $GITHUB_REF_NAME is not v$version"; exit 1; }
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "the tagged commit is not on main"; exit 1; }
+          echo "$RELEASE_KEY" | grep -Eq '^[0-9a-f]{64}$' || { echo "repository variable CATALY_RELEASE_KEY is not 64 hex digits"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: gate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build twice (${{ matrix.target }})
+    needs: [gate, ci]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x64
+            os: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+            format: "ELF 64-bit LSB.*x86-64"
+          - target: darwin-arm64
+            os: macos-latest
+            triple: aarch64-apple-darwin
+            format: "Mach-O 64-bit.*arm64"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    outputs:
+      linux-x64: ${{ steps.hash.outputs.linux-x64 }}
+      darwin-arm64: ${{ steps.hash.outputs.darwin-arm64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml) and target
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.triple }}
+          if [ "${{ matrix.target }}" = linux-x64 ]; then sudo apt-get install -y musl-tools; fi
+      - name: Two builds in two fresh folders, compared byte for byte (IR req. 43-44)
+        shell: bash
+        env:
+          CATALY_RELEASE_KEY: ${{ vars.CATALY_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          export CATALY_COMMIT="$GITHUB_SHA"
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export CARGO_HOME_REMAP="$(cd ~ && pwd)/.cargo"
+          rustc_sysroot=$(rustc --print sysroot)
+          for n in 1 2; do
+            dir="$RUNNER_TEMP/build-$n"
+            rm -rf "$dir"
+            mkdir -p "$dir"
+            git archive HEAD | tar -x -C "$dir"
+            ( cd "$dir"
+              RUSTFLAGS="--remap-path-prefix=$dir=/cataly --remap-path-prefix=$CARGO_HOME_REMAP=/cargo --remap-path-prefix=$rustc_sysroot=/rustc" \
+                CARGO_TARGET_DIR="$dir/target" \
+                cargo build --locked --release --target ${{ matrix.triple }} --config 'profile.release.incremental=false' )
+            cp "$dir/target/${{ matrix.triple }}/release/cataly" "$RUNNER_TEMP/cataly-$n"
+          done
+          cmp "$RUNNER_TEMP/cataly-1" "$RUNNER_TEMP/cataly-2"
+          echo "reproducible: two builds are identical"
+      - name: Executable format and version report (IR req. 23, 44)
+        shell: bash
+        run: |
+          set -euo pipefail
+          b="$RUNNER_TEMP/cataly-1"
+          file "$b" | grep -Eq "${{ matrix.format }}"
+          "$b" version --json | tee "$RUNNER_TEMP/report.json"
+          grep -q '"target":"${{ matrix.target }}"' "$RUNNER_TEMP/report.json"
+          grep -q "\"version\":\"${{ needs.gate.outputs.version }}\"" "$RUNNER_TEMP/report.json"
+          echo "binary bytes (${{ matrix.target }}): $(wc -c < "$b" | tr -d ' ')"
+          mkdir -p out
+          cp "$b" "out/cataly-${{ needs.gate.outputs.version }}-${{ matrix.target }}"
+      - id: hash
+        shell: bash
+        run: |
+          f="out/cataly-${{ needs.gate.outputs.version }}-${{ matrix.target }}"
+          if command -v sha256sum > /dev/null; then h=$(sha256sum "$f" | cut -d' ' -f1); else h=$(shasum -a 256 "$f" | cut -d' ' -f1); fi
+          echo "${{ matrix.target }}=$h" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: binary-*
+          path: assets
+          merge-multiple: true
+      - name: Re-check the handed-over digests (IR req. 45), write the extension, install.sh, SHA256SUMS and its signature
+        shell: bash
+        env:
+          V: ${{ needs.gate.outputs.version }}
+          LINUX: ${{ needs.build.outputs.linux-x64 }}
+          DARWIN: ${{ needs.build.outputs.darwin-arm64 }}
+          RELEASE_KEY: ${{ vars.CATALY_RELEASE_KEY }}
+          SIGNING_KEY: ${{ secrets.CATALY_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          cd assets
+          test "$(sha256sum "cataly-$V-linux-x64" | cut -d' ' -f1)" = "$LINUX"
+          test "$(sha256sum "cataly-$V-darwin-arm64" | cut -d' ' -f1)" = "$DARWIN"
+          chmod 755 "cataly-$V-linux-x64"
+          "./cataly-$V-linux-x64" extension > "cataly-$V.ts"
+          sed "s/@RELEASE_KEY@/$RELEASE_KEY/" ../install.sh > install.sh
+          for f in $(ls | LC_ALL=C sort); do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done > SHA256SUMS
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
+          derived=$(openssl pkey -in "$RUNNER_TEMP/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n')
+          test "$derived" = "$RELEASE_KEY" || { echo "CATALY_SIGNING_KEY does not match CATALY_RELEASE_KEY"; exit 1; }
+          openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/key.pem" -in SHA256SUMS -out "$RUNNER_TEMP/sig.bin"
+          rm -f "$RUNNER_TEMP/key.pem"
+          od -An -tx1 -v "$RUNNER_TEMP/sig.bin" | tr -d ' \n' > SHA256SUMS.sig
+          cat SHA256SUMS
+      - name: Install check with the signed assets
+        shell: bash
+        env:
+          V: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          R=$(mktemp -d /tmp/cy.XXXXXX)
+          mkdir -p "$R/home"
+          HOME="$R/home" sh assets/install.sh "$PWD/assets"
+          HOME="$R/home" "$R/home/.local/bin/cataly" status --install
+      - name: Upgrade from the previous published release reads its config and state (IR req. 55)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          previous=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --json tagName --jq '.[].tagName' | grep -vx "v$V" | head -n 1 || true)
+          if [ -z "$previous" ]; then
+            echo "no earlier published release yet: this check starts with the second release"
+            exit 0
+          fi
+          R=$(mktemp -d /tmp/cy.XXXXXX)
+          export HOME="$R/home" XDG_CONFIG_HOME="$R/config" XDG_STATE_HOME="$R/state" XDG_RUNTIME_DIR="$R/run"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME/cataly" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$R/prev"
+          gh release download "$previous" --repo "$GITHUB_REPOSITORY" --dir "$R/prev"
+          sh "$R/prev/install.sh" "$R/prev"
+          cataly="$HOME/.local/bin/cataly"
+          printf '[hub]\nlog_level = "info"\n[update]\ncheck = false\n' > "$XDG_CONFIG_HOME/cataly/config.toml"
+          chmod 600 "$XDG_CONFIG_HOME/cataly/config.toml"
+          "$cataly" hub 2> "$R/old.err" & hub=$!
+          for _ in $(seq 500); do "$cataly" status > /dev/null 2>&1 && break; sleep 0.02; done
+          "$cataly" status --json > "$R/old.json"
+          kill -TERM "$hub"; wait "$hub" || true
+          "$cataly" update --from "$PWD/assets"
+          "$cataly" hub 2> "$R/new.err" & hub=$!
+          for _ in $(seq 500); do "$cataly" status > /dev/null 2>&1 && break; sleep 0.02; done
+          "$cataly" status --json | tee "$R/new.json"
+          kill -TERM "$hub"; wait "$hub" || true
+          grep -q "\"version\":\"$V\"" "$R/new.json"
+          grep -q '"config_error":null' "$R/new.json" || ! grep -q '"config_error"' "$R/new.json"
+          test -n "$(ls "$XDG_STATE_HOME/cataly/backup" 2>/dev/null)" || echo "no store migration between these releases"
+      - name: Draft, upload missing assets, read every asset back, publish (IR req. 46-47)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd assets
+          state=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = none ]; then
+            pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "Cataly ${TAG#v}. Install: curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/install.sh | sh -s $TAG" $pre
+            state=true
+          fi
+          present=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for f in *; do
+            if printf '%s\n' "$present" | grep -qx "$f"; then
+              continue
+            fi
+            test "$state" = true || { echo "published release $TAG lacks $f; nothing is replaced"; exit 1; }
+            gh release upload "$TAG" "$f"
+          done
+          back=$(mktemp -d)
+          gh release download "$TAG" --dir "$back"
+          for f in *; do
+            test "$(sha256sum "$f" | cut -d' ' -f1)" = "$(sha256sum "$back/$f" | cut -d' ' -f1)" || { echo "$f on the release differs; it is never replaced"; exit 1; }
+          done
+          test "$(ls "$back" | wc -l)" = "$(ls | wc -l)" || { echo "the release carries other assets"; exit 1; }
+          if [ "$state" = true ]; then gh release edit "$TAG" --draft=false; fi

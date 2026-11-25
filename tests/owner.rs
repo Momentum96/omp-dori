@@ -280,6 +280,168 @@ fn backup_refuses_secrets_and_big_files_and_alerts_on_change_only() {
     assert!(hub.stop().success());
 }
 
+fn git_out(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// A hub with fake `omp` and `gh` (first on PATH) and a private config folder, as setup needs.
+fn backup_sandbox() -> TestHub {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.install_fake("gh");
+    hub.write_config(&format!("[omp]\npath = \"{}\"\n", omp.display()));
+    std::fs::set_permissions(
+        hub.root.join("config/cataly"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let mut path = std::ffi::OsString::from(hub.root.join("bin"));
+    path.push(":");
+    path.push(support::path_without_omp());
+    hub.env.push(("PATH".into(), path.into()));
+    hub
+}
+
+/// Decision 16: `setup --backup` reads the gh login, refuses a public repository, only offers an
+/// absent one and creates it private after `--create`, makes the state folder a git tree with its
+/// ignore list and remote, and adds the job. Restore: snapshot, change, restore from a local bare
+/// repository; the store opens (with its migrations) and the config is the one backed up.
+#[test]
+fn home_backup_setup_and_restore() {
+    let mut hub = backup_sandbox();
+    gh_json(
+        &hub,
+        "user",
+        &json!({ "login": "owner", "name": "Owner", "id": 7 }),
+    );
+    let calls =
+        || std::fs::read_to_string(hub.root.join("bin/gh-data/calls.log")).unwrap_or_default();
+    let state = hub.state();
+
+    gh_json(
+        &hub,
+        "repos_owner_cataly-home",
+        &json!({ "private": false }),
+    );
+    let out = hub.cli(&["setup", "--backup", "--json"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("public"),
+        "{out:?}"
+    );
+    hub.fixture("gh", "repos_owner_cataly-home.json", None);
+
+    let preview = hub.json(&["setup", "--backup", "--json"]);
+    assert_eq!(preview["backup"]["state"], "absent", "{preview}");
+    assert_eq!(preview["backup"]["repository"], "owner/cataly-home");
+    let digest = preview["before"].as_str().unwrap().to_string();
+    let out = hub.cli(&["setup", "--backup", "--apply", "--expect", &digest]);
+    assert!(!out.status.success(), "an absent repository needs --create");
+    assert!(!calls().contains("repo create"));
+    assert!(!state.join(".git").exists());
+
+    let out = hub.cli(&[
+        "setup", "--backup", "--apply", "--create", "--expect", &digest,
+    ]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(calls().contains("repo create owner/cataly-home --private"));
+    let ignore = std::fs::read_to_string(state.join(".gitignore")).unwrap();
+    for line in [
+        "*token*",
+        "*.db",
+        "!/store/cataly.db",
+        "*-wal",
+        "*-shm",
+        "*-journal",
+    ] {
+        assert!(ignore.lines().any(|l| l == line), "{line} in {ignore}");
+    }
+    let remote = git_out(&state, &["remote", "get-url", "origin"]);
+    assert_eq!(
+        String::from_utf8_lossy(&remote.stdout).trim(),
+        "https://github.com/owner/cataly-home.git"
+    );
+    let config = std::fs::read_to_string(hub.config_path()).unwrap();
+    assert!(
+        config.contains("[jobs.home]") && config.contains("include_cataly = true"),
+        "{config}"
+    );
+    let again = hub.json(&["setup", "--backup", "--json"]);
+    assert_eq!(again["backup"]["state"], "private");
+    assert_eq!(again["action"], "keep", "applying twice changes nothing");
+
+    // Snapshot: the first tick pushes to a local bare repository.
+    let bare = hub.root.join("bare.git");
+    git(&hub.root, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    git(
+        &state,
+        &["remote", "set-url", "origin", bare.to_str().unwrap()],
+    );
+    hub.start();
+    hub.until(Duration::from_secs(30), || {
+        git_out(&bare, &["rev-parse", "--verify", "-q", "main"])
+            .status
+            .success()
+            .then_some(())
+    });
+    let tree = git_out(&bare, &["ls-tree", "-r", "--name-only", "main"]);
+    let tree = String::from_utf8_lossy(&tree.stdout).to_string();
+    assert!(tree.lines().any(|l| l == "store/cataly.db"), "{tree}");
+    assert!(tree.lines().any(|l| l == "config/cataly.toml"), "{tree}");
+    assert!(
+        !tree
+            .lines()
+            .any(|l| l == "cataly.db" || l.ends_with("-wal")),
+        "{tree}"
+    );
+    let events = hub.events().len();
+    assert!(events > 0);
+    assert!(hub.stop().success());
+    restore_and_open(&mut hub, &bare, &config, events);
+}
+
+/// Change (the config is edited, the live store is lost), then restore from the bare repository:
+/// the config is the one backed up and the store opens with the events of the snapshot.
+fn restore_and_open(hub: &mut TestHub, bare: &std::path::Path, config: &str, events: usize) {
+    let state = hub.state();
+    hub.write_config("# changed\n");
+    for f in ["cataly.db", "cataly.db-wal", "cataly.db-shm"] {
+        let _ = std::fs::remove_file(state.join(f));
+    }
+    let copy = hub.root.join("restore");
+    git(
+        &hub.root,
+        &[
+            "clone",
+            "-q",
+            bare.to_str().unwrap(),
+            copy.to_str().unwrap(),
+        ],
+    );
+    std::fs::copy(copy.join("store/cataly.db"), state.join("cataly.db")).unwrap();
+    std::fs::set_permissions(
+        state.join("cataly.db"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .unwrap();
+    let restored = std::fs::read_to_string(copy.join("config/cataly.toml")).unwrap();
+    assert_eq!(restored, config);
+    hub.write_config(&restored);
+    hub.start();
+    let after = hub.events();
+    assert!(
+        !after.is_empty() && after.len() <= events + 4,
+        "{} vs {events}",
+        after.len()
+    );
+    assert!(hub.stop().success());
+}
+
 /// Check 10 (health part): a problem counts after two bad ticks, is reported once, and its
 /// clearing is reported once; `cataly health` shows it meanwhile.
 #[test]

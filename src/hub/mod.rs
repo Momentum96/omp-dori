@@ -6,6 +6,7 @@
 
 pub(crate) mod bridge;
 pub(crate) mod dispatch;
+mod onboarding;
 pub(crate) mod socket;
 mod streams;
 pub(crate) mod supervisor;
@@ -164,6 +165,29 @@ impl Hub {
 
     fn config(&self) -> Arc<Config> {
         Arc::clone(&self.config_tx.borrow())
+    }
+
+    /// Stops the hub in order unless a session works or waits on a dialog (IR req. 33); busy
+    /// sessions are never stopped.
+    fn request_stop(&self) -> Result<(), String> {
+        let mut busy: Vec<String> = self
+            .lead
+            .busy()
+            .map(|why| format!("the lead {why}"))
+            .into_iter()
+            .collect();
+        busy.extend(
+            self.lanes
+                .busy()
+                .into_iter()
+                .map(|(key, why)| format!("lane {key} {why}")),
+        );
+        if !busy.is_empty() {
+            return Err(format!("busy: {}", busy.join("; ")));
+        }
+        log::info("orderly stop requested", &[]);
+        self.supervisor.request_exit(exit::OK);
+        Ok(())
     }
 
     /// The Discord client when a token is set up; `None` otherwise.
@@ -374,6 +398,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         });
     }
     spawn_lead_tasks(&hub, &supervisor, &shutdown_rx);
+    spawn_release_tasks(&jobs, &supervisor, paths, &shutdown_rx);
     streams.resume().await;
     let heartbeat = spawn_background(&supervisor, paths, omp, config_rx, &store, &shutdown_rx);
     let notifier = Arc::new(Notifier::from_env());
@@ -678,6 +703,26 @@ fn spawn_background(
         });
     }
     heartbeat
+}
+
+/// The daily release notice and the opt-in usage counts.
+fn spawn_release_tasks(
+    jobs: &Jobs,
+    supervisor: &Supervisor,
+    paths: &Paths,
+    shutdown: &watch::Receiver<bool>,
+) {
+    let root = crate::sys::install::Layout::of_running().map_or_default(|l| l.root);
+    {
+        let (jobs, stop) = (jobs.clone(), shutdown.clone());
+        supervisor.spawn("update", move || {
+            crate::jobs::update::run(jobs.clone(), root.clone(), stop.clone())
+        });
+    }
+    let (jobs, stop, state) = (jobs.clone(), shutdown.clone(), paths.state_dir.clone());
+    supervisor.spawn("usage", move || {
+        crate::jobs::usage::run(jobs.clone(), state.clone(), stop.clone())
+    });
 }
 
 async fn announce(jobs: &Jobs, marker: &Path, job_count: usize) {

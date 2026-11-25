@@ -105,6 +105,10 @@ pub(crate) enum EventKind {
     ItemQuestion,
     /// The daily owner-notes refresh request (COORD req. 49).
     NotesRefresh,
+    /// A newer stable release is out (IR req. 37).
+    UpdateAvailable,
+    /// Usage counts are on (COORD req. 69).
+    UsageOn,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -115,7 +119,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 64] = [
+const KINDS: [KindRow; 66] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -510,6 +514,18 @@ const KINDS: [KindRow; 64] = [
         "notes.refresh",
         &["date", "procedure"],
         "owner-notes refresh for {date}: follow {procedure}",
+    ),
+    (
+        EventKind::UpdateAvailable,
+        "update.available",
+        &["version", "installed"],
+        "Cataly {version} is available (installed: {installed}); install it with `cataly update`",
+    ),
+    (
+        EventKind::UsageOn,
+        "usage.on",
+        &["endpoint"],
+        "usage counts are on and go to {endpoint}; set [usage] enabled = false to turn them off",
     ),
 ];
 

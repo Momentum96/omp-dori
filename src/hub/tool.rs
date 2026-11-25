@@ -44,7 +44,10 @@ pub(crate) fn definition() -> Value {
     lane.review (pr owner/name#N, model?), lane.merge (pr, dry_run?; only with the owner's authorisation). Files and \
     rules: lane.publish (key, path, title?, visibility private|public), lane.files (key?), lane.rule-add (text, \
     evidence, scope global|repo, key?), lane.rule-retire (id), lane.rules, lane.board-found (destination, message). \
-    Host: lane.admission (cwd?), lane.slots.",
+    Host: lane.admission (cwd?), lane.slots. Onboarding (read-only while it runs: posts, questions, lanes and jobs are \
+    refused): onboarding (state), onboarding.start (reopen?, message?: only when the owner raised it again), \
+    onboarding.consent (answer yes|no, message), onboarding.tool (name, answer allowed|declined, reads, message), \
+    onboarding.finish (text: short summary of what is known, tools used or skipped, and gaps).",
         "parameters": {
             "type": "object",
             "properties": {
@@ -71,7 +74,10 @@ pub(crate) fn definition() -> Value {
                 "low": { "type": "boolean", "description": "matches wait for the next wake" },
                 "since": text("ISO instant the digest starts at"),
                 "all": { "type": "boolean" },
-                "calls": { "type": "array", "items": { "type": "string" } }
+                "calls": { "type": "array", "items": { "type": "string" } },
+                "answer": text("onboarding: yes|no for consent, allowed|declined for a tool"),
+                "reads": text("onboarding: what the tool would read and why"),
+                "reopen": { "type": "boolean", "description": "onboarding.start after the owner raised it again" }
             },
             "required": ["op"]
         }
@@ -113,6 +119,9 @@ fn done(d: LeadDone, ok: String) -> Result<String, String> {
 /// Runs one call; `Err` is shown to the model as a tool error.
 pub(crate) async fn call(hub: &Arc<Hub>, input: &Value) -> Result<String, String> {
     let op = s(input, "op").unwrap_or_default();
+    if let Some(reply) = super::onboarding::call(hub, op, input).await {
+        return reply;
+    }
     if let Some(lane_op) = op.strip_prefix("lane.") {
         let mut lane_input = input.clone();
         if let Some(map) = lane_input.as_object_mut() {
@@ -485,6 +494,7 @@ pub(crate) async fn recap(hub: &Hub) -> String {
         }
         Err(e) => damaged.push(format!("owed replies ({e})")),
     }
+    let _ = write!(out, "\n{}", super::onboarding::recap_line(hub).await);
     if !damaged.is_empty() {
         let _ = write!(out, "\nUnreadable records: {}", damaged.join(", "));
     }

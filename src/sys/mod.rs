@@ -5,12 +5,15 @@
 pub(crate) mod command;
 pub(crate) mod fs;
 pub(crate) mod host;
+pub(crate) mod install;
 pub(crate) mod latency;
 pub(crate) mod lock;
 pub(crate) mod notify;
 pub(crate) mod paths;
 pub(crate) mod peer;
+pub(crate) mod release;
 pub(crate) mod secrets;
+pub(crate) mod service;
 pub(crate) mod stall;
 
 /// Debug builds only: crash points between durable steps, named by `CATALY_FAULT`, for the crash

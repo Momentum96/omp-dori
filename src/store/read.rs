@@ -69,6 +69,12 @@ fn event_from_row(r: &Row<'_>) -> rusqlite::Result<EventRecord> {
 }
 
 impl Reads {
+    /// A consistent copy of the whole store at `path` through SQLite's online backup, for the home
+    /// backup (owner decision 16): never the live file, its WAL or its journal.
+    pub(crate) fn snapshot_into(&self, path: &std::path::Path) -> rusqlite::Result<()> {
+        self.0.backup(rusqlite::MAIN_DB, path, None)
+    }
+
     /// Events with an ID above `after`, oldest first.
     pub(crate) fn events_after(
         &self,
@@ -154,6 +160,17 @@ impl Reads {
                 &format!("SELECT {JOB_COLUMNS} FROM jobs WHERE name = ?1"),
                 [name],
                 job_from_row,
+            )
+            .optional()
+    }
+
+    /// The account a relay's intake state is bound to (Slack: `<workspace>/<account>`).
+    pub(crate) fn binding(&self, relay: &str) -> rusqlite::Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT account FROM bindings WHERE relay = ?1",
+                [relay],
+                |r| r.get(0),
             )
             .optional()
     }

@@ -11,6 +11,8 @@ mod route;
 mod run;
 mod schedule;
 mod stream;
+pub(crate) mod update;
+pub(crate) mod usage;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

@@ -273,6 +273,8 @@ fn welcome(key: &str, sub: bool, lane: Option<&(String, String)>, notes: bool) -
                 LEAD_GUIDANCE.to_string()
             },
             "tools": [super::tool::definition()],
+            // The hub judges the lead's shell calls only for onboarding's read-only rule (OPC-68).
+            "shell": true,
             "status": "",
         }),
     }
@@ -297,7 +299,17 @@ fn answer_later(
     tokio::spawn(async move {
         let verdict = |(allow, reason): (bool, String)| json!({ "allow": allow, "reason": reason });
         let reply = match (request.method.as_str(), &caller) {
-            ("bridge.shell" | "bridge.model", None) => verdict((true, String::new())),
+            ("bridge.model", None) => verdict((true, String::new())),
+            ("bridge.shell", None) => {
+                let command = request.params.get("command").and_then(Value::as_str);
+                match command {
+                    Some(c) => match super::onboarding::shell_blocks(&hub, c).await {
+                        Some(why) => verdict((false, why)),
+                        None => verdict((true, String::new())),
+                    },
+                    None => verdict((true, String::new())),
+                }
+            }
             ("bridge.shell", Some(_)) => verdict(hub.lanes.veto(&handle, &request.params).await),
             ("bridge.model", Some(_)) => {
                 verdict(hub.lanes.model_check(&handle, &request.params).await)

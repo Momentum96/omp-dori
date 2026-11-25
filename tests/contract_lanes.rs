@@ -71,9 +71,8 @@ impl Lanes {
             installed_omp().display(),
             work.display()
         ));
-        // The bridge linked into the sandbox's agent directory, as `cataly bridge install` does.
-        let out = hub.cli(&["bridge", "install"]);
-        assert!(out.status.success(), "{out:?}");
+        // The bridge linked into the sandbox's agent directory, as an install does.
+        hub.link_bridge();
         Self { hub, model }
     }
 
