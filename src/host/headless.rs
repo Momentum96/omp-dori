@@ -5,7 +5,7 @@
 //!
 //! The state mutex is only ever held for synchronous updates, never across an await.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -56,6 +56,9 @@ const TEXT_MAX: usize = 256 * 1024;
 /// Spend offers within this window fence the session at the limit (DESIGN 9.2, check 8).
 const SPEND_WINDOW_MS: i64 = 10 * 60 * 1000;
 const SPEND_LIMIT: usize = 3;
+/// Cancelled spend offers remembered to tell a repeat, newest kept. The fence at three offers in
+/// 10 minutes allows at most two per window, so this covers more than five hours.
+const CANCELLED_KEEP: usize = 64;
 
 /// How the hub launches headless sessions.
 #[derive(Clone, Debug)]
@@ -152,7 +155,7 @@ struct State {
     turn_done: bool,
     quota_blocked: Option<String>,
     spend_offers: VecDeque<i64>,
-    cancelled_offers: HashSet<String>,
+    cancelled_offers: VecDeque<String>,
     /// The fallback model OMP moved to and the hub reported, until the requested model is back.
     fallback_to: Option<String>,
     /// OMP's latest fallback report, until a readback shows its model in use.
@@ -935,7 +938,7 @@ impl Inner {
         let now = now_ms();
         let (count, repeat) = {
             let mut st = self.lock();
-            let repeat = !st.cancelled_offers.insert(dialog.id.clone());
+            let repeat = note_cancelled(&mut st.cancelled_offers, &dialog.id);
             st.spend_offers.push_back(now);
             while st
                 .spend_offers
@@ -1326,10 +1329,32 @@ impl Control for Session {
     }
 }
 
+/// Remembers a cancelled offer; `true` when it was cancelled before.
+fn note_cancelled(cancelled: &mut VecDeque<String>, id: &str) -> bool {
+    if cancelled.iter().any(|c| c == id) {
+        return true;
+    }
+    if cancelled.len() >= CANCELLED_KEEP {
+        cancelled.pop_front();
+    }
+    cancelled.push_back(id.to_string());
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host::testing::{Fake, spec};
+
+    #[test]
+    fn cancelled_offers_are_bounded_and_repeats_known() {
+        let mut cancelled = VecDeque::new();
+        for n in 0..1000 {
+            assert!(!note_cancelled(&mut cancelled, &format!("o{n}")));
+        }
+        assert_eq!(cancelled.len(), CANCELLED_KEEP);
+        assert!(note_cancelled(&mut cancelled, "o999"));
+    }
 
     async fn started(fake: &Fake) -> Arc<Session> {
         let (session, started) = fake.bind(spec("h1", None)).await.unwrap();

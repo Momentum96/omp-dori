@@ -151,6 +151,11 @@ impl Cards {
         self.lock().open.remove(dialog)
     }
 
+    /// Forgets local-only dialogs that are no longer open, so the set holds only open dialogs.
+    fn keep_skipped(&self, live: &HashSet<&str>) {
+        self.lock().skipped.retain(|d| live.contains(d.as_str()));
+    }
+
     fn by_message(&self, message: Snowflake) -> Option<Card> {
         self.lock()
             .open
@@ -658,11 +663,14 @@ impl<T: Runtime> Intake<T> {
 
     /// Keeps the cards in step with the lead's dialogs: new ones are posted, gone ones closed.
     pub(super) async fn sync_cards(self: &Arc<Self>) {
-        let dialogs: Vec<Dialog> = self
-            .lead
-            .snapshot()
+        let snapshot = self.lead.snapshot();
+        let dialogs: Vec<Dialog> = snapshot
+            .as_ref()
             .map_or_else(Vec::new, |s| s.dialogs.clone());
         let live: HashSet<&str> = dialogs.iter().map(|d| d.id.as_str()).collect();
+        if snapshot.is_some() {
+            self.cards.keep_skipped(&live);
+        }
         let gone: Vec<Card> = {
             let inner = self.cards.lock();
             inner
@@ -1312,6 +1320,20 @@ mod tests {
 
     fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
         super::typed_answer(card, text, &typed::words(Language::English))
+    }
+
+    /// Local-only dialogs are remembered while open and forgotten once gone.
+    #[test]
+    fn local_only_dialogs_are_forgotten_when_gone() {
+        let cards = Cards::default();
+        for n in 0..1000 {
+            cards.lock().skipped.insert(format!("d{n}"));
+            cards.keep_skipped(&HashSet::from([format!("d{n}").as_str()]));
+        }
+        assert_eq!(cards.lock().skipped.len(), 1);
+        assert!(cards.lock().skipped.contains("d999"));
+        cards.keep_skipped(&HashSet::new());
+        assert!(cards.lock().skipped.is_empty());
     }
 
     fn ask(recommended: Option<u64>, multi: bool) -> Dialog {

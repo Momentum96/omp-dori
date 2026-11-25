@@ -196,6 +196,15 @@ impl<R: Runtime> Lanes<R> {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Forgets a lane's session: its live entry and its spend reader.
+    fn drop_session(&self, key: &str) {
+        self.live_map().remove(key);
+        self.spend
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+    }
+
     fn session(&self, key: &str) -> Option<Arc<R::Session>> {
         self.live_map().get(key).filter(|s| s.alive()).cloned()
     }
@@ -232,16 +241,25 @@ impl<R: Runtime> Lanes<R> {
 
     /// The lane's turn: actions on one lane run one at a time (LANE req. 31).
     async fn turn(&self, key: &str) -> Result<OwnedMutexGuard<()>, String> {
-        let lock = Arc::clone(
-            self.turns
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(key.to_string())
-                .or_default(),
-        );
+        let lock = turn_lock(&self.turns, key);
         tokio::time::timeout(TURN_WAIT, lock.lock_owned())
             .await
             .map_err(|_| format!("busy: another action on lane {key} holds it"))
+    }
+
+    /// Entries of the per-lane maps (turn locks, spend readers) kept, for the hub's `stats`.
+    pub(crate) fn kept(&self) -> (usize, usize) {
+        let turns = self
+            .turns
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        let spend = self
+            .spend
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len();
+        (turns, spend)
     }
 
     async fn row(&self, key: &str) -> Result<Option<LaneRow>, String> {
@@ -1261,7 +1279,7 @@ impl<R: Runtime> Lanes<R> {
         if let Some(s) = session {
             let _ = s.close(true).await;
         }
-        self.live_map().remove(&rec.key);
+        self.drop_session(&rec.key);
         for w in &rec.worktrees {
             let _ = git::remove_worktree(w).await;
         }
@@ -1780,12 +1798,61 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// Reads the lane's session file and its subagent and advisor transcripts incrementally (WS req.
-    /// 30-35): a ceiling that ignored subagents could be passed by spawning them.
+    /// 30-35): a ceiling that ignored subagents could be passed by spawning them. The reader is kept
+    /// only while the lane's session is live; the final read at close drops it (the record keeps
+    /// the totals), so closed lanes leave no reader behind.
     fn read_spend(&self, rec: &Record) -> Result<(f64, f64), String> {
         let file = rec.session_file.as_deref().ok_or("no session file")?;
+        let live = self.live_map().contains_key(&rec.key);
         let mut map = self.spend.lock().unwrap_or_else(PoisonError::into_inner);
         let tree = map.entry(rec.key.clone()).or_default();
-        tree.read(Path::new(file), rec.opened_ms)
-            .map(|(tokens, cost, _)| (tokens, cost))
+        let totals = tree
+            .read(Path::new(file), rec.opened_ms)
+            .map(|(tokens, cost, _)| (tokens, cost));
+        if !live {
+            map.remove(&rec.key);
+        }
+        totals
+    }
+}
+
+/// The turn lock of `key`. Locks that nobody holds or waits for are dropped first (a new one is
+/// made when their key is used again), so the map holds only locks in use and the one returned.
+fn turn_lock(
+    turns: &Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    key: &str,
+) -> Arc<AsyncMutex<()>> {
+    let mut map = turns.lock().unwrap_or_else(PoisonError::into_inner);
+    map.retain(|k, lock| k == key || Arc::strong_count(lock) > 1);
+    Arc::clone(map.entry(key.to_string()).or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Closed lanes leave no turn lock behind, and a lock in use is never replaced.
+    #[tokio::test]
+    async fn turn_locks_of_finished_lanes_are_dropped() {
+        let turns = Mutex::new(HashMap::new());
+        for n in 0..1000 {
+            let _turn = turn_lock(&turns, &format!("lane-{n}")).lock_owned().await;
+        }
+        assert!(
+            turns.lock().unwrap().len() <= 1,
+            "{}",
+            turns.lock().unwrap().len()
+        );
+        let held = turn_lock(&turns, "busy").lock_owned().await;
+        for n in 0..10 {
+            drop(turn_lock(&turns, &format!("other-{n}")));
+        }
+        let again = turn_lock(&turns, "busy");
+        assert!(
+            again.try_lock().is_err(),
+            "the held lock is the one returned"
+        );
+        drop(held);
+        assert!(again.try_lock().is_ok());
     }
 }

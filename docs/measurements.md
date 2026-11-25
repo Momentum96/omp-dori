@@ -382,3 +382,46 @@ after runs is within the spread of single 21-sample runs on the loaded machine (
 higher; their path lost two reads and gained nothing [inference: load, not the change]). What is left
 of the Discord hub part is the readback (2 ms) and about 1 ms of reads and scheduling. macOS figures
 are not measured.
+
+## Memory soak (2026-11-26, Linux x64, release build, fake OMP and fake Discord)
+
+Commands: `cargo test --release --test soak -- --ignored --nocapture --test-threads=1 hub_soak`
+(`CATALY_SOAK_ITER=2000`), once against main (dfd9c6f, the test copied in) and once with the fixes
+(`docs/build-notes.md`, "Memory audit"); `CATALY_PLAN_ROUNDS=24 cargo test --release --test coord --
+--ignored --nocapture planner_pass` (12,005 passes) on main. One iteration is an owner message on
+Discord answered (every fifth, 400 per run; every 100th an `ask` card, half answered, half expired
+after 2 s) or a `cataly lead send` turn; every 50 a lane open, bridge hello, disconnect and close;
+every 100 a lead stop and start; every 20 a dry tick of each job kind (probe, cron, github, pr,
+quota, backup, health, items, pressure); Gateway reconnects (op 7 and op 9) once the 60 s backoff
+reset allows. 2000 iterations take 207-216 s.
+
+| Measure (slope after the first quarter, per 1000 iterations) | Main | Fixed |
+| --- | --- | --- |
+| RSS = anonymous RSS (file-backed flat at 13.6 MiB) | +3.8 MiB | +4.3 MiB |
+| Anonymous RSS at 0 / 1000 / 2000 iterations | 3.5 / 10.3 / 13.5 MiB | 3.2 / 10.6 / 13.2 MiB |
+| Anonymous RSS, last 600 iterations | +1.2 MiB | +0.1 MiB |
+| Open descriptors | -0.5 (30-31 throughout) | -0.7 (29-30) |
+| Threads | 0 (14) | 0 (13) |
+| Live tokio tasks | not reported | 0 (46 throughout) |
+| `retained` at the end | not reported | bridge links 40, lane spend readers 0, lane turn locks 1 |
+
+Descriptors, threads and tasks are level: no child, connection or task outlives its work across
+20 lead restarts, 40 lane cycles and 3 reconnects. The fixed structures are small per entry (a
+bridge link, a turn lock, one lane's call IDs), so they do not move these slopes; they grew with
+lanes and sessions over the hub's life. The anonymous growth of about 10 MiB in 2000 iterations is
+the same with and without the fixes and flattens in both runs; it is not attributed yet. The
+6000-iteration run and the planner run with `MALLOC_ARENA_MAX=1`, which would separate the
+allocator's arenas from retained memory, were not finished when the budget ran out.
+
+**The planner's late rise.** Main, 100 items, no lead, sampled every 500 passes (anonymous RSS):
+4.88 MiB at 505, 6.35 at 2,005, flat 6.46-6.49 from 2,505 to 5,005, then 6.60, 6.77, 6.99, 7.22,
+7.35, 7.52, 7.86, 8.16, 8.64, 9.42 at 10,005, then 9.70, 9.76, 9.82, 9.84 at 12,005. File-backed
+RSS stays 12.4-12.7 MiB (one step of 1 MiB at 10,005). The database grows 1 KB per pass (0.9 MB to
+11.6 MB), the write-ahead log stays at 4.1 MB. So the rise is anonymous heap, it comes in two
+steps, each levelling off (the 0.5 MiB of slice 3b and milestone 4 was the start of the second),
+and it tracks the database's size rather than the pass count. The writer's page cache (2 MiB) and
+the two readers' (512 KiB each) explain the first step; the second (3.4 MiB) exceeds those caps,
+which points at the allocator keeping freed memory of transient reads that grow with the tables
+[inference, the `MALLOC_ARENA_MAX=1` run that would confirm it was cut short: 6.42 MiB at 2,505,
+6.67 at 4,505, 7.74 at 6,505, the same course so far]. No per-pass retention: 2,500 passes added
+0.03 MiB on the plateau.

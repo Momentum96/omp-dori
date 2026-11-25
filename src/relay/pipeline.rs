@@ -905,6 +905,12 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             .read(|r| r.answers_open(R::NAME))
             .await
             .map_err(|e| e.to_string())?;
+        let still: HashSet<&str> = posting
+            .iter()
+            .filter(|h| h.answer == "posting")
+            .map(|h| h.message.as_str())
+            .collect();
+        keep_only(&self.stuck, &still);
         for h in posting.iter().filter(|h| h.answer == "posting") {
             if !self.post_parts(h).await? {
                 break;
@@ -1057,5 +1063,32 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             }
         }
         Ok(true)
+    }
+}
+
+/// Keeps only the sources still being posted: a delivery that finished or was given up leaves no
+/// entry behind.
+fn keep_only(stuck: &Mutex<HashSet<String>>, still: &HashSet<&str>) {
+    stuck
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .retain(|m| still.contains(m.as_str()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_deliveries_are_forgotten_once_settled() {
+        let stuck = Mutex::new(HashSet::new());
+        for n in 0..1000 {
+            let message = format!("m{n}");
+            stuck.lock().unwrap().insert(message.clone());
+            keep_only(&stuck, &HashSet::from([message.as_str()]));
+        }
+        assert_eq!(stuck.lock().unwrap().len(), 1);
+        keep_only(&stuck, &HashSet::new());
+        assert!(stuck.lock().unwrap().is_empty());
     }
 }

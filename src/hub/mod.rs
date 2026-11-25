@@ -144,8 +144,20 @@ impl Hub {
     }
 
     async fn stats(&self) -> Stats {
+        let (lane_turns, lane_spend) = self.lanes.kept();
         Stats {
             rss_bytes: host::self_rss().await.ok(),
+            tasks: u64::try_from(
+                tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks(),
+            )
+            .ok(),
+            retained: Some(crate::proto::Retained {
+                bridge_links: self.links.kept(),
+                lane_turns,
+                lane_spend,
+            }),
             host_memory: host::memory().await.ok().map(Into::into),
             host_load: host::load().await.ok().map(Into::into),
             state_disk: host::disk(&self.paths.state_dir).ok().map(Into::into),
