@@ -988,6 +988,20 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   pressure job `test-admission` with memory, disk and session floors 0, unless the test names its
   own pressure job; no test depends on the host's free disk or memory. The default refusal is
   checked once, on a faked reading of 12 GB: `pressure::tests::the_default_rule_refuses_a_small_disk`.
+- `relays::telegram_and_slack_requests_are_answered_in_place_with_seen_marks` failed on macOS:
+  `slack_wake_latency` empty although the Slack request was answered. **A real race in the
+  pipeline:** the wake time was set only after `deliver_live` returned (the Slack arrival commits
+  first), and the lead's turn-start event, read meanwhile, found no wake and was dropped; no later
+  turn start came, so the wake was never recorded. Setting the wake now settles it at once when the
+  lead's turn already started at or after it (`Pipeline::settle_wake`, under the same lock as the
+  event path, so it is recorded once).
+- `contract_tern::tern_lane_held_while_working_in_stock_omp` timed out on Linux (OMP 19.2.0) waiting
+  for the kickoff to show working under an active goal; it passed alone here against the same
+  release. Its wait now names what it last saw. Three copies of the `contract_tern` binary at once
+  here: two passed, one failed `tern_lead_in_stock_omp` (`lead stop` refused) and
+  `tern_lane_lost_and_restored_in_stock_omp` ("goal not set: the bridge did not answer goal within
+  10 s") in its first 25 s, while three stock OMPs started together: these are the load-dependent
+  cases, not fixed here.
 
 ## Local runs
 

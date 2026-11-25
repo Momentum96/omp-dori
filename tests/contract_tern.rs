@@ -628,14 +628,23 @@ fn tern_lane_held_while_working_in_stock_omp() {
             .unwrap()
     };
     // The kickoff turn runs the long `bash` call under an active goal.
-    hub.until(WAIT, || {
+    let deadline = Instant::now() + WAIT;
+    loop {
         let asked = model
             .bodies()
             .iter()
             .any(|b| b.to_string().contains("[lane busy-1]"));
         let r = read();
-        (asked && r["status"] == "working" && r["goal"]["status"] == "active").then_some(())
-    });
+        if asked && r["status"] == "working" && r["goal"]["status"] == "active" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "kickoff not seen working under an active goal: asked {asked}, read {r}, lane {}",
+            state()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(state()["state"], "running");
     let asked = Instant::now();
