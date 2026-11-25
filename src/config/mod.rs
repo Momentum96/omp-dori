@@ -460,14 +460,17 @@ fn destination(
             None => None,
         },
         Some("telegram") => {
-            let chat = s.required_string(errors, "chat").and_then(|c| {
-                let id = c.parse::<i64>().ok().filter(|n| *n != 0);
-                if id.is_none() {
-                    errors.push(s.error("chat", "expected a Telegram chat ID"));
+            if s.get("chat").is_none() {
+                errors.push(s.error("chat", "required"));
+            }
+            let chat = relays::tg_id(errors, &mut s, "chat");
+            let topic = relays::tg_id(errors, &mut s, "topic").and_then(|n| {
+                let ok = (1..=i64::from(i32::MAX)).contains(&n);
+                if !ok {
+                    errors.push(s.error("topic", "a topic is a positive number"));
                 }
-                id
+                ok.then_some(n)
             });
-            let topic = s.integer(errors, "topic", 1, i64::from(i32::MAX));
             chat.map(|chat| Destination::Telegram { chat, topic })
         }
         Some("slack") => {
@@ -596,7 +599,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         &mut config.context,
     );
     release::parse(errors, root, &mut config.update, &mut config.usage);
-    config.voice = voice::parse(root, &config.discord);
+    config.voice = voice::parse(errors, root, &config.discord);
     voice::parse_transcribe(errors, root, &mut config.transcribe);
 }
 
@@ -1264,7 +1267,7 @@ dry_run = true
         assert_eq!(lead.model, "anthropic/claude-sonnet-4-5");
         assert!(c.discord.intake());
         assert_eq!(c.fallback.on.as_deref(), Some("usage-limit"));
-        assert!(!c.fallback.chains["default"].is_empty());
+        assert_ne!(c.fallback.chains["default"].len(), 0);
         assert!(c.limits.enabled);
         assert!(matches!(
             c.destinations["owner-dm"],

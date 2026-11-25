@@ -19,7 +19,8 @@ as the XDG rules require. `cataly setup` shows which of these came from the envi
 
 The config file must be a regular file owned by you, with no access for group or others
 (`chmod 600`), not a symlink, not hard-linked, UTF-8, and at most 1 MiB. A missing file means
-built-in defaults for everything.
+built-in defaults for everything. `cataly setup` applies the same rule: it refuses an existing file
+that breaks it and names the fix (for example `chmod go=`).
 
 ### Tokens and keys
 
@@ -53,7 +54,8 @@ owned by someone else or readable by others is refused, and the error names only
 ### `cataly setup`
 
 `cataly setup` writes the settings it manages into the config file without touching anything else:
-comments, other keys and unknown keys stay as they are, only the managed lines change.
+comments, other keys and unknown keys stay as they are, only the managed lines change. The
+settings it manages are the ones in the flag table below; the preview lists them all.
 
 1. **Preview** (default). `cataly setup --discord-owner 1000… --discord-channels 1000…,1000…` takes
    a snapshot of the file (identity and SHA-256), shows the action (`create`, `update` or `keep`),
@@ -264,7 +266,8 @@ facts = true
 ## `[voice]` and `[transcribe]`
 
 `[voice]` is the Discord voice assistant. It is off unless `enabled = true`; while off, its other
-keys are not read. When enabled, a missing or invalid voice key turns voice off and names the
+keys are not read, but a key that is not in the table below is an error at load time either way.
+When enabled, a missing or invalid voice key turns voice off and names the
 field, but the rest of the configuration still applies. A build without the `voice` feature refuses
 `enabled = true` the same way. Voice also needs `[discord] guild` and `[discord] owner`.
 
@@ -384,7 +387,7 @@ Named slots, the planner, the reviewer, lane event commands, publish folders and
 | `interval` | duration | `"1h"` | 1m–24h | Time between planner passes. |
 | `max_open` | integer | `3` | 0–1000 | Planned lanes open at once at most. |
 | `max_starts` | integer | `2` | 0–100 | Lanes started per pass at most. |
-| `notes_hour` | integer | none | 0–23 (checked by the planner, reported as a finding) | Local hour of the daily owner-notes refresh. |
+| `notes_hour` | integer | none | 0–23 | Local hour of the daily owner-notes refresh. |
 | `import_label` | string | `"cataly"` | | GitHub issue label imported as work items. |
 | `decision_label` | string | `"needs-decision"` | | Label marking an item that needs your decision. |
 | `queue_expiry` | duration | `"24h"` | 1h–720h | A queued launch expires after this. |
@@ -496,7 +499,7 @@ built-in local destination and may be listed in a job's `destinations`. Every de
 |---|---|---|
 | `command` | `argv` (**required**) | non-empty list of non-empty strings. The command runs with the event as JSON in the `CATALY_EVENT` environment variable. |
 | `discord` | `channel` (**required**) | a channel or thread ID, or a channel name (`#name` or `name`) when `[discord] guild` is set |
-| `telegram` | `chat` (**required**), `topic` | `chat`: non-zero chat ID **as a string**; `topic`: integer 1–2147483647 |
+| `telegram` | `chat` (**required**), `topic` | `chat`: non-zero chat ID; `topic`: 1–2147483647. Both as an integer or a string, as in `[telegram]` |
 | `slack` | `channel` (**required**), `thread` | `channel`: `<workspace>/<conversation>`, such as `T0123ABCD/C0456EFGH`; `thread`: a message timestamp such as `1700000000.000100` |
 
 ```toml
@@ -680,7 +683,7 @@ Events: `items.new` (`job`, `id`, `title`).
 Samples the host. Any failing check holds new session starts, and an unknown value always holds.
 Tells the lead once when the host enters alert and once when it clears, and once when it becomes
 ready for heavy compute and once when it is busy again. Without a pressure job, session starts
-still use a built-in rule: load 150 %, ready 80 %, 20 % free memory, no disk or session check.
+use the same rule with the defaults below. `alert_load` must be greater than `ready_load`.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|

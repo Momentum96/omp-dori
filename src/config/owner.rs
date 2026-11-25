@@ -118,16 +118,17 @@ pub(crate) struct Pressure {
     pub(crate) max_sessions: u32,
 }
 
-impl Pressure {
-    /// The memory rule session starts use when no pressure job is configured (HOST req. 90).
-    pub(crate) fn admission_default() -> Self {
+impl Default for Pressure {
+    /// The one rule for admission: a pressure job's defaults, and what session starts use when no
+    /// pressure job is configured (HOST req. 90).
+    fn default() -> Self {
         Self {
             alert_load: 150,
             ready_load: 80,
             min_free_memory: 20,
-            min_free_disk_gb: 0,
+            min_free_disk_gb: 50,
             disk_path: None,
-            max_sessions: 0,
+            max_sessions: 20,
         }
     }
 }
@@ -451,6 +452,7 @@ fn items(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Option<Items> {
 }
 
 fn pressure(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Pressure {
+    let d = Pressure::default();
     let int = |s: &mut Section<'_>, errors: &mut Vec<ConfigError>, key, min, max, default: u32| {
         s.integer(errors, key, min, max)
             .and_then(|n| u32::try_from(n).ok())
@@ -460,17 +462,24 @@ fn pressure(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Pressure {
     if disk_path.as_ref().is_some_and(|p| !p.is_absolute()) {
         errors.push(s.error("disk_path", "must be an absolute path"));
     }
-    Pressure {
-        alert_load: int(s, errors, "alert_load", 1, 10_000, 150),
-        ready_load: int(s, errors, "ready_load", 1, 10_000, 80),
-        min_free_memory: int(s, errors, "min_free_memory", 0, 100, 20),
+    let p = Pressure {
+        alert_load: int(s, errors, "alert_load", 1, 10_000, d.alert_load),
+        ready_load: int(s, errors, "ready_load", 1, 10_000, d.ready_load),
+        min_free_memory: int(s, errors, "min_free_memory", 0, 100, d.min_free_memory),
         min_free_disk_gb: s
             .integer(errors, "min_free_disk_gb", 0, 1_000_000)
             .and_then(|n| u64::try_from(n).ok())
-            .unwrap_or(50),
+            .unwrap_or(d.min_free_disk_gb),
         disk_path,
-        max_sessions: int(s, errors, "max_sessions", 0, 1000, 20),
+        max_sessions: int(s, errors, "max_sessions", 0, 1000, d.max_sessions),
+    };
+    if p.alert_load <= p.ready_load {
+        errors.push(s.error(
+            "alert_load",
+            &format!("must be greater than ready_load ({})", p.ready_load),
+        ));
     }
+    p
 }
 
 #[cfg(test)]
@@ -570,6 +579,24 @@ kind = "pressure"
                 .next()
                 .unwrap(),
             "jobs.h.templates.run.done: not an event of this job"
+        );
+    }
+
+    #[test]
+    fn pressure_defaults_are_the_admission_rule_and_loads_are_ordered() {
+        let c = parse("[jobs.host]\nkind = \"pressure\"\n").unwrap();
+        let Work::Owner(super::Owner::Pressure(p)) = &c.jobs["host"].work else {
+            panic!("pressure kind");
+        };
+        assert_eq!(*p, super::Pressure::default());
+        let errs = parse("[jobs.host]\nkind = \"pressure\"\nalert_load = 80\n")
+            .unwrap_err()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errs,
+            ["jobs.host.alert_load: must be greater than ready_load (80)"]
         );
     }
 }

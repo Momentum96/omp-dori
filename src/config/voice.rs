@@ -84,8 +84,39 @@ pub(super) fn parse_transcribe(
     t.finish(errors);
 }
 
-/// Reads `[voice]`; `discord` supplies the guild and owner.
-pub(super) fn parse(root: &mut Section<'_>, discord: &super::DiscordSettings) -> VoiceConfig {
+/// Every `[voice]` key. Misspellings are load errors whether or not voice is on.
+const KEYS: [&str; 22] = [
+    "enabled",
+    "voice_channel",
+    "text_channel",
+    "speech_model",
+    "backend_model",
+    "summary_model",
+    "voice",
+    "backend_prices",
+    "summary_prices",
+    "search_price",
+    "speech_price_per_minute",
+    "reasoning_effort",
+    "preferences",
+    "zone",
+    "daily_minutes",
+    "total_minutes",
+    "spending_cap_usd",
+    "idle_close_seconds",
+    "wake_dbfs",
+    "transport",
+    "api_base",
+    "key_file",
+];
+
+/// Reads `[voice]`; `discord` supplies the guild and owner. Unknown keys go to `load` (they fail the
+/// whole load); every other voice problem refuses voice alone.
+pub(super) fn parse(
+    load: &mut Vec<ConfigError>,
+    root: &mut Section<'_>,
+    discord: &super::DiscordSettings,
+) -> VoiceConfig {
     let mut errors = Vec::new();
     let Some(mut v) = root.table(&mut errors, "voice") else {
         return if errors.is_empty() {
@@ -94,13 +125,18 @@ pub(super) fn parse(root: &mut Section<'_>, discord: &super::DiscordSettings) ->
             VoiceConfig::Refused(errors)
         };
     };
+    for key in v.table.keys() {
+        if !KEYS.contains(&key.as_str()) {
+            load.push(v.error(key, "unknown setting"));
+        }
+    }
+    // Unknown keys are reported above; voice's own checks read only the known ones.
+    v.used.extend(v.table.keys().map(String::as_str));
     if !v.bool(&mut errors, "enabled").unwrap_or(false) {
         // Off: the other keys are not read, so a half-written section does not matter.
-        v.used.extend(v.table.keys().map(String::as_str));
         return VoiceConfig::Off;
     }
     let on = enabled(&mut errors, &mut v, discord);
-    v.finish(&mut errors);
     match on {
         #[cfg(feature = "voice")]
         Some(on) if errors.is_empty() => VoiceConfig::On(on),
@@ -379,6 +415,13 @@ mod tests {
             voice_of("[voice]\nspeech_model = 1"),
             VoiceConfig::Off
         ));
+    }
+
+    #[test]
+    fn misspelled_keys_fail_the_load_even_when_off() {
+        let errors = crate::config::parse("[voice]\nspeach_model = \"x\"\n").unwrap_err();
+        let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["voice.speach_model"]);
     }
 
     /// Check 1: voice stays off with a required setting missing and names the field.

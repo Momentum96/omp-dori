@@ -351,7 +351,7 @@ impl<R: Runtime> Lanes<R> {
                 crate::config::Work::Owner(crate::config::Owner::Pressure(p)) => Some(p.clone()),
                 _ => None,
             })
-            .unwrap_or_else(crate::config::owner::Pressure::admission_default);
+            .unwrap_or_default();
         let sample = crate::jobs::owner::pressure::sample(cwd).await;
         let sample = crate::jobs::owner::pressure::Sample {
             sessions: u32::try_from(live).ok(),

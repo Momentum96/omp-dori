@@ -845,11 +845,6 @@ impl<R: Runtime> Lanes<R> {
     /// COORD req. 49: the owner-notes refresh once per local day; returns the date claimed.
     fn notes_step(&self, state: &Planner, run: &mut Run) -> Option<String> {
         let hour = self.cfg().coord.planner.notes_hour?;
-        if !(0..=23).contains(&hour) {
-            run.noticed
-                .push(format!("notes_hour {hour} is not 0 to 23"));
-            return None;
-        }
         let notes = crate::jobs::notes::Notes::new(&self.env.state_dir);
         let now = jiff::Zoned::now();
         let today = now.date().to_string();

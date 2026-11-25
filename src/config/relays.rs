@@ -155,13 +155,18 @@ fn api_base(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Option<Base> 
     }
 }
 
-/// A Telegram ID given as a string or a number.
-fn tg_id(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, key: &str) -> Option<i64> {
-    let value = s.get(key)?;
-    let id = value
+/// A Telegram ID given as a number or a string holding one; zero and IDs beyond 2^53 are refused.
+fn tg_value(value: &toml::Value) -> Option<i64> {
+    value
         .as_integer()
         .or_else(|| value.as_str().and_then(|t| t.trim().parse().ok()))
-        .filter(|n| *n != 0 && n.unsigned_abs() < (1 << 53));
+        .filter(|n| *n != 0 && n.unsigned_abs() < (1 << 53))
+}
+
+/// The Telegram ID at `key`, if present; every Telegram ID in the config is read through this.
+pub(super) fn tg_id(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, key: &str) -> Option<i64> {
+    let value = s.get(key)?;
+    let id = tg_value(value);
     if id.is_none() {
         errors.push(s.error(key, "expected a Telegram ID"));
     }
@@ -194,17 +199,12 @@ pub(super) fn parse(
             errors.push(t.error("topic", "a topic needs [telegram] group"));
         }
         if let Some(chats) = t.get("chats") {
-            let list: Option<Vec<i64>> = chats.as_array().and_then(|a| {
-                a.iter()
-                    .map(|v| {
-                        v.as_integer()
-                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                    })
-                    .collect()
-            });
+            let list: Option<Vec<i64>> = chats
+                .as_array()
+                .and_then(|a| a.iter().map(tg_value).collect());
             match list {
-                Some(l) if l.iter().all(|n| *n != 0) => telegram.chats = l,
-                _ => errors.push(t.error("chats", "expected a list of Telegram chat IDs")),
+                Some(l) => telegram.chats = l,
+                None => errors.push(t.error("chats", "expected a list of Telegram chat IDs")),
             }
         }
         if let Some(p) = t.bool(errors, "profile") {
@@ -303,5 +303,34 @@ mod tests {
         ] {
             assert!(paths.contains(&p), "{paths:?}");
         }
+    }
+
+    #[test]
+    fn telegram_ids_take_the_same_forms_everywhere() {
+        let c = crate::config::parse(
+            "[telegram]\nowner = \"42\"\ngroup = -1001\ntopic = \"7\"\nchats = [5, \"-6\"]\n\
+             [destinations.a]\nkind = \"telegram\"\nchat = -1001\ntopic = \"7\"\n\
+             [destinations.b]\nkind = \"telegram\"\nchat = \"-1001\"\ntopic = 7\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.telegram.owner, c.telegram.group, c.telegram.topic),
+            (Some(42), Some(-1001), Some(7))
+        );
+        assert_eq!(c.telegram.chats, [5, -6]);
+        assert_eq!(c.destinations["a"], c.destinations["b"]);
+        let bad = crate::config::parse(
+            "[destinations.a]\nkind = \"telegram\"\nchat = 0\ntopic = \"x\"\n[destinations.b]\nkind = \"telegram\"\n",
+        )
+        .unwrap_err();
+        let paths: Vec<_> = bad.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "destinations.a.chat",
+                "destinations.a.topic",
+                "destinations.b.chat"
+            ]
+        );
     }
 }

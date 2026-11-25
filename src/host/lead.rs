@@ -472,7 +472,7 @@ impl<R: Runtime> Lead<R> {
                 crate::config::Work::Owner(crate::config::Owner::Pressure(p)) => Some(p.clone()),
                 _ => None,
             })
-            .unwrap_or_else(crate::config::owner::Pressure::admission_default);
+            .unwrap_or_default();
         let sample = crate::jobs::owner::pressure::sample(&self.env.state_dir).await;
         // Only the memory part of the rule applies to a session start (HOST req. 90); the cap above
         // counts sessions.
