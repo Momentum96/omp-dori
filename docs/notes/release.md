@@ -74,3 +74,8 @@ at run time (tests use this with a throwaway key).
 ## Not done (left)
 
 - Local reproducible-build run (check 5 is CI-only: the workflow step is written).
+- darwin-arm64 measurements (size, install time) and the musl release size: no macOS runner here
+  (`release-measurements.md`).
+- `contract_session::bridge_in_stock_omp` asserts bridge load under 5 ms; it failed once while the
+  host was busy building and passed alone. A timing bound on a shared host is flaky.
+- Upstream OMP reports (PATCH-01/02/04/05) are the owner's to file.
