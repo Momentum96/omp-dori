@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use support::github::FakeGithub;
-use support::{BIN, TestHub, path_without_omp};
+use support::{ADMISSION, BIN, TestHub, path_without_omp};
 
 const SEED: [u8; 32] = [9; 32];
 const V1: &str = env!("CARGO_PKG_VERSION");
@@ -306,9 +306,10 @@ fn install_reinstall_and_refusals() {
     let v: Value = serde_json::from_slice(&version.stdout).unwrap();
     assert_eq!(v["version"], V1);
     assert_eq!(v["target"], target());
+    // Install leaves the config as the sandbox wrote it: empty but for `TestHub`'s admission floors.
     assert!(
         !hub.root.join("config/cataly/config.toml").exists()
-            || std::fs::read(hub.config_path()).unwrap().is_empty()
+            || std::fs::read_to_string(hub.config_path()).unwrap() == ADMISSION
     );
     assert!(
         !hub.root.join("state/cataly").exists(),

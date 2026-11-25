@@ -975,6 +975,20 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   (checks 4 and 8, both transports) uses 300 ms: before the fix that run gave 4 continuations on
   Linux over both transports, after it 1.
 
+## Second run: contract suites on CI (dispatch 45603874106) and main's admission default
+
+- `contract_tern::tern_lead_in_stock_omp` failed on macOS against stock OMP 19.2.0: the test read
+  the session's memory and CPU from `/proc`, which macOS lacks. Off Linux it now reads
+  `ps -o rss=,time=` (`time` is `[h:]m:s.cc` there; Linux's `ps` gives whole seconds only, so Linux
+  keeps `/proc`).
+- Main at a0a20c9 made the admission rule without a pressure job the pressure job's defaults,
+  50 GB free disk among them (LANE-08; the product default stays). The runners have about 12 GB
+  free, so every lane start in `tests/coord.rs` was held ("free disk 12 GB below 50 GB").
+  `TestHub::write_config`, the one place every test config passes through, now adds a disabled
+  pressure job `test-admission` with memory, disk and session floors 0, unless the test names its
+  own pressure job; no test depends on the host's free disk or memory. The default refusal is
+  checked once, on a faked reading of 12 GB: `pressure::tests::the_default_rule_refuses_a_small_disk`.
+
 ## Local runs
 
 - A `CARGO_TARGET_DIR` shared with another checkout is unsafe for the hub's integration tests:

@@ -96,8 +96,9 @@ fn status_stats_and_usage_errors() {
     assert_eq!(status["protocol"], 1);
     assert!(status["config_error"].is_null());
     let text = String::from_utf8(hub.cli(&["status"]).stdout).unwrap();
+    // The one configured job is `TestHub`'s disabled admission-floor job.
     assert!(
-        text.starts_with("hub ") && text.contains("jobs     0 configured"),
+        text.starts_with("hub ") && text.contains("jobs     1 configured"),
         "{text}"
     );
     for _ in 0..5 {
@@ -162,7 +163,8 @@ fn invalid_config_is_refused_with_its_path_and_the_previous_stays() {
                 .unwrap()
                 .contains(path_error)
         );
-        assert_eq!(status["jobs"], 1, "the previous config stays in force");
+        // `watch` and `TestHub`'s admission-floor job.
+        assert_eq!(status["jobs"], 2, "the previous config stays in force");
         assert_eq!(hub.job("watch")["trigger"], "probe every 3600s");
     }
     // Four distinct errors, each reported once; the fix is reported once.

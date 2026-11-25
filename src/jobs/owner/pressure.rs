@@ -233,6 +233,28 @@ mod tests {
         }
     }
 
+    /// The default rule (no pressure job configured) holds a start below 50 GB of free disk; the
+    /// integration tests set their own floors so they never depend on the host's disk.
+    #[test]
+    fn the_default_rule_refuses_a_small_disk() {
+        let small = Sample {
+            disk_free_gb: Some(12.0),
+            ..good()
+        };
+        assert_eq!(
+            admission(&small, &Pressure::default()),
+            ["free disk 12 GB below 50 GB"]
+        );
+        let enough = Sample {
+            disk_free_gb: Some(50.0),
+            ..good()
+        };
+        assert_eq!(
+            admission(&enough, &Pressure::default()),
+            Vec::<String>::new()
+        );
+    }
+
     #[tokio::test]
     async fn notices_only_on_change_after_the_baseline() {
         let (ctx, _stop, _dir) = ctx_with("[jobs.host]\nkind = \"pressure\"\n", "pressure-ctx");

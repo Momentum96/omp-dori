@@ -25,6 +25,10 @@ pub mod telegram;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 
+/// The test admission floors `TestHub::write_config` adds.
+pub const ADMISSION: &str = "\n[jobs.test-admission]\nkind = \"pressure\"\nenabled = false\n\
+    min_free_memory = 0\nmin_free_disk_gb = 0\nmax_sessions = 0\n";
+
 /// A hub sandbox: short root under /tmp (socket paths have a 103-byte limit on macOS).
 pub struct TestHub {
     pub root: PathBuf,
@@ -66,7 +70,11 @@ impl TestHub {
         self.root.join("state/cataly")
     }
 
-    /// Writes the config file with mode 0600, replacing it.
+    /// Writes the config file with mode 0600, replacing it. Unless the text names its own pressure
+    /// job, a disabled one is added whose floors (memory, disk, sessions) are 0: session-start
+    /// admission reads its floors from the pressure job, and without one the product defaults
+    /// (50 GB free disk among them) would make tests depend on the host. The default refusal is
+    /// `pressure::tests::the_default_rule_refuses_a_small_disk`.
     pub fn write_config(&self, text: &str) {
         let path = self.config_path();
         let _ = std::fs::remove_file(&path);
@@ -77,6 +85,9 @@ impl TestHub {
             .open(&path)
             .unwrap();
         f.write_all(text.as_bytes()).unwrap();
+        if !text.contains("kind = \"pressure\"") {
+            f.write_all(ADMISSION.as_bytes()).unwrap();
+        }
     }
 
     pub fn command(&self, args: &[&str]) -> Command {
