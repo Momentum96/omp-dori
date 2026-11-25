@@ -132,6 +132,8 @@ pub(super) struct Discord {
     pub(super) bot: String,
     /// The bot account as Discord reported it (its avatar and banner hashes among it).
     me: Value,
+    /// The application as Discord reported it (its icon hash among it).
+    app: Value,
     pub(super) guild: Snowflake,
     pub(super) server: String,
     /// The two channels; `None` until created.
@@ -170,7 +172,7 @@ pub(super) async fn discover(
         found: Found::default(),
     };
     match flow.steps().await {
-        Ok((rest, me, (guild, server), (lead, ops), (owner, owner_source))) => {
+        Ok((rest, (app, me), (guild, server), (lead, ops), (owner, owner_source))) => {
             flow.found.stage = "ready";
             Ok(Discord {
                 rest,
@@ -181,6 +183,7 @@ pub(super) async fn discover(
                     .unwrap_or("?")
                     .to_string(),
                 me,
+                app,
                 guild,
                 server,
                 lead,
@@ -195,7 +198,8 @@ pub(super) async fn discover(
 
 type Steps = (
     Rest,
-    Value,
+    // The application and the bot account.
+    (Value, Value),
     (Snowflake, String),
     (Option<Snowflake>, Option<Snowflake>),
     (Snowflake, &'static str),
@@ -208,7 +212,7 @@ impl Flow<'_> {
         let server = self.server(&rest).await?;
         let channels = self.channels(&rest, server.0).await?;
         let owner = self.owner_id(&app)?;
-        Ok((rest, me, server, channels, owner))
+        Ok((rest, (app, me), server, channels, owner))
     }
 
     fn say(&self, line: &str) {
@@ -614,7 +618,7 @@ impl Discord {
         let topic = if name == LEAD {
             "Talk with Cataly's lead here."
         } else {
-            "Cataly's job notices."
+            "Cataly's status panel and alerts."
         };
         match self.rest.create_text_channel(self.guild, name, topic).await {
             Ok(v) => {
@@ -645,14 +649,19 @@ impl Discord {
         }
     }
 
-    /// What the profile step does with the bot's avatar and banner. An image is set when the bot
-    /// has none, when it is the one Cataly set earlier but Cataly's default changed since, or always
-    /// with `force` (`--profile`); one the owner set by hand is kept.
+    /// What the profile step does with the bot's avatar and banner and the application's icon. An
+    /// image is set when there is none, when it is the one Cataly set earlier but Cataly's default
+    /// changed since, or always with `force` (`--profile`); one the owner set by hand is kept.
     pub(super) fn profile_plan(&self, state_dir: &Path, force: bool) -> ProfilePlan {
         let record = read_record(state_dir, &self.me);
         let mut plan = ProfilePlan::default();
         for (field, bytes) in IMAGES {
-            let current = self.me.get(field).and_then(Value::as_str);
+            let holder = if field == APP_ICON {
+                &self.app
+            } else {
+                &self.me
+            };
+            let current = holder.get(field).and_then(Value::as_str);
             let mine = record.get(field);
             let ours = current.is_some()
                 && mine.and_then(|m| m.get("hash")).and_then(Value::as_str) == current;
@@ -669,34 +678,50 @@ impl Discord {
         plan
     }
 
-    /// Sets Cataly's images for `fields` and records the hashes Discord gave them, so a later run
-    /// can tell them from images the owner set himself.
+    /// Sets Cataly's images for `fields` (the bot's through its account, the icon through the
+    /// application) and records the hashes Discord gave them, so a later run can tell them from
+    /// images the owner set himself.
     pub(super) async fn set_profile(
         &self,
         state_dir: &Path,
         fields: &[&'static str],
     ) -> Result<(), String> {
-        let mut body = serde_json::Map::new();
-        for (field, bytes) in IMAGES.iter().filter(|(f, _)| fields.contains(f)) {
-            body.insert(
-                (*field).to_string(),
-                Value::String(format!("data:image/jpeg;base64,{}", base64(bytes))),
-            );
+        let data =
+            |bytes: &[u8]| Value::String(format!("data:image/jpeg;base64,{}", base64(bytes)));
+        let chosen = || IMAGES.iter().filter(|(f, _)| fields.contains(f));
+        let mut user = serde_json::Map::new();
+        let mut app = serde_json::Map::new();
+        for (field, bytes) in chosen() {
+            let body = if *field == APP_ICON {
+                &mut app
+            } else {
+                &mut user
+            };
+            body.insert((*field).to_string(), data(bytes));
         }
-        let me = self
-            .rest
-            .set_profile(Value::Object(body))
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut set = serde_json::Map::new();
+        for (body, is_app) in [(user, false), (app, true)] {
+            if body.is_empty() {
+                continue;
+            }
+            let answer = if is_app {
+                self.rest.set_application(Value::Object(body)).await
+            } else {
+                self.rest.set_profile(Value::Object(body)).await
+            };
+            if let Value::Object(v) = answer.map_err(|e| e.to_string())? {
+                set.extend(v);
+            }
+        }
         let mut record = read_record(state_dir, &self.me);
         record.insert(
             "bot".into(),
             self.me.get("id").cloned().unwrap_or(Value::Null),
         );
-        for (field, bytes) in IMAGES.iter().filter(|(f, _)| fields.contains(f)) {
+        for (field, bytes) in chosen() {
             record.insert(
                 (*field).to_string(),
-                json!({ "hash": me.get(field), "image": sha256_hex(bytes) }),
+                json!({ "hash": set.get(*field), "image": sha256_hex(bytes) }),
             );
         }
         let text = serde_json::to_string(&record).map_err(|e| e.to_string())?;
@@ -705,11 +730,15 @@ impl Discord {
     }
 }
 
-/// Cataly's default profile images: Discord's field and the bundled JPEG.
-const IMAGES: [(&str, &[u8]); 2] = [
+/// Cataly's default profile images: Discord's field and the bundled JPEG. The application's icon
+/// is the avatar image.
+const IMAGES: [(&str, &[u8]); 3] = [
     ("avatar", include_bytes!("../../assets/avatar.jpg")),
     ("banner", include_bytes!("../../assets/banner.jpg")),
+    (APP_ICON, include_bytes!("../../assets/avatar.jpg")),
 ];
+/// The image set on the application rather than the bot account.
+const APP_ICON: &str = "icon";
 /// The file in the state folder that records which images Cataly set on which bot.
 const PROFILE_RECORD: &str = "discord-profile.json";
 

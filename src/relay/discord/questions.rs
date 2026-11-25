@@ -1009,6 +1009,18 @@ impl<T: Runtime> Intake<T> {
         .await;
     }
 
+    /// A press on the ops panel: the owner's is answered by the panel, anyone else's refused.
+    async fn ops_press(&self, press: &Press) {
+        if !press.by_owner(self.application, self.owner) {
+            let lang = self.jobs.ctx().config.borrow().hub.language;
+            return self.refuse(press, crate::jobs::ops::refusal(lang)).await;
+        }
+        let body = self.jobs.ops_press(&press.custom_id, press.channel).await;
+        if let Err(e) = self.rest.callback(&press.id, &press.token, body).await {
+            log::info("ops panel press not answered", &[("error", &e)]);
+        }
+    }
+
     async fn refuse(&self, press: &Press, text: &str) {
         let body = json!({"type": 4, "data": {"content": text, "flags": 64}});
         if let Err(e) = self.rest.callback(&press.id, &press.token, body).await {
@@ -1017,8 +1029,12 @@ impl<T: Runtime> Intake<T> {
     }
 
     /// A button press (DISC-OUT req. 69, 82): the owner's press on an open card answers it; anyone
-    /// else's gets an ephemeral refusal; presses while one is being taken are ignored.
+    /// else's gets an ephemeral refusal; presses while one is being taken are ignored. Presses on
+    /// the ops panel go to the panel.
     pub(super) async fn press(self: Arc<Self>, press: Press) {
+        if press.custom_id.starts_with("ops:") {
+            return self.ops_press(&press).await;
+        }
         let Some(card) = self.cards.by_message(press.message) else {
             return self.refuse(&press, "This question is closed.").await;
         };

@@ -102,6 +102,9 @@ pub(crate) struct EventRecord {
     pub(crate) thread: Option<String>,
     pub(crate) urgent: bool,
     pub(crate) dry: bool,
+    /// The named fields as one JSON object, for destinations that word the event themselves.
+    #[serde(skip)]
+    pub(crate) fields: Option<String>,
 }
 
 /// An event to append, with the destinations it is routed to.
@@ -115,6 +118,8 @@ pub(crate) struct NewEvent {
     pub(crate) text: String,
     pub(crate) body: Option<String>,
     pub(crate) body_path: Option<String>,
+    /// The named fields as one JSON object (`None` when there are none).
+    pub(crate) fields: Option<String>,
     pub(crate) urgent: bool,
     pub(crate) dry: bool,
     pub(crate) destinations: Vec<String>,
@@ -525,6 +530,7 @@ pub(crate) mod tests {
             text: format!("{job} {kind}"),
             body: None,
             body_path: None,
+            fields: None,
             urgent: false,
             dry: false,
             destinations: destinations.iter().map(|d| (*d).to_string()).collect(),

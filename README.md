@@ -31,12 +31,14 @@ One command does the whole first run. Discord leaves three steps to you; setup p
 3. Open the invite link setup prints, pick your server, **Authorize**. Setup waits for the bot.
 
 Then it fills in the rest without asking: you (the application's owner) as the owner, `#cataly`
-(your talks with the lead) and `#cataly-ops` (job notices) found or created, OMP's default model
+(your talks with the lead) and `#cataly-ops` found or created, OMP's default model
 for the lead, approval buttons for OMP's permission requests (only your presses count), Cataly's
-avatar and banner on the bot, a backup of the state folder to your private GitHub repository
+avatar and banner on the bot (the avatar also as the application's icon), a backup of the state folder to your private GitHub repository
 `<gh login>/cataly-home` when `gh` is logged in, the health and pressure jobs, and a user service
 (systemd on Linux, launchd on macOS) that starts the hub. It shows a short summary and asks once;
 nothing changes before you say yes. Then write in `#cataly`: the lead answers there.
+`#cataly-ops` holds the status panel and the few alerts worth a ping, kept apart from your talks
+with the lead (see [`[ops]`](docs/config.md#ops)).
 
 Running `cataly setup` again shows what is set and changes nothing. Change a default later with a
 flag (`--lead-model provider/id`, `--approvals off`, `--backup off`, `--service off`,

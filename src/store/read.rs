@@ -8,8 +8,7 @@ pub(crate) const JOB_COLUMNS: &str =
     "name, kind, trigger, held, consumed, needs_ack, next_due_ms, skipped, created_ms";
 pub(crate) const RUN_COLUMNS: &str = "id, job, dry, scheduled_ms, started_ms, pid, ended_ms, exit_code, signal, \
      timed_out, state, outcome, stdout_path, stderr_path, bytes, output_hash, kept";
-const EVENT_COLUMNS: &str =
-    "id, at_ms, job, subject, kind, severity, text, body, body_path, lane, thread, urgent, dry";
+const EVENT_COLUMNS: &str = "id, at_ms, job, subject, kind, severity, text, body, body_path, lane, thread, urgent, dry, fields";
 
 /// A pooled read-only connection with the store's queries.
 pub(crate) struct Reads(pub(crate) Connection);
@@ -65,6 +64,7 @@ fn event_from_row(r: &Row<'_>) -> rusqlite::Result<EventRecord> {
         thread: r.get(10)?,
         urgent: r.get(11)?,
         dry: r.get(12)?,
+        fields: r.get(13)?,
     })
 }
 

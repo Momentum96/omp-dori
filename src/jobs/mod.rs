@@ -6,6 +6,7 @@ pub(crate) mod cron;
 pub(crate) mod event;
 pub(crate) mod memory;
 pub(crate) mod notes;
+pub(crate) mod ops;
 pub(crate) mod owner;
 mod route;
 mod run;
@@ -118,6 +119,8 @@ pub(crate) struct Ctx {
     commands_tx: mpsc::Sender<Command>,
     commands: AsyncMutex<mpsc::Receiver<Command>>,
     route_wake: Arc<Notify>,
+    /// The ops room: the panel and its alerts.
+    pub(crate) ops: ops::Ops,
 }
 
 /// Where the engine keeps and finds its files.
@@ -155,6 +158,7 @@ impl Ctx {
             commands_tx,
             commands: AsyncMutex::new(commands),
             route_wake,
+            ops: ops::Ops::default(),
         })
     }
 
@@ -280,6 +284,8 @@ impl Jobs {
         supervisor.spawn("scheduler", move || schedule::scheduler(Arc::clone(&sched)));
         let router = Arc::clone(&ctx);
         supervisor.spawn("router", move || route::router(Arc::clone(&router)));
+        let panel = Arc::clone(&ctx);
+        supervisor.spawn("ops", move || ops::run(Arc::clone(&panel)));
         Ok(Self { ctx })
     }
 

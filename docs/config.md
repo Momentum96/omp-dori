@@ -78,10 +78,10 @@ Then the defaults, each applied only where the config says nothing yet:
 | What | Default | Flag |
 |---|---|---|
 | Owner | the application's owner (the team's owner for a team application) | `--owner <id>` |
-| Channels | the text channels `#cataly` (your talks with the lead) and `#cataly-ops` (job notices) are reused, missing ones created; no other channel is touched | |
+| Channels | the text channels `#cataly` (your talks with the lead) and `#cataly-ops` (the [status panel and alerts](#ops)) are reused, missing ones created; no other channel is touched | |
 | Lead | the model OMP starts with (`omp config get modelRoles`) | `--lead-model provider/id`, `--lead-cwd` |
 | Remote approvals | on: OMP's permission requests get buttons; only your presses count | `--approvals on\|off` |
-| Bot profile | Cataly's avatar and banner (`PATCH /users/@me`), only where the bot has none or still has the ones Cataly set; your own images are kept | `--profile` re-applies Cataly's |
+| Bot profile | Cataly's avatar and banner on the bot (`PATCH /users/@me`) and the avatar as the application's icon (`PATCH /applications/@me`), each only where there is none or still the one Cataly set; your own images are kept | `--profile` re-applies Cataly's |
 | Home backup | to `<gh login>/cataly-home`, private, created if absent, when `gh` is logged in (see [Home backup](#home-backup)) | `--backup on\|off`, `--backup-repo owner/name` |
 | Jobs | `[jobs.health]` and `[jobs.pressure]` with their defaults, notices to `#cataly-ops`, unless a job of that kind exists | |
 | Service | the user service, enabled and started (see [`cataly service enable`](#cataly-service-enable)); only for an installed release | `--service on\|off` |
@@ -618,6 +618,60 @@ check = true
 
 ---
 
+## `[ops]`
+
+The ops room, `#cataly-ops` after setup: one status panel and the few alerts worth a ping, kept
+apart from your talks with the lead. Events a job routes to this destination are not posted as
+lines; the panel words them, in `[hub] language`, and the event log keeps them as before.
+
+| Key | Type | Default | Allowed | What it does |
+|---|---|---|---|---|
+| `destination` | string | `"cataly-ops"` when that is a Discord destination | a Discord destination in `[destinations]`; `""` turns the room off | Where the panel and alerts go. |
+| `mute` | duration | `"1h"` | 1m–24h | How long the mute button silences new alerts. |
+| `alerts.pressure` | boolean | `true` | | Post when the host has been in alert for five minutes (`pressure.alert`). |
+| `alerts.quota` | boolean | `true` | | Post when the quota gate holds a provider (`quota.hold`). |
+| `alerts.jobs` | boolean | `true` | | Post when a job routed here fails twice in a row. |
+| `alerts.backup` | boolean | `true` | | Post when a backup is refused (`backup.refused`). |
+| `alerts.github` | boolean | `true` | | Post GitHub news: `github.pr`, `github.notification`, `pr.feedback`, `pr.check_failed`, `pr.merged`. |
+| `alerts.mail` | boolean | `true` | | Post new items of an `items` job, such as a mail watch (`items.new`). |
+
+**The panel** is one embed message: created once with Cataly's banner and thumbnail, pinned when
+the bot may pin (the Pin Messages or Manage Messages permission; without it the panel stays
+unpinned), and then edited in place, only when something shown changed and at most once a
+minute, like the [board](#coordination-coord). After an uncertain create it is never posted again:
+it stays in doubt until the lead names the message it found (board destination
+`ops:<channel id>`).
+Its colour is the worst state: green when all is fine, amber when something is worth a look (host
+busy, a limit at 70 % or more, a job with a failure, the lead in error or held), red when it needs
+you (host in alert, a provider held, a job failing twice or waiting for your ack). It shows:
+
+- 🖥️ host: load bar and per cent, free memory and disk, live lane sessions of `max_sessions`
+  (load and memory rounded to 5 %, so noise does not edit the panel);
+- 🔋 usage: one line per provider with its most used limit, a bar, the per cent and the reset time;
+  held providers marked;
+- 👥 sessions: the lead's state and model, lanes running and waiting;
+- 🛠️ jobs: all fine, or which jobs need attention;
+- 📮 recent: the last three events routed here (busy and ready changes left out), with relative
+  times;
+- the footer: the version and the update time.
+
+Buttons, for the owner only (anyone else gets a private refusal): 🔄 refresh (once a minute at
+most), 📊 usage details (a private reply with every limit), 🔕 mute (silences new alerts for
+`mute`; press again to unmute; the panel keeps updating).
+
+**Alerts** are small embeds with the thumbnail, each kind at most once an hour and none while
+muted. One whose condition clears (`pressure.clear`, `quota.released`, `backup.clean`, the job
+working again) is edited to show it resolved and when, instead of a new post. Busy and ready
+changes never post; they only change the panel.
+
+```toml
+[ops]
+mute = "30m"
+alerts = { github = false }
+```
+
+---
+
 ## `[destinations.<name>]`
 
 Where job events go besides the store and the event log. The name `log` is reserved: it is the
@@ -813,9 +867,13 @@ Events: `items.new` (`job`, `id`, `title`).
 #### `pressure`: host load, memory and disk
 
 Samples the host. Any failing check holds new session starts, and an unknown value always holds.
-Tells the lead once when the host enters alert and once when it clears, and once when it becomes
-ready for heavy compute and once when it is busy again. Without a pressure job, session starts
-use the same rule with the defaults below. `alert_load` must be greater than `ready_load`.
+Tells the lead once when the host has failed a check for five minutes in a row (alert) and once
+when it clears, and once when it becomes ready for heavy compute and once when it is busy again.
+Once in a state, the load must cross back 10 percentage points past the line before the state
+changes again (ready below `ready_load`, busy again at `ready_load` + 10; in alert above
+`alert_load`, clear at or below `alert_load` − 10), so a load near a line does not flip it every
+tick. Without a pressure job, session starts use the same rule with the defaults below.
+`alert_load` must be greater than `ready_load`.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|

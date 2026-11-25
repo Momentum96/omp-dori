@@ -538,6 +538,7 @@ fn sessions(
         let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
         supervisor.spawn("lanes", move || Arc::clone(&lanes).run(stop.clone()));
     }
+    ops_people(jobs, &lead, &lanes);
     {
         let (slots, stop) = (Arc::clone(&lanes.slots), shutdown.clone());
         supervisor.spawn("slots", move || Arc::clone(&slots).run(stop.clone()));
@@ -718,6 +719,40 @@ fn lanes(
     })
 }
 
+/// The lead and the lanes as the ops panel shows them.
+fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::Lanes<Hosted>>) {
+    use crate::host::Status;
+    use crate::host::lead::Phase;
+    use crate::jobs::ops::render::{LeadState, People};
+    let (lead, lanes) = (Arc::clone(lead), Arc::clone(lanes));
+    jobs.ctx().ops.set_people(Arc::new(move || {
+        let (lead, lanes) = (Arc::clone(&lead), Arc::clone(&lanes));
+        Box::pin(async move {
+            let view = lead.view().await;
+            let (running, waiting, live) = lanes.ops_counts().await;
+            let state = match (&view.session, &view.phase) {
+                (Some(s), _) => match s.status {
+                    Status::Working => LeadState::Working,
+                    Status::Blocked => LeadState::Blocked,
+                    Status::Error => LeadState::Error,
+                    Status::Idle | Status::Unknown => LeadState::Idle,
+                },
+                (None, Phase::Starting) => LeadState::Starting,
+                (None, Phase::Stopped) => LeadState::Stopped,
+                (None, Phase::Held) => LeadState::Held,
+                (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
+            };
+            People {
+                lead: state,
+                model: view.session.and_then(|s| s.model),
+                running,
+                waiting,
+                live,
+            }
+        })
+    }));
+}
+
 /// Events to the lead, owed-reply reminders and the unanswered watch, each a supervised task.
 fn spawn_lead_tasks(hub: &Arc<Hub>, supervisor: &Supervisor, shutdown: &watch::Receiver<bool>) {
     {
@@ -781,6 +816,7 @@ fn discord(
         lanes: Arc::clone(lanes),
         events: Arc::clone(events),
         rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
+        jobs: jobs.clone(),
         spill_dir: paths.files_dir.join("relay"),
         tap,
     });
