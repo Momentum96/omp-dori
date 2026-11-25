@@ -541,3 +541,94 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
 - `tests/support/fake-omp`: the background-turn poller tested its parent with `kill -0`, which a
   killed, unreaped parent (a zombie) passes; the poller then held stdout open, the hub never saw the
   exit and `lead_restarts_on_its_session_after_omp_exits` timed out. It now treats a zombie as gone.
+
+# Milestone 3 slice 3b: coordination
+
+## Shape
+
+- **Slots** (`lanes::slots`, `cli::slot`): a fair in-hub queue per slot name, priority then strict
+  arrival. A holder keeps its slot until both its client connection and its command exited. Grants
+  and queues live in memory only; after a hub start nothing is granted for 5 s so running clients
+  can re-assert their holds. `cataly slot <name> [--lane] [--priority 1-9] [--timeout] -- <cmd>`
+  runs the command in the caller's terminal and ends with its exit status. `lane.slots` and
+  `lane.admission` are the views (WS-37).
+- **Queued launches** (`lanes::queue`): an open naming predecessors (`after`) is validated and its
+  brief assembled at once, the key reserved; the lead hears once per change when it becomes ready or
+  is held again. The hub never starts it; `lane.start` or the owner does.
+- **Items and planner** (`lanes::plan`): items are a queue of later work; the planner pass
+  reconciles items with their lanes, audits, starts the next items under the lead, the quota gate,
+  admission and the lane maximum, asks open questions through the lead, runs the owner-notes step
+  and stores the run (168 kept). A pass that found nothing says nothing to the lead.
+- **Owner notes** (`jobs::notes`): the profile file of 2c is now the owner notes: off until the
+  owner creates them, five fixed sections, dated one-line entries; the hub checks (lost decision,
+  future date, token-shaped string), snapshots and reverts (a backup is saved first).
+- **Review and merge gate** (`lanes::review`): a review runs a fresh print-mode OMP (or the
+  configured reviewer command) pinned to the PR head and stores its last verdict line; the merge
+  refuses without an approving verdict at the current head, with no checks, or with a check neither
+  passed nor skipped, then squash-merges pinned to that head; `dry_run` stops before merging. It uses
+  the shared `gh` helper of the owner jobs. Event commands are argv templates, at most four running,
+  never through a shell.
+- **Published files and learned rules** (`lanes::publish`): a file is registered with its hash,
+  size, title, visibility and link under a configured root; a change adds a version. Nothing is
+  uploaded. Rules are one-line lessons, global or per repository, put before new briefs.
+- **Board posts** (`lanes::board`): one message per `[coord] board` destination, rebuilt when lanes
+  change and edited at most once a minute, only when the body (without its update time) changed. The
+  create is stored as pending first, sent with an enforced nonce (the relay's retries are safe); an
+  outcome still uncertain after the retries marks the destination in doubt, and it is neither
+  recreated nor edited, also across restarts, until the lead names the message it found
+  (`lane.board-found`), which wakes the next pass to edit that message.
+
+## Records in the `coord` table
+
+Migration 6 adds one table, `coord (kind, id, version, at_ms, doc)`: one JSON document per kind and
+id, written only by the hub with compare-and-swap on `version` (`lanes::docs`). The store knows no
+fields. Kinds and their ids: `queued` (lane key), `item` (item id), `planner` (`state`), `plan_run`
+(start time, zero-padded; 168 kept), `verdict` (`owner/repo#N@head`), `file` (the resolved path),
+`rule` (rule id), `board` (destination, e.g. `discord:<channel>`). Slot grants are not stored.
+
+## The `approval` extension surface
+
+Stock OMP 19.1.1 asked "Allow tool: cataly_lane" before every lane tool call (slice 3a). The bridge
+now registers each Cataly tool with the extension API's `approval: { tier: "write", policy: "allow" }`
+(OMP `approval-mode.md`: tool tier and tool policy). The hub checks every operation these tools
+request, so OMP need not ask; a user `tools.approval.<tool>: deny` still wins, and a restricted
+folder still prompts. `tests/contract_lanes.rs` no longer answers the dialog and asserts none opened.
+
+## Choices and deviations
+
+- The planner is a supervised task beside oversight (`Lanes::plan_loop`), not a `[jobs.*]`
+  instance: it needs the lanes and runs once at start, then at last run plus the interval.
+- Items carry their own done checks, since every lane needs one.
+- The lead's notes save refuses a failing check instead of masking secrets in place.
+- While a slot command runs, a terminal Ctrl-C is not passed on again (the command already got it);
+  TERM and HUP are.
+- A queued launch must name `thread`, not `thread_from`.
+- The planner checks the quota gate before "no lead".
+- `lane.board-found` wakes the oversight task, so the found message is edited at once rather than at
+  the next sweep.
+- **A quota tick waits for the first OMP probe.** The second full run failed once at the baseline
+  tick of `owner.rs`'s quota test (15 repeats of that binary passed; the event list was not
+  captured). The control socket serves before the OMP watcher's first pass, so a `cataly job run`
+  of a quota job right after start can read with no resolved executable and report `tick.failed`;
+  that race fits the failure. The tick now waits for the first probe report
+  (`Omp::first_probe`), bounded by its own deadline.
+
+## Tests
+
+- `tests/coord.rs`: checks 1-6 through the real hub on the fake OMP and the fake `gh`; check 6 also
+  through the fake Discord: two destinations, one whose create is stored but answered 500 on all
+  four attempts (one message, thanks to the nonce). It asserts one create and one edit after at least
+  59 s holding both changes of that minute, no create or edit in the doubtful channel, nothing
+  recreated after a hub restart, and that `board-found` makes the next pass edit the found message.
+  A first version scripted a single 500 and saw the relay's nonce retry settle the create; that is
+  correct, so the test now keeps the outcome uncertain through every attempt.
+  `planner_pass_with_100_items_and_rss` (ignored) is the measurement.
+- `tests/support/discord.rs`: `script_in` scripts create statuses for one channel.
+- `lanes::board::tests` keeps the pure step cases: the minute rule on exact times, a refused create
+  that may be tried again, and a pending mark that cannot be stored stopping before the create.
+- Closing runs: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean; the full
+  `cargo test --no-fail-fast` passed twice in a row after the last change outside the ignored
+  measurement (198 unit tests passed, 3 ignored; every integration binary); each contract binary
+  passed alone in release with `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1,
+  `contract_session` 5, `contract_discord` 3, `contract_lanes` 2, the lane tool running with no
+  dialog); `bun test extension/` 6 passed.

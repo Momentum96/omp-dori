@@ -5,6 +5,7 @@
 pub(crate) mod cron;
 pub(crate) mod event;
 pub(crate) mod memory;
+pub(crate) mod notes;
 pub(crate) mod owner;
 mod route;
 mod run;

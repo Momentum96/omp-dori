@@ -47,6 +47,8 @@ pub enum Gw {
 struct State {
     seen: Vec<Seen>,
     scripted: VecDeque<u16>,
+    /// Channel -> statuses for its next message creates, used before `scripted`.
+    scripted_in: HashMap<String, VecDeque<u16>>,
     nonces: HashMap<String, u64>,
     next_id: u64,
     created: usize,
@@ -132,6 +134,17 @@ impl FakeDiscord {
 
     pub fn script(&self, statuses: &[u16]) {
         self.state.lock().unwrap().scripted.extend(statuses);
+    }
+
+    /// Statuses for the next message creates in one channel (the message is stored regardless).
+    pub fn script_in(&self, channel: &str, statuses: &[u16]) {
+        self.state
+            .lock()
+            .unwrap()
+            .scripted_in
+            .entry(channel.to_string())
+            .or_default()
+            .extend(statuses);
     }
 
     pub fn seen(&self) -> Vec<Seen> {
@@ -530,7 +543,12 @@ fn create(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
             .or_default()
             .push(created.clone());
     }
-    if let Some(status) = s.scripted.pop_front() {
+    let scripted = s
+        .scripted_in
+        .get_mut(id)
+        .and_then(VecDeque::pop_front)
+        .or_else(|| s.scripted.pop_front());
+    if let Some(status) = scripted {
         return reply(status, &json!({ "message": "scripted" }));
     }
     reply(200, &created)

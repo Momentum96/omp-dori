@@ -52,6 +52,10 @@ pub(crate) enum Request {
     ),
     Lead(Box<super::lead::LeadWrite>, Reply<super::lead::LeadDone>),
     Lanes(Box<super::lanes::LaneWrite>, Reply<super::lanes::LaneDone>),
+    Coord(
+        Box<super::coord::CoordWrite>,
+        Reply<super::coord::CoordDone>,
+    ),
 }
 
 type Finisher = Box<dyn FnOnce(Option<&StoreError>) + Send>;
@@ -110,6 +114,9 @@ fn execute(tx: &Transaction<'_>, req: Request) -> Finisher {
         }),
         Request::Lanes(write, r) => step(tx, r, |t| {
             super::lanes::write(t, &write, crate::sys::now_ms())
+        }),
+        Request::Coord(write, r) => step(tx, r, |t| {
+            super::coord::write(t, &write, crate::sys::now_ms())
         }),
         Request::RegisterJob(reg, r) => step(tx, r, |t| register_job(t, &reg)),
         Request::PatchJob(name, patch, r) => step(tx, r, |t| patch_job(t, &name, &patch)),

@@ -144,6 +144,13 @@ pub(crate) struct Record {
     pub(crate) watch: Watch,
     /// Final spend reading of the run: tokens and cost (WS req. 29).
     pub(crate) spend: Option<(f64, f64)>,
+    /// 1 runs first, 9 last; shared with items and slot waiters (COORD req. 41).
+    #[serde(default = "default_priority")]
+    pub(crate) priority: u8,
+}
+
+pub(crate) const fn default_priority() -> u8 {
+    5
 }
 
 impl Record {
@@ -185,6 +192,11 @@ pub(crate) struct OpenInput {
     pub(crate) preview: bool,
     pub(crate) request_id: Option<String>,
     pub(crate) worktree: Option<Worktree>,
+    pub(crate) priority: Option<u8>,
+    /// Predecessor lanes: the open is queued until they closed completed (LANE req. 22).
+    pub(crate) after: Vec<String>,
+    /// A queued launch expires after this many hours (LANE req. 23).
+    pub(crate) expires_hours: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -210,6 +222,7 @@ pub(crate) struct Validated {
     pub(crate) look_only: bool,
     pub(crate) ceilings: Ceilings,
     pub(crate) worktree: Option<Worktree>,
+    pub(crate) priority: u8,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -313,6 +326,16 @@ fn ceilings(
     })
 }
 
+/// 1 runs first, 9 last; 5 when not given (COORD req. 41).
+fn priority(given: Option<u8>) -> Result<u8, String> {
+    let p = given.unwrap_or(default_priority());
+    if (1..=9).contains(&p) {
+        Ok(p)
+    } else {
+        Err("priority must be 1 to 9".into())
+    }
+}
+
 /// Runs every open check without side effects (LANE req. 1-14). The brief file is read here.
 pub(crate) fn validate(input: &OpenInput, settings: &LaneSettings) -> Result<Validated, String> {
     if let Some(e) = key_error(&input.key) {
@@ -339,6 +362,7 @@ pub(crate) fn validate(input: &OpenInput, settings: &LaneSettings) -> Result<Val
         return Err("the brief must hold 1 byte to 64 KiB of text".into());
     }
     let checks = checks::parse(&input.checks)?;
+    let priority = priority(input.priority)?;
     if let Some(o) = &input.origin
         && !origin_ok(o)
     {
@@ -410,6 +434,7 @@ pub(crate) fn validate(input: &OpenInput, settings: &LaneSettings) -> Result<Val
         look_only: input.look_only,
         ceilings,
         worktree: input.worktree.clone(),
+        priority,
         warnings,
     })
 }
@@ -429,6 +454,8 @@ pub(crate) fn digest(input: &OpenInput) -> String {
         input.look_only,
         input.ceilings,
         input.worktree,
+        input.priority,
+        input.after,
     ]);
     crate::config::sha256_hex(doc.to_string().as_bytes())
 }
@@ -445,11 +472,11 @@ fn ceiling_text(c: &Ceilings) -> String {
     )
 }
 
-/// The lane's kickoff: the owner's brief, then the fixed instruction block (LANE req. 12-13, OPC-60,
-/// OPC-93) and the steps already recorded (EVR req. 33).
-pub(crate) fn kickoff(rec: &Record, steps: &[(String, String)]) -> String {
+/// The lane's kickoff: the learned rules, the owner's brief, then the fixed instruction block (LANE
+/// req. 12-13, OPC-60, OPC-93; EVR req. 47) and the steps already recorded (EVR req. 33).
+pub(crate) fn kickoff(rec: &Record, rules: &str, steps: &[(String, String)]) -> String {
     let mut text = format!(
-        "[lane {}] {}\n\n{}\n\n",
+        "[lane {}] {}\n\n{rules}{}\n\n",
         rec.key,
         rec.title,
         rec.brief.trim()

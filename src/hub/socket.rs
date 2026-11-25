@@ -26,6 +26,106 @@ const IDLE: Duration = Duration::from_secs(60);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOW_PAGE: u32 = 256;
 
+/// `cataly slot`: one request held for the life of the connection (LANE req. 21, COORD req. 42-46).
+/// Items report the place in the queue and the grant; after the grant the client sends `{"pid": n}`
+/// once its command started. The end of the connection withdraws a waiter, and frees a grant once
+/// its command has exited too.
+async fn slot(
+    hub: &Arc<Hub>,
+    id: u64,
+    params: &serde_json::Value,
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+) {
+    use crate::lanes::slots::Place;
+    let refuse = |m: String| Response::err(id, code::REFUSED, m);
+    let name = params
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if !crate::config::coord::slot_name_ok(&name) {
+        let _ = send(writer, &refuse("a slot name is a letter or digit, then letters, digits, '_', '.' or '-', 64 at most".into())).await;
+        return;
+    }
+    let lane = params
+        .get("lane")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    if let Some(e) = lane.as_deref().and_then(crate::lanes::record::key_error) {
+        let _ = send(writer, &refuse(e)).await;
+        return;
+    }
+    let priority = match params.get("priority").and_then(serde_json::Value::as_u64) {
+        Some(p @ 1..=9) => u8::try_from(p).unwrap_or(5),
+        Some(_) => {
+            let _ = send(writer, &refuse("priority must be 1 to 9".into())).await;
+            return;
+        }
+        None => match &lane {
+            Some(k) => hub.lanes.priority_of(k).await.unwrap_or(5),
+            None => 5,
+        },
+    };
+    let label = lane.unwrap_or_else(|| "local".into());
+    let slots = Arc::clone(&hub.lanes.slots);
+    let pid = params
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u32::try_from(p).ok());
+    let token = match pid {
+        Some(p) => slots.hold(&name, &label, p),
+        None => slots.request(&name, &label, priority),
+    };
+    let mut changes = slots.changes();
+    let mut last = None;
+    let mut probe = [0u8; 1];
+    loop {
+        let place = slots.place(&name, token);
+        if last != Some(place) {
+            let item = match place {
+                Place::Waiting(n) => serde_json::json!({ "state": "waiting", "place": n }),
+                Place::Granted => serde_json::json!({ "state": "granted" }),
+                Place::Gone => serde_json::json!({ "state": "gone" }),
+            };
+            if !send(writer, &Response::item(id, item)).await || place == Place::Gone {
+                slots.client_gone(&name, token);
+                return;
+            }
+            last = Some(place);
+        }
+        if place == Place::Granted {
+            break;
+        }
+        changes.borrow_and_update();
+        tokio::select! {
+            _ = changes.changed() => {}
+            // Input before the grant, or the end of input, withdraws the request.
+            _ = tokio::io::AsyncReadExt::read(reader, &mut probe) => {
+                slots.client_gone(&name, token);
+                return;
+            }
+        }
+    }
+    loop {
+        match read_line(reader).await {
+            Line::Text(text) => {
+                let pid = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("pid").and_then(serde_json::Value::as_u64))
+                    .and_then(|p| u32::try_from(p).ok());
+                if let Some(pid) = pid {
+                    slots.started(&name, token, pid);
+                }
+            }
+            Line::TooLong | Line::Closed => {
+                slots.client_gone(&name, token);
+                return;
+            }
+        }
+    }
+}
+
 /// Binding failed.
 #[derive(Debug)]
 pub(crate) enum BindError {
@@ -171,6 +271,10 @@ async fn connection(hub: &Arc<Hub>, stream: UnixStream) {
         };
         if request.method == method::EVENTS_FOLLOW {
             follow(hub, request.id, request.params, &mut reader, &mut writer).await;
+            return;
+        }
+        if request.method == method::SLOT {
+            slot(hub, request.id, &request.params, &mut reader, &mut writer).await;
             return;
         }
         if request.method == super::bridge::HELLO {

@@ -7,13 +7,20 @@
 //! lead run lifecycle operations; a lane, through its bridge connection, only reports, records steps,
 //! claims completion and registers worktrees for itself (LANE req. 1, 53; OPC-57).
 
+pub(crate) mod board;
 pub(crate) mod checks;
+mod docs;
 pub(crate) mod evidence;
 mod git;
 mod life;
 pub(crate) mod oversight;
+mod plan;
+mod publish;
+mod queue;
 pub(crate) mod record;
+mod review;
 pub(crate) mod shell;
+pub(crate) mod slots;
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -61,8 +68,8 @@ pub(crate) enum Posted {
     Uncertain(String),
 }
 
-/// What lanes need from the relay for their threads (DISC-OUT-11 to 13, EVR-14).
-pub(crate) trait Threads: Send + Sync {
+/// What lanes need from the relay for their threads (DISC-OUT-11 to 13, EVR-14) and the board.
+pub(crate) trait Threads: board::Board + Send + Sync {
     /// Posts `text` once (the seed makes the nonce) into a thread.
     fn post<'a>(&'a self, thread: &'a str, text: &'a str, seed: &'a str) -> BoxFut<'a, Posted>;
     /// Puts the status word in front of the thread's title, read fresh; archives when asked.
@@ -123,6 +130,10 @@ pub(crate) struct Lanes<R: Runtime> {
     pub(crate) nudge: Notify,
     /// Spawn to kickoff confirmed (plan milestone 3a measure).
     pub(crate) start_latency: Latency,
+    /// Named slots for heavy commands (LANE-10).
+    pub(crate) slots: Arc<slots::Slots>,
+    /// One planner pass at a time (COORD req. 35).
+    planning: AsyncMutex<()>,
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -155,6 +166,7 @@ pub(crate) fn revision_text(r: Revision) -> String {
 
 impl<R: Runtime> Lanes<R> {
     pub(crate) fn new(env: Env<R>) -> Arc<Self> {
+        let slots = Arc::new(slots::Slots::new(env.config.clone()));
         Arc::new(Self {
             env,
             live: Mutex::new(HashMap::new()),
@@ -165,6 +177,8 @@ impl<R: Runtime> Lanes<R> {
             spend: Mutex::new(HashMap::new()),
             nudge: Notify::new(),
             start_latency: Latency::default(),
+            slots,
+            planning: AsyncMutex::new(()),
         })
     }
 
@@ -188,6 +202,7 @@ impl<R: Runtime> Lanes<R> {
     }
 
     fn emit(&self, emit: Emit) {
+        self.lane_event(emit.kind, &emit.values);
         (self.env.events)(emit);
     }
 
@@ -432,10 +447,57 @@ impl<R: Runtime> Lanes<R> {
             }
             "drift" => self.drift().await,
             "spend" => self.spend_view(s(input, "key")).await,
+            other => self.coord_op(&caller, other, input).await,
+        }
+    }
+
+    /// The coordination operations of milestone 3b for the lead and the owner.
+    async fn coord_op(
+        self: &Arc<Self>,
+        caller: &Caller,
+        op: &str,
+        input: &Value,
+    ) -> Result<Value, String> {
+        let key = || need(input, "key");
+        let text = |t: String| Ok(json!(t));
+        match op {
+            "priority" => text(self.set_priority(key()?, input).await?),
+            "queued" => self.queued(input).await,
+            "start" => self.start_queued(key()?).await,
+            "cancel" => text(self.cancel_queued(key()?).await?),
+            "item-add" | "items" | "item-answer" | "item-drop" | "item-import" | "plan"
+            | "plan-status" | "plan-stop" | "plan-resume" => self.item_op(op, input).await,
+            "review" => self.review(input).await,
+            "merge" => self.merge(input).await,
+            "publish" => self.publish(input, None).await,
+            "files" => self.files(s(input, "key")).await,
+            "rule-add" | "rule-retire" | "rules" => self.rule_op(op, input, None).await,
+            "board-found" => self.board_found(input).await,
+            "admission" => {
+                let config = self.cfg();
+                let cwd = s(input, "cwd")
+                    .map(PathBuf::from)
+                    .or_else(|| config.lanes.cwd.clone())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                Ok(match self.admission(&config, &cwd).await {
+                    Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
+                    Err(e) => json!({ "admit": false, "detail": e }),
+                })
+            }
+            "slots" => Ok(json!({ "slots": self.slots.view(), "lines": self.slots.lines() })),
+            "profile-create" | "profile-show" | "profile-check" | "profile-revert"
+            | "profile-list"
+                if *caller == Caller::Owner =>
+            {
+                self.notes_op(op, input)
+            }
             other => Err(format!(
                 "unknown lane op '{other}'; ops: open, list, board, history, reports, pause, resume, park, \
                  abandon, claim, object, close, reopen, send, release, read, interrupt, model, answer, grant, \
-                 drift, spend"
+                 drift, spend, priority, queued, start, cancel, item-add, items, item-answer, item-drop, \
+                 item-import, plan, plan-status, plan-stop, plan-resume, review, merge, publish, files, \
+                 rule-add, rule-retire, rules, board-found, admission, slots, profile-create, profile-show, \
+                 profile-check, profile-revert, profile-list (owner)"
             )),
         }
     }
@@ -518,8 +580,16 @@ impl<R: Runtime> Lanes<R> {
                 .await;
                 Ok(json!(format!("worktree {real} registered for lane {key}")))
             }
+            "publish" => {
+                if !current {
+                    return Err(crate::store::lanes::MOVED_ON.into());
+                }
+                self.publish(input, Some(&key)).await
+            }
+            "rule-add" | "rule-retire" | "rules" => self.rule_op(op, input, Some(&rec)).await,
             other => Err(format!(
-                "unknown op '{other}'; ops: report, step, steps, claim, worktree"
+                "unknown op '{other}'; ops: report, step, steps, claim, worktree, publish, rule-add, \
+                 rule-retire, rules"
             )),
         }
     }
@@ -724,16 +794,32 @@ impl<R: Runtime> Lanes<R> {
             .and_then(|m| m.remove("thread_from"))
             .and_then(|v| v.as_str().map(str::to_string));
         let open: OpenInput =
-            serde_json::from_value(input_value).map_err(|e| format!("open: {e}"))?;
+            serde_json::from_value(input_value.clone()).map_err(|e| format!("open: {e}"))?;
         let config = self.cfg();
         let valid = record::validate(&open, &config.lanes)?;
         let preview_rec = Self::build(&valid, &config, String::new());
         if open.preview {
+            let (rules, _) = self.rules_for(&preview_rec).await;
             return Ok(json!({
                 "preview": true,
-                "brief": record::kickoff(&preview_rec, &[]),
+                "brief": record::kickoff(&preview_rec, &rules, &[]),
                 "warnings": valid.warnings,
             }));
+        }
+        if !open.after.is_empty() {
+            if thread_from.is_some() {
+                return Err("a queued launch takes thread, not thread_from".into());
+            }
+            return self.queue(&open, &valid, input_value).await;
+        }
+        if docs::get::<queue::Queued>(&self.env.store, docs::QUEUED, &valid.key)
+            .await?
+            .is_some_and(|(q, _)| q.reserves())
+        {
+            return Err(format!(
+                "the key {} is reserved by a queued launch; start it with op start",
+                valid.key
+            ));
         }
         let digest = record::digest(&open);
         if let Some(rid) = &open.request_id {
@@ -830,6 +916,7 @@ impl<R: Runtime> Lanes<R> {
                 ..record::Watch::default()
             },
             spend: None,
+            priority: v.priority,
         }
     }
 
@@ -994,6 +1081,21 @@ impl<R: Runtime> Lanes<R> {
         })
     }
 
+    /// The kickoff with the learned rules; the lead hears which eligible rules were left out
+    /// (EVR req. 47).
+    async fn kickoff_text(&self, rec: &Record) -> String {
+        let (rules, left) = self.rules_for(rec).await;
+        if !left.is_empty() {
+            self.alert(
+                &rec.key,
+                "learned rules left out",
+                &format!("over the limit at launch: {}", left.join(", ")),
+                false,
+            );
+        }
+        record::kickoff(rec, &rules, &[])
+    }
+
     /// The start sequence after the record exists (LANE req. 15-16; HOST-19). Returns the outcome
     /// line: `started`, `start held: model`, `unconfirmed: ...` or `failed: ...`.
     async fn start(
@@ -1054,8 +1156,7 @@ impl<R: Runtime> Lanes<R> {
             return "started".into();
         }
         let deadline = began + budget;
-        let steps: Vec<(String, String)> = Vec::new();
-        let kickoff = record::kickoff(&rec, &steps);
+        let kickoff = self.kickoff_text(&rec).await;
         let delivered = self
             .deliver_wait(
                 &rec.key,

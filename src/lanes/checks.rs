@@ -212,10 +212,14 @@ async fn run(argv: &[String], cwd: &Path, limit: Duration) -> Result<(bool, Stri
 }
 
 /// One GitHub read, spoken as the owner jobs speak to `gh` (`jobs::owner::gh_api`), bounded here.
-async fn gh(path: &str, cwd: &Path) -> Result<Value, String> {
-    let api = crate::jobs::owner::gh_api(path);
-    let argv: Vec<String> = std::iter::once("gh")
-        .chain(api)
+pub(crate) async fn gh(path: &str, cwd: &Path) -> Result<Value, String> {
+    gh_args(&crate::jobs::owner::gh_api(path), cwd).await
+}
+
+/// One bounded `gh` call with the shared environment; the answer is read as JSON.
+pub(crate) async fn gh_args(args: &[&str], cwd: &Path) -> Result<Value, String> {
+    let words: Vec<String> = std::iter::once("gh")
+        .chain(args.iter().copied())
         .map(str::to_string)
         .collect();
     let env: Vec<(&str, &str)> = CLEAN_ENV
@@ -224,7 +228,7 @@ async fn gh(path: &str, cwd: &Path) -> Result<Value, String> {
         .copied()
         .collect();
     let done = command::run(&Spec {
-        argv: &argv,
+        argv: &words,
         cwd: Some(cwd),
         env: &env,
         timeout: LIMIT,
@@ -237,7 +241,7 @@ async fn gh(path: &str, cwd: &Path) -> Result<Value, String> {
     if done.timed_out {
         return Err(format!("no answer within {} s", LIMIT.as_secs()));
     }
-    crate::jobs::owner::gh_answer(&api, &done)
+    crate::jobs::owner::gh_answer(args, &done)
 }
 
 fn resolve(path: &str, cwd: &Path) -> PathBuf {

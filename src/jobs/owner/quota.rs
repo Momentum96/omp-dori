@@ -136,6 +136,9 @@ pub(crate) fn stored_causes(value: Option<&str>) -> Vec<Cause> {
 }
 
 pub(super) async fn tick(t: &mut Tick<'_>, q: &Quota) -> Result<(), String> {
+    // A tick at hub start can run before the first probe resolved the executable; the tick's own
+    // deadline bounds this wait.
+    t.ctx.omp.first_probe().await;
     let omp = t.ctx.omp.path();
     let read = t
         .ctx

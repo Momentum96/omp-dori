@@ -447,6 +447,14 @@ fn sessions(
         let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
         supervisor.spawn("lanes", move || Arc::clone(&lanes).run(stop.clone()));
     }
+    {
+        let (slots, stop) = (Arc::clone(&lanes.slots), shutdown.clone());
+        supervisor.spawn("slots", move || Arc::clone(&slots).run(stop.clone()));
+        let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
+        supervisor.spawn("planner", move || {
+            Arc::clone(&lanes).plan_loop(stop.clone())
+        });
+    }
     let discord = discord(
         paths,
         jobs,

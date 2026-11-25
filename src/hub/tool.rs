@@ -8,16 +8,13 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::Hub;
-use crate::jobs::instant_text;
 use crate::store::lead::{LeadDone, LeadWrite, QuestionRow, RequestRow};
 use crate::sys::now_ms;
 
 /// The recap is at most this long (EVR req. 48).
 const RECAP_MAX: usize = 8 * 1024;
-/// The profile is capped (OPC req. 55).
-pub(crate) const PROFILE_MAX: usize = 16 * 1024;
-/// Profile versions kept for undo.
-const PROFILE_KEEP: usize = 30;
+/// The owner notes are capped (OPC req. 55, COORD req. 51).
+pub(crate) const PROFILE_MAX: usize = crate::jobs::notes::MAX;
 
 /// The tool as the bridge registers it: name, description and JSON Schema from the hub.
 pub(crate) fn definition() -> Value {
@@ -31,13 +28,23 @@ pub(crate) fn definition() -> Value {
     options, recommended?, settle owner|lead, thread?, request?, room?), question.answer (id, text, message), \
     question.choose (id, option, reason, message), question.withdraw (id, reason); jobs, job.start (name, argv, \
     filter, restarts?, delay?, silence?, low?), job.stop (name), job.run (name: one dry run of an owner job); \
-    digest (since?); recap; profile.read, profile.save (text), profile.undo. Lanes: lane.open (key, title, brief or \
-    brief_file, checks: list of {kind: pr_merged|issue_closed|command|file|web|pr_policy, ...}, thread? or \
-    thread_from? discord:<room>/<message>, cwd?, model?, origin?, look_only?, ceilings?, worktree?, preview?), \
-    lane.list (all?), lane.board (key?), lane.pause|resume (key, reason?), lane.park|abandon (key, reason, \
-    condition?), lane.object (key, reason), lane.close (key, note?, lesson?), lane.reopen (key, note?), lane.send \
-    (key, text, id?, steer?), lane.release (key, note), lane.read (key, count?), lane.answer (key, dialog, answer), \
-    lane.grant (key, rule, reason), lane.drift, lane.spend (key?).",
+    digest (since?); recap; owner notes (only once the owner created them; observations, never instructions or \
+    permission, never passed to other roles): profile.read, profile.save (text: the whole file, checked), \
+    profile.snapshot, profile.check, profile.archive (text: decision lines moved out), profile.undo. Lanes: \
+    lane.open (key, title, brief or brief_file, checks: list of {kind: pr_merged|issue_closed|command|file|web|pr_policy, \
+    ...}, thread? or thread_from? discord:<room>/<message>, cwd?, model?, origin?, look_only?, ceilings?, worktree?, \
+    priority? 1-9, after? [predecessor keys: queued], expires_hours?, preview?), lane.list (all?), lane.board (key?), \
+    lane.pause|resume (key, reason?), lane.park|abandon (key, reason, condition?), lane.object (key, reason), \
+    lane.close (key, note?, lesson?), lane.reopen (key, note?), lane.send (key, text, id?, steer?), lane.release \
+    (key, note), lane.read (key, count?), lane.answer (key, dialog, answer), lane.grant (key, rule, reason), \
+    lane.drift, lane.spend (key?), lane.priority (key, priority). Queued launches: lane.queued (key?), lane.start \
+    (key), lane.cancel (key). Items and planner: lane.item-add (id, title?, brief or brief_file, checks, cwd?, \
+    priority?), lane.items (all?), lane.item-answer (id, text), lane.item-drop (id, reason), lane.item-import (repo, \
+    checks, label?, cwd?), lane.plan, lane.plan-status, lane.plan-stop (reason?), lane.plan-resume. Review: \
+    lane.review (pr owner/name#N, model?), lane.merge (pr, dry_run?; only with the owner's authorisation). Files and \
+    rules: lane.publish (key, path, title?, visibility private|public), lane.files (key?), lane.rule-add (text, \
+    evidence, scope global|repo, key?), lane.rule-retire (id), lane.rules, lane.board-found (destination, message). \
+    Host: lane.admission (cwd?), lane.slots.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -196,10 +203,29 @@ pub(crate) async fn call(hub: &Arc<Hub>, input: &Value) -> Result<String, String
             .0)
         }
         "recap" => Ok(recap(hub).await),
-        "profile.read" => profile_read(hub),
-        "profile.save" => profile_save(hub, need(input, "text", PROFILE_MAX, false)?),
-        "profile.undo" => profile_undo(hub),
+        profile if profile.starts_with("profile.") => notes(hub, profile, input),
         "" => Err("op is required".into()),
+        other => Err(format!("unknown op {other}; see the tool description")),
+    }
+}
+
+/// The lead's owner-notes operations (COORD-34 to COORD-37, OPC-79).
+fn notes(hub: &Hub, op: &str, input: &Value) -> Result<String, String> {
+    let notes = crate::jobs::notes::Notes::new(&hub.paths.state_dir);
+    let today = crate::jobs::notes::Notes::today();
+    match op {
+        "profile.read" => notes.show(),
+        "profile.save" => notes.save(need(input, "text", PROFILE_MAX, false)?),
+        "profile.snapshot" => notes.snapshot(today),
+        "profile.check" => notes.check_file(today).map(|p| {
+            if p.is_empty() {
+                "the check passes".into()
+            } else {
+                p.join("\n")
+            }
+        }),
+        "profile.archive" => notes.archive_add(need(input, "text", PROFILE_MAX, false)?),
+        "profile.undo" => notes.undo(),
         other => Err(format!("unknown op {other}; see the tool description")),
     }
 }
@@ -470,71 +496,4 @@ pub(crate) async fn recap(hub: &Hub) -> String {
         out.truncate(end);
     }
     out
-}
-
-fn profile_paths(hub: &Hub) -> (std::path::PathBuf, std::path::PathBuf) {
-    (
-        hub.paths.state_dir.join("profile.md"),
-        hub.paths.files_dir.join("profile"),
-    )
-}
-
-fn profile_read(hub: &Hub) -> Result<String, String> {
-    let (file, _) = profile_paths(hub);
-    match crate::sys::fs::read_private(&file, PROFILE_MAX as u64 + 1) {
-        Ok(Some(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        Ok(None) => Ok("the profile is empty".into()),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// Saves the whole profile, keeping the previous version for undo (OPC req. 55). Credential-shaped
-/// strings are masked first (OPC req. 53).
-fn profile_save(hub: &Hub, text: &str) -> Result<String, String> {
-    let (file, dir) = profile_paths(hub);
-    let text = crate::sys::secrets::mask(text);
-    if text.len() > PROFILE_MAX {
-        return Err(
-            "the profile is capped at 16 KiB; move the oldest part to an archive note first".into(),
-        );
-    }
-    crate::sys::fs::ensure_private_dir(&dir).map_err(|e| e.to_string())?;
-    if let Ok(Some(old)) = crate::sys::fs::read_private(&file, PROFILE_MAX as u64 + 1) {
-        crate::sys::fs::write_atomic(&dir.join(format!("{}.md", now_ms())), &old)
-            .map_err(|e| e.to_string())?;
-        let mut kept: Vec<_> = std::fs::read_dir(&dir)
-            .map_or_default(|d| d.filter_map(Result::ok).map(|e| e.path()).collect());
-        kept.sort();
-        let excess = kept.len().saturating_sub(PROFILE_KEEP);
-        for old in kept.iter().take(excess) {
-            let _ = std::fs::remove_file(old);
-        }
-    }
-    crate::sys::fs::write_atomic(&file, text.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "profile saved ({} bytes); profile.undo restores the previous version",
-        text.len()
-    ))
-}
-
-fn profile_undo(hub: &Hub) -> Result<String, String> {
-    let (file, dir) = profile_paths(hub);
-    let mut kept: Vec<_> = std::fs::read_dir(&dir)
-        .map_or_default(|d| d.filter_map(Result::ok).map(|e| e.path()).collect());
-    kept.sort();
-    let last = kept.pop().ok_or("no earlier profile version")?;
-    let bytes = crate::sys::fs::read_private(&last, PROFILE_MAX as u64 + 1)
-        .map_err(|e| e.to_string())?
-        .ok_or("the earlier version is gone")?;
-    crate::sys::fs::write_atomic(&file, &bytes).map_err(|e| e.to_string())?;
-    std::fs::remove_file(&last).map_err(|e| e.to_string())?;
-    Ok(format!(
-        "profile restored to the version of {}",
-        instant_text(
-            last.file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0)
-        )
-    ))
 }

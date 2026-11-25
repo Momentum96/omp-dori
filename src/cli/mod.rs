@@ -5,6 +5,7 @@ mod client;
 mod lead;
 pub(crate) mod out;
 mod setup;
+mod slot;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -47,6 +48,22 @@ const RUN_TIMEOUT: Duration = Duration::from_mins(24 * 60 + 2);
 /// Entry point of the binary.
 pub(crate) fn main() -> ExitCode {
     let words: Vec<String> = std::env::args().skip(1).collect();
+    // `slot` keeps its command's words verbatim after `--`, so it parses its own line.
+    if words.first().map(String::as_str) == Some("slot")
+        && !words
+            .iter()
+            .take_while(|w| *w != "--")
+            .any(|w| w == "--help")
+    {
+        let paths = match Paths::from_env() {
+            Ok(p) => p,
+            Err(e) => {
+                out::error_line(&format!("cataly: {e}"));
+                return ExitCode::from(exit::FAILED);
+            }
+        };
+        return ExitCode::from(slot::run(words.get(1..).unwrap_or_default(), &paths.socket));
+    }
     let parsed = match args::parse(&words) {
         Ok(Invocation::Run(parsed)) => parsed,
         Ok(Invocation::Help(text)) => {

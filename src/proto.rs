@@ -54,6 +54,8 @@ pub(crate) mod method {
     pub(crate) const DISCORD_STATUS: &str = "discord.status";
     pub(crate) const DISCORD_RELEASE: &str = "discord.release";
     pub(crate) const DISCORD_RESET: &str = "discord.reset";
+    /// A held slot request (a stream for the life of the connection).
+    pub(crate) const SLOT: &str = "slot";
 }
 
 /// Error codes besides the decision classes.

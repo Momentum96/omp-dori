@@ -97,6 +97,14 @@ pub(crate) enum EventKind {
     LaneLost,
     LaneAlert,
     LaneRecap,
+    /// A queued launch became ready, held or expired (LANE req. 25).
+    LaneQueued,
+    /// A planner pass summary (COORD req. 34).
+    PlannerRun,
+    /// An item question for the owner, through the lead (COORD req. 32).
+    ItemQuestion,
+    /// The daily owner-notes refresh request (COORD req. 49).
+    NotesRefresh,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -107,7 +115,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 60] = [
+const KINDS: [KindRow; 64] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -478,6 +486,30 @@ const KINDS: [KindRow; 60] = [
         "lane.recap",
         &["detail"],
         "lanes after the hub start: {detail}",
+    ),
+    (
+        EventKind::LaneQueued,
+        "lane.queued",
+        &["lane", "detail"],
+        "queued launch {lane} {detail}",
+    ),
+    (
+        EventKind::PlannerRun,
+        "planner.run",
+        &["summary"],
+        "{summary}",
+    ),
+    (
+        EventKind::ItemQuestion,
+        "item.question",
+        &["item", "question"],
+        "item {item}: {question}",
+    ),
+    (
+        EventKind::NotesRefresh,
+        "notes.refresh",
+        &["date", "procedure"],
+        "owner-notes refresh for {date}: follow {procedure}",
     ),
 ];
 

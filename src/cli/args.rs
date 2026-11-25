@@ -15,7 +15,14 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 36] = [
+pub(crate) const COMMANDS: [Spec; 37] = [
+    Spec {
+        path: &["slot"],
+        args: &["name"],
+        flags: &[],
+        values: &["--lane", "--priority", "--timeout"],
+        summary: "wait for the named slot, then run the command after '--' and end with its exit status",
+    },
     Spec {
         path: &["lane"],
         args: &["op"],

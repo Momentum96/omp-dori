@@ -229,3 +229,34 @@ file, 6,381 entries of 1.5 KB text, half of them billed assistant messages; two 
 
 The CPU figure is with the fake OMP, which emits no events while idle; the same measure with eight
 stock OMP lanes was not taken. macOS figures are not measured.
+
+## Slice 3b: coordination (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Commands: `cargo build --release`; `cargo test --release --test coord -- --ignored --nocapture
+planner_pass` (the hub on the fake OMP with no lead, 100 open items, `cataly lane plan` forced
+passes, then a held and a waiting `cataly slot`; the pass time is the hub's own `duration_ms` of
+each stored run, read from the store; four runs, the last with 6,005 passes, the others with 55,
+305 and 2,005); `CATALY_CONTRACT_OMP=1 cargo test --release --test contract_lanes -- --nocapture
+--test-threads=1`.
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Planner pass over 100 open items, in the hub (ms resolution; 168 kept runs per measurement) | p50 1-2 ms, max 3 ms | none set |
+| `cataly lane plan` round trip (CLI start, socket, the pass and its store commits at the 8 ms disk floor) | 18.7-38.7 ms (first five passes of four runs) | none set |
+| Hub RSS idle, then with 100 items (first run) | 12.82 MiB (13,443,072 bytes), then 13.09 MiB | none set |
+| Hub RSS, 100 items, 55 planner passes, one slot held and one waiting (first run) | 14.28 MiB (14,970,880 bytes); 14.36 MiB after the slots ended | none set |
+| Hub RSS over 6,005 passes, sampled every 500 | 14.96, 15.57, 16.05, 16.47, 16.47, 16.52, 16.52, 16.53, 16.54, 16.71, 16.94, 17.16 MiB; store 5.4 MB plus a 4.1 MB write-ahead log | none set |
+| Lane start, spawn to kickoff confirmed (`contract_lanes`, 3 starts) | p50 673 ms, max 793 ms (slice 3a: 778, 815) | none set |
+| Hub RSS added per running stock-OMP lane (OMP excluded) | 0.54 MiB (13,422,592 to 15,106,048 bytes for three lanes) | none set |
+| Release binary (`cargo build --release`) | 12,226,456 bytes (11.66 MiB; slice 3a: 11,499,416) | none set |
+
+The growth seen in the debug build (27.5 to 29.4 MB with items, passes and slots) is the same
+warm-up in release (12.82 to 14.36 MiB): items, the first passes and the slot requests each add a
+step, then the steps shrink. Over 6,005 passes the RSS held at 16.47-16.54 MiB from pass 2,005 to
+pass 4,505, so a pass retains no memory of its own; 2,500 passes at the 1.1 KB per pass of the early
+slope would have added 2.6 MiB. The writer's SQLite page cache (2 MiB) and the two readers' (512 KiB
+each) fill as the store grows, which matches the warm-up's size. The later rise of 0.6 MiB over
+the last 1,500 passes is not explained; with no lead, every pass leaves one undelivered planner
+event in the lead's inbox (6,000 at the end, 250 days of hourly passes), and reading that backlog
+is the likely cause [inference, not measured]. Slots added nothing measurable. macOS figures are
+not measured.

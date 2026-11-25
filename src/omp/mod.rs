@@ -113,6 +113,11 @@ impl Omp {
         self.report.subscribe()
     }
 
+    /// Waits until the first probe finished; the executable is resolved by then. Callers bound it.
+    pub(crate) async fn first_probe(&self) {
+        let _ = self.report.subscribe().wait_for(Option::is_some).await;
+    }
+
     /// The executable resolved at the last check.
     pub(crate) fn path(&self) -> Option<PathBuf> {
         self.path

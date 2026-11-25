@@ -117,7 +117,11 @@ impl<R: Runtime> Lanes<R> {
             key: rec.key.clone(),
             run_id: rec.run_id.clone(),
             kind: r.kind.clone(),
-            text: r.text.trim().to_string(),
+            text: if r.kind == "finished" {
+                format!("{}{}", r.text.trim(), self.published_lines(&rec.key).await)
+            } else {
+                r.text.trim().to_string()
+            },
             summary: r.summary.clone(),
             evidence: serde_json::to_string(&json!({ "files": r.files, "calls": r.calls }))
                 .unwrap_or_default(),
@@ -350,7 +354,11 @@ impl<R: Runtime> Lanes<R> {
                 return Ok(());
             }
             let o = self.cfg().lanes.oversight.clone();
-            let next = if o.enabled { self.pass(&o).await } else { None };
+            let mut next = if o.enabled { self.pass(&o).await } else { None };
+            self.queue_sweep().await;
+            if let Some(board) = self.board_tick().await {
+                next = Some(next.map_or(board, |n| n.min(board)));
+            }
             let now = now_ms();
             let sleep = next
                 .map_or(o.sweep, |at| {

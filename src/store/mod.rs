@@ -2,6 +2,7 @@
 //! single writer thread that takes typed requests and batches them into one transaction, and a small
 //! pool of read-only connections.
 
+pub(crate) mod coord;
 pub(crate) mod host;
 pub(crate) mod lanes;
 pub(crate) mod lead;
@@ -426,6 +427,15 @@ impl Store {
         write: lanes::LaneWrite,
     ) -> Result<lanes::LaneDone, StoreError> {
         self.call(|r| Request::Lanes(Box::new(write), r)).await
+    }
+
+    /// One coordination-record mutation (queued launches, items, planner, verdicts, files, rules,
+    /// board posts).
+    pub(crate) async fn coord(
+        &self,
+        write: coord::CoordWrite,
+    ) -> Result<coord::CoordDone, StoreError> {
+        self.call(|r| Request::Coord(Box::new(write), r)).await
     }
 }
 

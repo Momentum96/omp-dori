@@ -3,6 +3,7 @@
 //! strict and every error names its setting path. A missing file means built-in defaults; an invalid
 //! file is never applied.
 
+pub(crate) mod coord;
 pub(crate) mod lanes;
 pub(crate) mod owner;
 pub(crate) mod session;
@@ -49,6 +50,7 @@ pub(crate) struct Config {
     pub(crate) lead: Option<session::LeadSettings>,
     pub(crate) fallback: session::FallbackSettings,
     pub(crate) lanes: lanes::LaneSettings,
+    pub(crate) coord: coord::CoordSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
 }
@@ -72,6 +74,7 @@ impl Default for Config {
             lead: None,
             fallback: session::FallbackSettings::default(),
             lanes: lanes::LaneSettings::default(),
+            coord: coord::CoordSettings::default(),
             destinations: BTreeMap::new(),
             jobs: BTreeMap::new(),
         }
@@ -524,6 +527,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         &mut config.fallback,
     );
     lanes::parse(errors, root, &mut config.lanes);
+    coord::parse(errors, root, &mut config.coord);
 }
 
 fn job(

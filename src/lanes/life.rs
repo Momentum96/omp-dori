@@ -513,6 +513,13 @@ impl<R: Runtime> Lanes<R> {
         if intent.step == "hook" {
             if intent.outcome == "completed" {
                 for w in rec.worktrees.clone() {
+                    // A worktree that holds a published file stays (EVR-19).
+                    if self.holds_published(&w).await {
+                        intent
+                            .receipt
+                            .push(format!("worktree {w} kept: it holds a published file"));
+                        continue;
+                    }
                     intent.receipt.push(match git::remove_worktree(&w).await {
                         Ok(()) => format!("worktree {w} removed"),
                         Err(e) => e,

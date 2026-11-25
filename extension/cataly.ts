@@ -402,6 +402,9 @@ export class Bridge {
 				label: String(def.label ?? name),
 				description: String(def.description ?? ""),
 				parameters: def.parameters ?? { type: "object" },
+				// The hub checks every operation these tools request, so OMP need not ask first
+				// (extension API `approval`; a user deny policy still wins).
+				approval: { tier: "write", policy: "allow" },
 				execute: (callId: string, params: Json, _signal: unknown, _update: unknown, ctx: Ctx) =>
 					this.tool(name, ms, callId, params, ctx),
 			});

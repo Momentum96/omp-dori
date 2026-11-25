@@ -196,6 +196,47 @@ impl Threads for DiscordThreads {
     }
 }
 
+/// The board post (EVR-30): a plain message created with a nonce, then edited in place.
+impl crate::lanes::board::Board for DiscordThreads {
+    fn board_create<'a>(
+        &'a self,
+        channel: &'a str,
+        text: &'a str,
+        nonce: &'a str,
+    ) -> BoxFut<'a, Result<String, (bool, String)>> {
+        Box::pin(async move {
+            let (rest, _) = self.client().map_err(|e| (false, e))?;
+            let channel = id(channel).map_err(|e| (false, e))?;
+            let nonce: String = crate::config::sha256_hex(nonce.as_bytes())
+                .chars()
+                .take(25)
+                .collect();
+            let v = rest
+                .create(channel, json!({ "content": text, "nonce": nonce }))
+                .await
+                .map_err(|e| (e.uncertain, e.why))?;
+            v.get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or((true, "no message ID in Discord's answer".to_string()))
+        })
+    }
+
+    fn board_edit<'a>(
+        &'a self,
+        channel: &'a str,
+        message: &'a str,
+        text: &'a str,
+    ) -> BoxFut<'a, Result<(), String>> {
+        Box::pin(async move {
+            let (rest, _) = self.client()?;
+            rest.edit(id(channel)?, id(message)?, json!({ "content": text }))
+                .await
+                .map_err(|e| e.why)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

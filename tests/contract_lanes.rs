@@ -151,17 +151,7 @@ fn open_report_claim_close_in_stock_omp() {
         &json!({ "key": "cycle-1", "text": format!("Report now.\nCALL cataly_lane {report}") }),
     );
     assert!(sent.is_ok(), "{sent:?}");
-    // OMP asks before an extension tool runs; the lead approves it, as it answers any lane dialog.
-    let dialog = l.hub.until(WAIT, || {
-        let read = l.lane("read", &json!({ "key": "cycle-1" })).ok()?;
-        let d = read["dialogs"].as_array()?.first()?.clone();
-        (d["title"] == "Allow tool: cataly_lane").then_some(d)
-    });
-    l.lane(
-        "answer",
-        &json!({ "key": "cycle-1", "dialog": dialog["id"], "answer": { "value": "Approve" } }),
-    )
-    .unwrap();
+    // Cataly's own tools carry an allow approval policy, so OMP runs the lane tool without asking.
     let reports = l.hub.until(WAIT, || {
         let r = l.lane("reports", &json!({ "key": "cycle-1" })).ok()?;
         r.as_array().is_some_and(|a| !a.is_empty()).then_some(r)
@@ -169,6 +159,11 @@ fn open_report_claim_close_in_stock_omp() {
     assert!(
         reports.to_string().contains("built the first part"),
         "{reports}"
+    );
+    let read = l.lane("read", &json!({ "key": "cycle-1" })).unwrap();
+    assert!(
+        read["dialogs"].as_array().is_none_or(Vec::is_empty),
+        "{read}"
     );
     l.lane(
         "claim",
