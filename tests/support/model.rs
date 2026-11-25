@@ -3,7 +3,8 @@
 //!
 //! The reply depends on the last user text: `SLOW` streams for about 4 s (follow-up, steer and abort
 //! cases), `TOOL` asks for a `bash` call first (an approval dialog under always-ask), a line
-//! `CALL <tool> <json arguments>` calls that tool once, anything else answers `ok` at once. `ASK`
+//! `CALL <tool> <json arguments>` calls that tool once (call ID `call_named_<request number>`, so
+//! every call is its own), anything else answers `ok` at once. `ASK`
 //! calls the `ask` tool with one question whose recommended choice is the second. The model ID
 //! `limited` answers 429 with a usage-limit error.
 
@@ -157,7 +158,11 @@ async fn answer(
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let model = body["model"].as_str().unwrap_or_default().to_string();
     seen.lock().unwrap().push(model.clone());
-    bodies.lock().unwrap().push(body.clone());
+    let number = {
+        let mut bodies = bodies.lock().unwrap();
+        bodies.push(body.clone());
+        bodies.len()
+    };
     arrivals.lock().unwrap().push(arrived);
     let (tx, rx) = mpsc::channel(64);
     if model == "limited" {
@@ -185,7 +190,8 @@ async fn answer(
             .and_then(|rest| rest.split_once(' '))
             .filter(|_| !after_tool)
         {
-            let call = json!({"tool_calls": [{"index": 0, "id": "call_named", "type": "function",
+            let id = format!("call_named_{number}");
+            let call = json!({"tool_calls": [{"index": 0, "id": id, "type": "function",
                 "function": {"name": name, "arguments": args}}]});
             let _ = tx.send(chunk(&model, &call, None)).await;
             let _ = tx.send(chunk(&model, &json!({}), Some("tool_calls"))).await;

@@ -626,6 +626,18 @@ fn shell_rules_block_and_grants_are_one_attempt() {
         reason.contains("rule 1") && reason.contains("sha256") && !reason.contains("origin main"),
         "{reason}"
     );
+    // The lane's own tool as an OMP tool command passes even when its text matches a deny rule;
+    // anything else on the line, or the tool name by path, is judged as usual.
+    let report = "cataly_lane report --kind progress --text 'ready for git push'";
+    assert_eq!(shell(&mut b, report)["allow"], true);
+    assert_eq!(
+        shell(&mut b, &format!("{report}; git push origin main"))["allow"],
+        false
+    );
+    assert_eq!(
+        shell(&mut b, "/tmp/cataly_lane report --text 'git push'")["allow"],
+        false
+    );
     assert_eq!(shell(&mut b, "omp usage reset")["allow"], false);
     assert!(
         lane(
@@ -947,7 +959,7 @@ fn lead_bridge(hub: &TestHub) -> (Bridge, Value) {
 }
 
 fn lead_tool(bridge: &mut Bridge, session: &Value, call: &str, input: Value) -> (String, bool) {
-    let mut params = json!({ "call": call, "tool": "cataly", "session": session });
+    let mut params = json!({ "call": call, "tool": "cataly_lead", "session": session });
     params["input"] = input;
     let v = bridge.call("bridge.tool", params);
     (
@@ -994,7 +1006,18 @@ fn onboarding_consent_is_stored_and_writes_wait() {
             json!({ "tool": "bash", "command": command, "session": s }),
         )
     };
-    assert_eq!(shell(&mut b, "cataly lead send hello")["allow"], false);
+    let refused = shell(&mut b, "cataly lead send hello");
+    assert_eq!(refused["allow"], false);
+    assert!(
+        refused["reason"]
+            .as_str()
+            .unwrap()
+            .contains("cataly_lead tool"),
+        "{refused}"
+    );
+    // The lead's own tool as an OMP tool command (DESIGN 10.6) is not the CLI and passes.
+    let own = "cataly_lead onboarding; cataly_lead requests";
+    assert_eq!(shell(&mut b, own)["allow"], true);
     assert_eq!(
         shell(&mut b, "/usr/bin/cataly slack upload T1/C1 /tmp/x")["allow"],
         false

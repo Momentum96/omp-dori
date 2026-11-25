@@ -14,7 +14,7 @@ function fakeHub(role: string, sent: any[], connects: { n: number }): Deps["conn
 				sent.push(msg);
 				const reply = (ok: unknown) => queueMicrotask(() => onLine(JSON.stringify({ v: 1, id: msg.id, ok })));
 				if (msg.method === "bridge.hello")
-					reply({ role, key: "k1", guidance: "GUIDE", tools: [{ name: "cataly", description: "d", parameters: { type: "object" } }] });
+					reply({ role, key: "k1", guidance: "GUIDE", tools: [{ name: "cataly_lead", description: "d", parameters: { type: "object" } }] });
 				if (msg.method === "bridge.tool") reply({ text: `did ${msg.params.input.op}` });
 				if (msg.method === "bridge.stop") reply({ context: msg.params.answered ? null : "owed" });
 			},
@@ -54,7 +54,7 @@ test("a launched session is accepted, gets its tool and guidance, forwards calls
 	expect(sent[0].method).toBe("bridge.hello");
 	expect(sent[0].params).toMatchObject({ ext: 1, token: "tok", session: "s1", agent: "main" });
 	expect(b.token).toBeUndefined();
-	expect(pi.tools.map(t => t.name)).toEqual(["cataly"]);
+	expect(pi.tools.map(t => t.name)).toEqual(["cataly_lead"]);
 	const prompt = await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctx);
 	expect(prompt).toEqual({ systemPrompt: ["BASE", "GUIDE"] });
 	expect(await pi.emit("before_agent_start", { systemPrompt: ["BASE", "GUIDE"] }, ctx)).toBeUndefined();
@@ -62,7 +62,7 @@ test("a launched session is accepted, gets its tool and guidance, forwards calls
 	expect(await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctxOf(pi, "sub"))).toBeUndefined();
 	const result = await pi.tools[0].execute("call-1", { op: "requests" }, undefined, undefined, ctx);
 	expect(result.content[0].text).toBe("did requests");
-	expect(sent.find(m => m.method === "bridge.tool").params).toMatchObject({ call: "call-1", tool: "cataly", session: "s1" });
+	expect(sent.find(m => m.method === "bridge.tool").params).toMatchObject({ call: "call-1", tool: "cataly_lead", session: "s1" });
 	expect(await pi.emit("session_stop", {}, ctx)).toEqual({ continue: true, additionalContext: "owed" });
 	await pi.emit("message_end", { message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } }, ctx);
 	expect(await pi.emit("session_stop", {}, ctx)).toBeUndefined();
