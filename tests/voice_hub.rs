@@ -763,7 +763,7 @@ fn measure_call_memory_and_cpu() {
         eprintln!(
             "MEASURE hub {t}: RSS voice off {idle_rss} KiB, peak during call {peak} KiB, added {} KiB; \
              CPU {cpu:.1} % of one core over {secs:.0} s; {} packets out; speech end to first audio \
-             out {gaps:?} ms (fake model reply delay 1500 ms included)",
+             out {gaps:?} ms",
             peak.saturating_sub(idle_rss),
             call.voice.out().len()
         );
