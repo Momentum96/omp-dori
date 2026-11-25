@@ -103,14 +103,13 @@ async fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String
         ));
     }
     if hello.agent == "sub" {
-        // A worker in its own realm takes its parent session's role for shell rules only (EXT req. 9).
-        if let Some(handle) = hub.lanes.handle_of_session(&hello.parent).await {
+        // A worker takes its parent session's role for shell rules only (EXT req. 9).
+        let parent = root_session(&hello.parent);
+        if let Some(handle) = hub.lanes.handle_of_session(parent).await {
             return Ok((handle, Role::Lane, false));
         }
         return match hub.lead.snapshot() {
-            Some(s)
-                if !hello.parent.is_empty() && s.session_id.as_deref() == Some(&hello.parent) =>
-            {
+            Some(s) if !parent.is_empty() && s.session_id.as_deref() == Some(parent) => {
                 Ok((s.handle.clone(), Role::Lead, false))
             }
             _ => Err("unknown parent".into()),
@@ -135,6 +134,22 @@ async fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String
         return Ok((s.handle.clone(), Role::Lead, true));
     }
     Err("not a session of this hub".into())
+}
+
+/// The root session a subagent's `parent` names: a session ID as sent, or (from a worker in its own
+/// realm) its header's parent file, whose stamped file or artifact directory carries the ID; OMP keeps
+/// nested subagent files below that directory.
+fn root_session(parent: &str) -> &str {
+    std::path::Path::new(parent)
+        .components()
+        .find_map(|c| {
+            let name = c.as_os_str().to_str()?;
+            let stem = name.strip_suffix(".jsonl").unwrap_or(name);
+            let id =
+                crate::omp::transcript::session_file_id(&format!("{stem}.jsonl")).map(str::len)?;
+            stem.get(stem.len().checked_sub(id)?..)
+        })
+        .unwrap_or(parent)
 }
 
 async fn write(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
@@ -183,7 +198,16 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         Err(reason) => return refuse(hub, &mut writer, id, hello.ext != PROTOCOL, reason).await,
     };
     if let Some(pid) = pid.and_then(|p| u32::try_from(p).ok()) {
-        hub.links.adopt(pid, &handle, role);
+        // A process that started the hub (one of its ancestors) is the owner's environment, which
+        // every owner command shares, not a session's: it is never placed in the session's role.
+        // A session's child that carries a launch token and is left unplaced still fails closed.
+        if !crate::sys::ancestry::chain(std::process::id())
+            .await
+            .pids
+            .contains(&pid)
+        {
+            hub.links.adopt(pid, &handle, role);
+        }
     }
     if !sub {
         hub.links.connect(&handle, role, &key, &hello.session);
@@ -511,4 +535,21 @@ pub(crate) fn owed_line(room: &str, message: &str, at_ms: i64, text: &str) -> St
         crate::jobs::instant_text(at_ms),
         quoted.replace('\n', " ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subagents_parent_resolves_to_its_root_session() {
+        let id = "0b5c1d2e-3f40-4a51-8b62-7c83d94ea5f6";
+        let file = format!("/h/sessions/--w--/2026-11-25T01-02-03-004Z_{id}.jsonl");
+        assert_eq!(root_session(id), id);
+        assert_eq!(root_session(&file), id);
+        let nested = format!("/h/sessions/--w--/2026-11-25T01-02-03-004Z_{id}/0-Worker.jsonl");
+        assert_eq!(root_session(&nested), id);
+        assert_eq!(root_session("/h/x/0-Worker.jsonl"), "/h/x/0-Worker.jsonl");
+        assert_eq!(root_session(""), "");
+    }
 }

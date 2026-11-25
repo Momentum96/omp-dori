@@ -936,3 +936,79 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   declares `cmake_minimum_required` below 3.5, which the runners' CMake 4 refuses.
   `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` under `[env]`, so local builds and
   CI build it the same way (CMake 3.x ignores the variable).
+
+# Session authority (FinishAuthority, 2026-11-25)
+
+Review findings Safety 1, 3, 4, 5, 6 and Design 3, 12, 13.
+
+## Control callers get their session's role (Safety 1, Design 3)
+
+- The hub places each control caller by its peer PID and that process's ancestors
+  (`sys::ancestry`: `/proc` on Linux, one bounded `ps` on macOS) against the OMP processes it
+  spawned and the peers of accepted bridges (`Links::adopt`/`place`). Authority is `Owner`,
+  `Lead`, `Lane(key)` or `Unplaced`; the method table says which methods need `Owner`. A caller
+  that carries a launch token but cannot be placed fails closed. `whoami` reports the placement;
+  `setup --apply`, `install`, `update`, `rollback`, `uninstall` and `service` ask it first.
+- A bridge peer that is one of the hub's own ancestors (whatever started the hub: the owner's
+  shell, a service manager, a test) is not adopted: every owner command descends from it too.
+  The fake bridges in `tests/lanes.rs` and `tests/tern.rs` connect from the test process, which
+  started the hub; adopting it placed every owner CLI call of those tests in the session's role.
+
+## Rule 0 everywhere, one tokeniser (Safety 3, 6, Design 12)
+
+- The lead's `bridge.shell` is judged by rule 0 (`lanes::shell::rule_zero`); onboarding's own
+  tokeniser is gone. Rule 0 finds `omp usage … reset` in any argument order, `omp config set`
+  of any `*Resets*` key, variable indirection, and refuses a command word it cannot resolve.
+
+## The socket directory is checked before connecting (Safety 5)
+
+- The CLI, the slot and the bridge connect only when the socket's directory is the user's own,
+  mode 0700 or stricter, and not a symlink (`extension/cataly.ts` `privateDir`, checked inside
+  `unixConnect`). The CLI honours `CATALY_SOCKET`, so a lane's `cataly status` reaches its hub.
+
+## Subagents and `eval` (Safety 4)
+
+- OMP 19.1.1 binds the extension again for every subagent session (`ExtensionAgentIdentity`,
+  `kind: "sub"`, `parentId`). A subagent of an accepted session now connects with `agent: "sub"`
+  and its parent: the spawner's session when the spawner's bridge runs in the same realm, else
+  (inside a hub launch, e.g. a worker thread) the parent file in its session header. The hub
+  resolves a file to the root session ID (`hub::bridge::root_session`: the stamped session file
+  or its artifact directory, below which OMP keeps nested subagent files) and gives the worker
+  its parent's role for shell rules only: no guidance, no tool.
+- The subagent's `tool_call` veto is registered before it connects, so a hub that is down, slow
+  or refuses the parent blocks its `bash` and `task` calls (fail closed, A9). A subagent of a
+  session the hub never accepted stays inert.
+- `eval` (Python/JS cells that can start any process) is not judged by shell rules. The overlay
+  sets `tools.approval.eval: deny`; OMP's approval docs say a user `deny` always denies, and
+  the contract case confirms it holds in a lane's subagent of stock OMP 19.1.1, so no `--tools`
+  list is needed.
+
+## The bridge is typed against OMP (Design 13)
+
+- `extension/package.json` pins `@oh-my-pi/pi-coding-agent` 19.1.1 (dev dependency, type
+  imports only, erased at load). Handlers take OMP's event types (`ToolCallEvent`,
+  `BeforeAgentStartEvent`, `MessageEndEvent`, `ToolExecutionStart/EndEvent`, `SessionStop…`);
+  model lookup uses the documented `ctx.models` (`current`, `resolve`) instead of
+  `modelRegistry`. `bun run typecheck` in `extension/` is clean. `cataly.ts` is 599 lines.
+- CI does not run `bun test` or the type check yet (GitHub Actions is unavailable); run both in
+  `extension/` before a merge.
+
+## Tests
+
+- Bun, `extension/authority.test.ts` (shared fakes in `extension/fakes.ts`): a lane's subagent
+  connects as `sub` with its parent and its shell calls are judged; a subagent whose hub gives
+  no verdict runs no shell command, and one of an unaccepted session stays inert; the bridge
+  connects only through a private socket directory (mode, owner, symlink, real socket).
+  `cataly.test.ts`'s terminal test now resolves models through `ctx.models.resolve`. All four
+  fail against the bridge of main 9d6b31d (run with its `cataly.ts` in place).
+- Rust unit: `hub::bridge` `a_subagents_parent_resolves_to_its_root_session`; earlier on this
+  branch `lanes::shell`, `cli::client`, `sys::paths`, `omp::launch`
+  `overlay_denies_eval_in_every_session`, and `tests/lead.rs`
+  `a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner`.
+- Contract (`CATALY_CONTRACT_OMP=1`): `tests/contract_lanes.rs`
+  `a_lane_subagent_is_held_by_shell_rules_and_eval_deny_in_stock_omp`: a stock-OMP lane spawns a
+  subagent through `task` (the test approves every dialog, so only the rule under test can
+  refuse); its `bash` gets the hub's "Blocked by shell rule 1", its `eval` gets OMP's
+  "blocked by user policy", and the cell's output never appears.
+- `tests/lanes.rs` `onboarding_consent_is_stored_and_writes_wait`: after onboarding ends, rule 0
+  still refuses the lead's `cataly lead send` (it was allowed before rule 0 covered the lead).

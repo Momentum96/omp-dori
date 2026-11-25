@@ -67,7 +67,8 @@ impl Lanes {
         hub.env.push(("PI_CODING_AGENT_DIR".into(), agent));
         hub.write_config(&format!(
             "[omp]\npath = \"{}\"\n[sessions]\nextra_flags = [\"--no-skills\", \"--no-rules\", \
-             \"--no-context-files\"]\n[lanes]\nmodel = \"fake/primary\"\ncwd = \"{}\"\nobjection = \"2s\"\n",
+             \"--no-context-files\"]\n[lanes]\nmodel = \"fake/primary\"\ncwd = \"{}\"\nobjection = \"2s\"\n\
+             [lanes.shell]\ndeny = [\"echo cataly-denied.*\"]\n",
             installed_omp().display(),
             work.display()
         ));
@@ -248,5 +249,104 @@ fn hub_restart_brings_three_stock_lanes_back() {
     assert!(text.contains("r-3: restarted; stays held"), "{text}");
     assert!(text.contains("r-1: restarted; goal active"), "{text}");
     assert!(l.model.seen().iter().all(|m| m == "primary"));
+    assert!(l.hub.stop().success());
+}
+
+/// The text OMP returned to the model for each tool call it made, by tool name, over every request.
+fn tool_results(model: &FakeModel) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for body in model.bodies() {
+        let messages = body["messages"].as_array().cloned().unwrap_or_default();
+        for (call, result) in messages.iter().zip(messages.iter().skip(1)) {
+            let name = call["tool_calls"][0]["function"]["name"].as_str();
+            if let (Some(name), "tool") = (name, result["role"].as_str().unwrap_or_default()) {
+                out.push((name.to_string(), result["content"].to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Safety 4 in stock OMP: a lane's subagent (the `task` tool) is held by the lane's rules. Its
+/// bridge connects as `sub` with the lane session as parent, so the hub's shell rule blocks its
+/// `bash`; and the overlay's `tools.approval.eval: deny` refuses its `eval` cell.
+#[test]
+fn a_lane_subagent_is_held_by_shell_rules_and_eval_deny_in_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let mut l = Lanes::new();
+    l.start();
+    l.open("sub-1");
+    l.hub.until(WAIT, || {
+        let r = l.record("sub-1");
+        (r["live"] == true && r["state"] == "running").then_some(())
+    });
+    let calls = [
+        (
+            "bash",
+            json!({ "command": "echo cataly-denied-in-subagent" }),
+        ),
+        (
+            "eval",
+            json!({ "language": "js", "code": "console.log('EVAL' + '-RAN')" }),
+        ),
+    ];
+    for (name, args) in &calls {
+        let task = json!({ "context": "Contract case.", "tasks": [{
+            "name": format!("Try{name}"), "solutionSpace": "given",
+            "task": format!("Run this.\nCALL {name} {args}"),
+        }]});
+        let text = format!("Spawn a worker.\nCALL task {task}");
+        let sent = l.lane("send", &json!({ "key": "sub-1", "text": text }));
+        assert!(sent.is_ok(), "{sent:?}");
+        let deadline = std::time::Instant::now() + WAIT;
+        let result = loop {
+            let all = tool_results(&l.model);
+            if let Some((_, text)) = all.iter().find(|(tool, _)| tool == name) {
+                break text.clone();
+            }
+            // The lane asks before it spawns (an `exec` tool); the owner allows every dialog, so a
+            // subagent call that should be refused can only be refused by the rule under test.
+            let read = l.lane("read", &json!({ "key": "sub-1", "count": 1 }));
+            for dialog in read
+                .iter()
+                .flat_map(|r| r["dialogs"].as_array().cloned().unwrap_or_default())
+            {
+                let id = dialog["id"].as_str().unwrap_or_default();
+                let answer =
+                    json!({ "key": "sub-1", "dialog": id, "answer": { "value": "Approve" } });
+                let _ = l.lane("answer", &answer);
+            }
+            if std::time::Instant::now() > deadline {
+                let last: Vec<Value> = l
+                    .model
+                    .bodies()
+                    .iter()
+                    .map(|b| {
+                        b["messages"]
+                            .as_array()
+                            .and_then(|m| m.last())
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                panic!(
+                    "no {name} result within {WAIT:?}; tool results {all:?}; lane {read:?}; models {:?}; last messages {last:#?}",
+                    l.model.seen()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        eprintln!("subagent {name} result: {result}");
+        assert!(!result.contains("EVAL-RAN"), "{result}");
+        // The hub's lane rule refuses the subagent's `bash`; OMP's user deny refuses its `eval`.
+        let refusal = if *name == "bash" {
+            "Blocked by shell rule"
+        } else {
+            "blocked by user policy"
+        };
+        assert!(result.contains(refusal), "{result}");
+    }
     assert!(l.hub.stop().success());
 }
