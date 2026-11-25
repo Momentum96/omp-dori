@@ -518,8 +518,8 @@ const KINDS: [KindRow; 66] = [
     (
         EventKind::UpdateAvailable,
         "update.available",
-        &["version", "installed"],
-        "Cataly {version} is available (installed: {installed}); install it with `cataly update`",
+        &["current", "latest", "url"],
+        "A new version is out, boss. Run `cataly update` in a terminal. {current} -> {latest} {url}",
     ),
     (
         EventKind::UsageOn,
@@ -603,7 +603,7 @@ impl Template {
         Ok(Self(parts))
     }
 
-    fn render(&self, values: &[(&'static str, String)]) -> String {
+    pub(crate) fn render(&self, values: &[(&'static str, String)]) -> String {
         let mut out = String::new();
         for part in &self.0 {
             match part {

@@ -33,6 +33,9 @@ pub(crate) use owner::Owner;
 const FILE_MAX: u64 = 1024 * 1024;
 /// The built-in destination that keeps events locally (store and event log only).
 pub(crate) const LOG_DESTINATION: &str = "log";
+/// The built-in destination for the owner's home room: the lead's Discord channel, else the
+/// Telegram group (and topic) or DM. Not a valid configured name, so it cannot clash with one.
+pub(crate) const HOME_DESTINATION: &str = "@home";
 const PROBE_MIN: Duration = Duration::from_secs(30);
 const DAY: Duration = Duration::from_hours(24);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -177,6 +180,31 @@ impl DiscordSettings {
         self.home.or(match self.channels.as_slice() {
             [one] => Some(*one),
             _ => None,
+        })
+    }
+}
+
+impl Config {
+    /// A destination by name; [`HOME_DESTINATION`] is the owner's home room when a relay has one.
+    pub(crate) fn destination(&self, name: &str) -> Option<Destination> {
+        if name != HOME_DESTINATION {
+            return self.destinations.get(name).cloned();
+        }
+        if let Some(home) = self.discord.home() {
+            return Some(Destination::Discord {
+                channel: ChannelRef::Id(home),
+            });
+        }
+        let owner = self.telegram.owner?;
+        Some(match self.telegram.group {
+            Some(group) => Destination::Telegram {
+                chat: group,
+                topic: self.telegram.topic,
+            },
+            None => Destination::Telegram {
+                chat: owner,
+                topic: None,
+            },
         })
     }
 }
@@ -387,6 +415,14 @@ pub(crate) fn parse(text: &str) -> Result<Config, Vec<ConfigError>> {
             if let Some(d) = destination(&mut errors, &path, name, value, &config.discord) {
                 config.destinations.insert(name.clone(), d);
             }
+        }
+    }
+    for name in config.update.destinations.iter().flatten() {
+        if !config.destinations.contains_key(name) {
+            errors.push(ConfigError {
+                path: "update.destinations".into(),
+                message: format!("unknown destination '{name}'"),
+            });
         }
     }
     if let Some(mut jobs) = root.table(&mut errors, "jobs") {
