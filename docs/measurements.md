@@ -483,7 +483,10 @@ cycles, 5,400 job ticks, 1,125 s), anonymous RSS every 1,500 iterations:**
   arenas, the one-arena run keeps 3.5 MiB free].
 - `MALLOC_ARENA_MAX=1`: 2.5, 6.6, 7.1, 7.8, 8.8, 9.1, 10.4, 10.4, 11.4 MiB; slope +0.48 MiB per 1000,
   in steps (flat 10.4 MiB from 8,700 to 11,100).
-- `MALLOC_ARENA_MAX=2`, 6,000 iterations: 3.0, 8.2, 9.0, 10.0, 10.3 MiB; slope +0.55 MiB per 1000.
+- `MALLOC_ARENA_MAX=2` (run alone, 933 s): 3.0, 8.5, 9.8, 10.5, 10.9, 11.9, 13.4, 15.2, 16.3 MiB;
+  slope +0.73 MiB per 1000. Sampler: held 13.6 MiB at the half, 17.2 MiB at the end, 13.0 MiB of it
+  free; live mean 4.4, 4.6, 4.8 MiB over the second, third and last quarter (+0.06 MiB per 1000,
+  within what is in flight).
 
 With one or two arenas what remains grows in steps while the live heap stays level. The soak's data
 grows without bound in compressed time: the lead resumes one transcript for the whole run (12,000
@@ -492,7 +495,8 @@ of both (the transcript tail of up to 8 MiB for answers, queries over growing ta
 them, which leaves larger free holes [inference, as in the planner run above, where the rise tracked
 the tables]. In real use the tail read stops growing at 8 MiB and the tables at 7 days of rows.
 
-**Fix.** The systemd unit now sets `MALLOC_ARENA_MAX=2` for the hub (`sys::service`); children do not
-inherit it (their environment is an allow-list). Two arenas rather than one so the store writer and
-the runtime do not share one malloc lock. A hub started by hand gets glibc's default. macOS uses
-its own allocator; not measured there.
+**Fix.** The systemd unit now sets `MALLOC_ARENA_MAX=1` for the hub (`sys::service`); children do not
+inherit it (their environment is an allow-list). One arena rather than two: 11.4 against 16.3 MiB
+after 12,000 iterations, and the run took no longer (1,126 s against 1,124 s for the default, run
+side by side); glibc's per-thread caches serve most small allocations without the arena lock. A hub
+started by hand gets glibc's default. macOS uses its own allocator; not measured there.
