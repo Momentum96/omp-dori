@@ -18,6 +18,9 @@ const TOKENS_MAX: usize = 64;
 const ANSWERS_MAX: usize = 256;
 /// Session processes kept at most, oldest dropped first (a hub starts few sessions).
 const PIDS_MAX: usize = 256;
+/// Bridge links kept at most. Every session start (a lead restart, each lane) gets a new handle, so
+/// links of ended sessions are dropped, the longest disconnected first, beyond this many.
+const LINKS_MAX: usize = 64;
 
 /// What the hub shows about one session's bridge.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -123,7 +126,8 @@ impl Links {
 
     /// An accepted connection; replaces an earlier one of the same session.
     pub(crate) fn connect(&self, handle: &str, role: Role, key: &str, session: &str) {
-        self.lock().links.insert(
+        let mut inner = self.lock();
+        inner.links.insert(
             handle.to_string(),
             Link {
                 key: key.to_string(),
@@ -137,6 +141,23 @@ impl Links {
                 },
             },
         );
+        while inner.links.len() > LINKS_MAX {
+            let Some(oldest) = inner
+                .links
+                .iter()
+                .filter(|(_, l)| !l.view.connected)
+                .min_by_key(|(_, l)| l.view.since_ms)
+                .map(|(h, _)| h.clone())
+            else {
+                break;
+            };
+            inner.links.remove(&oldest);
+        }
+    }
+
+    /// How many links are kept (the hub's `stats`).
+    pub(crate) fn kept(&self) -> usize {
+        self.lock().links.len()
     }
 
     /// The connection with `key` closed; a newer connection of the session is left alone.
@@ -242,5 +263,21 @@ mod tests {
         );
         assert_eq!(links.place(&[41, 40]), Some(("h1".into(), Role::Lead)));
         assert_eq!(links.place(&[41, 1]), None);
+    }
+
+    /// Every session start brings a new handle; ended sessions' links do not pile up, and a
+    /// connected link is never dropped.
+    #[test]
+    fn links_of_ended_sessions_are_bounded() {
+        let links = Links::default();
+        links.connect("lead", Role::Lead, "k-lead", "s-lead");
+        for n in 0..1000 {
+            let (handle, key) = (format!("h{n}"), format!("k{n}"));
+            links.connect(&handle, Role::Lane, &key, "s");
+            links.disconnect(&handle, &key);
+        }
+        assert!(links.kept() <= LINKS_MAX, "{} links kept", links.kept());
+        assert!(links.view("lead").connected);
+        assert_eq!(links.by_key("k-lead"), Some(("lead".into(), Role::Lead)));
     }
 }

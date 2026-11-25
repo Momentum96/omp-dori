@@ -6,8 +6,17 @@ use rusqlite::{OptionalExtension, Row, Transaction, params};
 
 use super::Reads;
 
-/// Receipts kept per target (HOST req. 59).
-pub(crate) const RECEIPT_CAP: i64 = 512;
+/// Receipts kept per session (HOST req. 59; decision 20). A receipt belongs to the session its
+/// message was written into. Beyond the cap the oldest settled receipts of that session are evicted;
+/// an open one (pending, sent, in doubt, failed, or still read by a relay hand-off) never is, and
+/// admission never refuses for the cap.
+const RECEIPT_CAP: i64 = 512;
+/// Which receipt (alias `r`) may be evicted: its message was delivered (or it stored none, or the
+/// row is gone) and no relay hand-off still reads it again.
+const SETTLED_RECEIPT: &str = "(r.inbox_id IS NULL OR NOT EXISTS (SELECT 1 FROM inbox i \
+     WHERE i.id = r.inbox_id AND i.state <> 'delivered')) \
+     AND NOT EXISTS (SELECT 1 FROM handoffs h WHERE h.target = r.target \
+     AND h.request_id = r.request_id AND h.state = 'handed')";
 /// Once-only identities are remembered this long (COORD req. 19).
 const ONCE_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Finished inbox rows, deliveries and their receipts are kept this long (DESIGN 7.2).
@@ -112,8 +121,6 @@ pub(crate) enum Admitted {
     Earlier(Option<i64>),
     /// The request ID was used before with different text.
     Mismatch,
-    /// The target holds the maximum number of receipts.
-    Full,
     /// The stable identity is pending or was delivered within 30 days.
     Seen,
 }
@@ -323,7 +330,7 @@ pub(super) fn write(
             let admitted = admit(tx, a, now)?;
             if let Admitted::Stored(id) = admitted {
                 send(tx, delivery, inbox, now)?;
-                send_rows(tx, &delivery.id, &[id], now)?;
+                send_rows(tx, delivery, &[id], now)?;
             }
             Ok(HostDone::Admitted(admitted))
         }
@@ -357,12 +364,18 @@ pub(super) fn write(
                 params![target, now],
             )
             .map(HostDone::Rows),
-        HostWrite::Rebind { id, handle } => tx
-            .execute(
+        HostWrite::Rebind { id, handle } => {
+            tx.execute(
+                "UPDATE receipts SET session = ?2 WHERE inbox_id IN \
+                 (SELECT id FROM inbox WHERE delivery_id = ?1)",
+                params![id, handle],
+            )?;
+            tx.execute(
                 "UPDATE deliveries SET handle = ?2 WHERE id = ?1",
                 params![id, handle],
             )
-            .map(HostDone::Rows),
+            .map(HostDone::Rows)
+        }
         #[cfg(test)]
         HostWrite::Age { target, by_ms } => tx
             .execute(
@@ -391,12 +404,14 @@ fn send(tx: &Transaction<'_>, d: &DeliveryRow, inbox: &[i64], now: i64) -> rusql
             d.sent_ms
         ],
     )?;
-    send_rows(tx, &d.id, inbox, now)
+    send_rows(tx, d, inbox, now)
 }
 
+/// Moves rows to `sent` under `d`, binds their receipts to its session, and trims that session's
+/// receipts to the cap by evicting the oldest settled ones.
 fn send_rows(
     tx: &Transaction<'_>,
-    delivery: &str,
+    d: &DeliveryRow,
     inbox: &[i64],
     now: i64,
 ) -> rusqlite::Result<()> {
@@ -404,9 +419,22 @@ fn send_rows(
         tx.execute(
             "UPDATE inbox SET state = 'sent', delivery_id = ?2, updated_ms = ?3 \
              WHERE id = ?1 AND state = 'pending'",
-            params![id, delivery, now],
+            params![id, d.id, now],
+        )?;
+        tx.execute(
+            "UPDATE receipts SET session = ?2 WHERE inbox_id = ?1",
+            params![id, d.handle],
         )?;
     }
+    tx.execute(
+        &format!(
+            "DELETE FROM receipts WHERE rowid IN (SELECT r.rowid FROM receipts AS r \
+             WHERE r.target = ?1 AND r.session = ?2 AND {SETTLED_RECEIPT} \
+             ORDER BY r.created_ms, r.rowid \
+             LIMIT max(0, (SELECT COUNT(*) FROM receipts WHERE target = ?1 AND session = ?2) - ?3))"
+        ),
+        params![d.target, d.handle, RECEIPT_CAP],
+    )?;
     Ok(())
 }
 
@@ -425,14 +453,6 @@ fn admit(tx: &Transaction<'_>, a: &Admit, now: i64) -> rusqlite::Result<Admitted
             } else {
                 Admitted::Mismatch
             });
-        }
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM receipts WHERE target = ?1",
-            [&a.target],
-            |r| r.get(0),
-        )?;
-        if count >= RECEIPT_CAP {
-            return Ok(Admitted::Full);
         }
     }
     if let Some(identity) = &a.identity {
@@ -563,6 +583,14 @@ pub(super) fn maintain(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
         "DELETE FROM sessions AS s WHERE s.state IN ('stopped', 'failed') AND s.updated_ms < ?1 \
          AND s.started_ms < (SELECT MAX(started_ms) FROM sessions WHERE role = s.role)",
         [now - ONCE_KEEP_MS],
+    )?;
+    // Receipts go with their session record (HOST req. 60), unless still open.
+    tx.execute(
+        &format!(
+            "DELETE FROM receipts AS r WHERE r.session IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM sessions WHERE handle = r.session) AND {SETTLED_RECEIPT}"
+        ),
+        [],
     )
     .map(drop)
 }
@@ -638,8 +666,8 @@ impl Reads {
     }
 
     /// Whether an owner message with this request ID would be stored now and its batch recorded
-    /// under `delivery`: the ID left no receipt, the receipt store has room, and no delivery has
-    /// that ID (decision 15: the wake writes before its commit lands, so it decides first).
+    /// under `delivery`: the ID left no receipt and no delivery has that ID (decision 15: the wake
+    /// writes before its commit lands, so it decides first).
     pub(crate) fn admits_at_once(
         &self,
         target: &str,
@@ -648,9 +676,8 @@ impl Reads {
     ) -> rusqlite::Result<bool> {
         self.0.query_row(
             "SELECT NOT EXISTS (SELECT 1 FROM receipts WHERE target = ?1 AND request_id = ?2) \
-             AND (SELECT COUNT(*) FROM receipts WHERE target = ?1) < ?3 \
-             AND NOT EXISTS (SELECT 1 FROM deliveries WHERE id = ?4)",
-            params![target, request_id, RECEIPT_CAP, delivery],
+             AND NOT EXISTS (SELECT 1 FROM deliveries WHERE id = ?3)",
+            params![target, request_id, delivery],
             |r| r.get(0),
         )
     }
@@ -810,5 +837,186 @@ mod tests {
             .find(|r| r.identity.as_deref() == Some(identity))
             .unwrap()
             .id
+    }
+}
+
+#[cfg(test)]
+mod receipt_cap {
+    use super::*;
+    use crate::store::relay::RelayWrite;
+    use crate::store::tests::open_temp;
+
+    fn rid(n: usize) -> String {
+        format!("discord:600/{n}")
+    }
+
+    fn admit_send(n: usize, handle: &str) -> HostWrite {
+        HostWrite::AdmitSend {
+            admit: Admit {
+                target: "lead".into(),
+                request_id: Some(rid(n)),
+                digest: format!("d-{n}"),
+                sender: "owner".into(),
+                text: format!("message {n}"),
+                urgent: true,
+                owner: true,
+                identity: None,
+            },
+            delivery: DeliveryRow {
+                id: format!("b{n}"),
+                target: "lead".into(),
+                handle: handle.into(),
+                session_id: "s".into(),
+                session_file: "/f".into(),
+                kind: "wake".into(),
+                text: format!("[cataly:b{n}]"),
+                state: "sent".into(),
+                resent: false,
+                created_ms: 1,
+                sent_ms: 1,
+                detail: None,
+            },
+            inbox: Vec::new(),
+        }
+    }
+
+    fn count(r: &Reads, session: &str) -> rusqlite::Result<i64> {
+        r.0.query_row(
+            "SELECT COUNT(*) FROM receipts WHERE target = 'lead' AND session = ?1",
+            [session],
+            |r| r.get(0),
+        )
+    }
+
+    async fn host_all(store: &crate::store::Store, writes: Vec<HostWrite>) -> Vec<HostDone> {
+        let tasks: Vec<_> = writes
+            .into_iter()
+            .map(|w| {
+                let s = store.clone();
+                tokio::spawn(async move { s.host(w).await })
+            })
+            .collect();
+        let mut done = Vec::new();
+        for t in tasks {
+            done.push(t.await.unwrap().unwrap());
+        }
+        done
+    }
+
+    async fn relay_all(store: &crate::store::Store, writes: Vec<RelayWrite>) {
+        let tasks: Vec<_> = writes
+            .into_iter()
+            .map(|w| {
+                let s = store.clone();
+                tokio::spawn(async move { s.relay(w).await })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+    }
+
+    /// Decision 20: 2,000 owner messages to one room within a week all go in (the old shared cap
+    /// refused the 513th and held the room). The session keeps its newest 512 receipts, so a repeat
+    /// of a recent one is still caught; an in-doubt one and one whose hand-off the relay has not
+    /// settled survive every eviction; another session's receipts do not push them out.
+    #[tokio::test]
+    async fn settled_receipts_are_evicted_oldest_first_per_session() {
+        let (store, _writer, _dir) = open_temp("host-receipt-cap");
+        let (in_doubt, unsettled) = (3, 5);
+        let room = |n: usize| ("discord".to_string(), "600".to_string(), n.to_string());
+        // Messages go in 20 rounds of 100, each step of a round queued at once so the writer
+        // commits it as one batch: hand-off, admission and write, outcome, relay settlement.
+        for round in 0..20 {
+            let ns: Vec<usize> = (round * 100..round * 100 + 100).collect();
+            let handed = ns.iter().map(|&n| {
+                let (relay, room, message) = room(n);
+                RelayWrite::Handed {
+                    relay,
+                    room,
+                    message,
+                    seq: i64::try_from(n).unwrap(),
+                    target: "lead".into(),
+                    request_id: rid(n),
+                    digest: format!("d-{n}"),
+                    owed: None,
+                }
+            });
+            relay_all(&store, handed.collect()).await;
+            for (n, done) in ns
+                .iter()
+                .zip(host_all(&store, ns.iter().map(|&n| admit_send(n, "h1")).collect()).await)
+            {
+                assert!(
+                    matches!(done, HostDone::Admitted(Admitted::Stored(_))),
+                    "message {n}: {done:?}"
+                );
+            }
+            let resolved = ns.iter().map(|&n| HostWrite::Resolve {
+                id: format!("b{n}"),
+                state: if n == in_doubt {
+                    "in_doubt"
+                } else {
+                    "delivered"
+                }
+                .into(),
+                detail: None,
+            });
+            host_all(&store, resolved.collect()).await;
+            let settled = ns.iter().filter(|&&n| n != unsettled).map(|&n| {
+                let (relay, room, message) = room(n);
+                if n == in_doubt {
+                    RelayWrite::Doubt {
+                        relay,
+                        room,
+                        message,
+                        state: "in_doubt".into(),
+                        reason: "no answer".into(),
+                    }
+                } else {
+                    RelayWrite::Finish {
+                        relay,
+                        room,
+                        message,
+                        state: Some("delivered".into()),
+                    }
+                }
+            });
+            relay_all(&store, settled.collect()).await;
+        }
+        assert_eq!(store.read(|r| count(r, "h1")).await.unwrap(), RECEIPT_CAP);
+        // A repeat of a recent message is caught and sends nothing.
+        for n in [1999, 1500] {
+            let again = store.host(admit_send(n, "h1")).await.unwrap();
+            assert!(
+                matches!(again, HostDone::Admitted(Admitted::Earlier(Some(_)))),
+                "{n}: {again:?}"
+            );
+        }
+        // The in-doubt one still reads in doubt, so its room stays held.
+        let again = store.host(admit_send(in_doubt, "h1")).await.unwrap();
+        let HostDone::Admitted(Admitted::Earlier(Some(id))) = again else {
+            panic!("{again:?}")
+        };
+        let row = store.read(move |r| r.inbox_row(id)).await.unwrap().unwrap();
+        assert_eq!(row.state, "in_doubt");
+        // The relay may still read the unsettled hand-off's receipt again.
+        let found = store
+            .read(move |r| r.receipt("lead", &rid(unsettled)))
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        // The oldest settled receipts went first: the round before the kept ones is cut in part.
+        for (n, kept) in [(0, false), (1399, false), (1500, true), (1899, true)] {
+            let found = store
+                .read(move |r| r.receipt("lead", &rid(n)))
+                .await
+                .unwrap();
+            assert_eq!(found.is_some(), kept, "{n}");
+        }
+        // A message into the next session counts there.
+        store.host(admit_send(2000, "h2")).await.unwrap();
+        assert_eq!(store.read(|r| count(r, "h1")).await.unwrap(), RECEIPT_CAP);
+        assert_eq!(store.read(|r| count(r, "h2")).await.unwrap(), 1);
     }
 }

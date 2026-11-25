@@ -271,10 +271,28 @@ pub(crate) enum LeadStart {
     NotRunning,
 }
 
+/// Entries kept in the hub's per-session maps (`stats`): each is bounded by the sessions in use, so
+/// a count that grows with sessions started is retained memory.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub(crate) struct Retained {
+    /// Bridge links (at most 64 kept for ended sessions).
+    pub(crate) bridge_links: usize,
+    /// Per-lane turn locks (only those in use).
+    pub(crate) lane_turns: usize,
+    /// Per-lane spend readers (only lanes with a live session).
+    pub(crate) lane_spend: usize,
+}
+
 /// `stats` reply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Stats {
     pub(crate) rss_bytes: Option<u64>,
+    /// Tokio tasks alive in the hub (a count that grows with work done would be a task leak).
+    #[serde(default)]
+    pub(crate) tasks: Option<u64>,
+    /// Entries of per-session maps that ended sessions must not leave behind.
+    #[serde(default)]
+    pub(crate) retained: Option<Retained>,
     pub(crate) host_memory: Option<HostMemory>,
     pub(crate) host_load: Option<HostLoad>,
     pub(crate) state_disk: Option<HostDisk>,

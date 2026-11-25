@@ -24,6 +24,9 @@ const LATE_MS: i64 = 60_000;
 const SKIP_COUNT_MAX: u64 = 1000;
 /// Longest single sleep.
 const MAX_SLEEP: Duration = Duration::from_secs(60);
+/// Superseded due times the heap may hold beyond two per job before they are dropped (each
+/// reschedule, config reload or command leaves the earlier one until its time comes).
+const HEAP_SLACK: usize = 16;
 
 /// What a cron evaluation decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +168,12 @@ impl Sched {
                 .push(Reverse((due, slot.generation, name.to_string())));
         }
         self.slots.insert(name.to_string(), slot);
+        if self.heap.len() > 2 * self.slots.len() + HEAP_SLACK {
+            let slots = &self.slots;
+            self.heap.retain(|Reverse((_, generation, name))| {
+                slots.get(name).is_some_and(|s| s.generation == *generation)
+            });
+        }
     }
 
     /// Registers every configured job; with `previous`, a job switched from disabled to enabled restarts
@@ -378,6 +387,32 @@ mod tests {
     use super::*;
     use crate::jobs::cron::parse;
     use crate::jobs::tests::ctx_with;
+
+    /// Reschedules of a job with a far due time leave no pile of superseded heap entries.
+    #[tokio::test]
+    async fn superseded_due_times_are_dropped() {
+        let cfg = "[jobs.m]\nkind = \"cron\"\ncron = \"0 3 1 * *\"\nzone = \"UTC\"\nargv = [\"true\"]\ncwd = \"/\"\n";
+        let (ctx, _stop, _dir) = ctx_with(cfg, "sched-heap");
+        let job = Arc::clone(&ctx.config.borrow().jobs["m"]);
+        let mut sched = Sched::default();
+        for n in 0..1000 {
+            let row = JobRow {
+                name: "m".into(),
+                kind: "cron".into(),
+                trigger: String::new(),
+                held: false,
+                consumed: false,
+                needs_ack: false,
+                next_due_ms: Some(now_ms() + 86_400_000 + n),
+                skipped: 0,
+                created_ms: 0,
+            };
+            sched.put("m", Arc::clone(&job), row);
+        }
+        assert!(sched.heap.len() <= 2 + HEAP_SLACK, "{}", sched.heap.len());
+        let current = sched.slots["m"].generation;
+        assert!(sched.heap.iter().any(|Reverse((_, g, _))| *g == current));
+    }
 
     fn ms(s: &str) -> i64 {
         s.parse::<Timestamp>().unwrap().as_millisecond()

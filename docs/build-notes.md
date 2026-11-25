@@ -1407,3 +1407,112 @@ command) as `read`; every other line is `exec`, which `always-ask` asks for. The
 - `tests/lanes.rs`: a lane's or the lead's line naming its tool is refused with the pointer; the
   tool by path is judged by the rules.
 - Bun: the registered tool carries `loadMode: essential` and the allow policy.
+
+# Memory audit (LeakHunt, 2026-11-26)
+
+The owner asked whether the hub leaks. Every structure that lives as long as the hub was read for
+what adds entries, what removes them and what bounds them; the soak runs and the planner run in
+`docs/measurements.md` checked the result on the release build.
+
+## Verdict per structure
+
+Fixed (grew with work done and was never pruned):
+
+| Structure | Grew with | Fix | Test |
+| --- | --- | --- | --- |
+| Bridge links (`host::bridge::Links.links`) | every session start (each lane, each lead start: a new random handle); never removed | at most 64 kept; beyond that the longest-disconnected link is dropped, a connected one never | `links_of_ended_sessions_are_bounded` |
+| Lane turn locks (`lanes::Lanes.turns`) | every lane key ever used | locks nobody holds or waits for are dropped at the next turn (`turn_lock`) | `turn_locks_of_finished_lanes_are_dropped`; `tests/soak.rs` `closed_lanes_leave_no_per_lane_state` |
+| Lane spend readers (`lanes::Lanes.spend`, each with every billed call ID of the lane's transcripts) | every lane that was read once; kept after close | dropped with the session (`drop_session`) and after any read of a lane without a live session; the record keeps the final totals | `closed_lanes_leave_no_per_lane_state` (`retained.lane_spend` 0 after three closes) |
+| Local-only dialogs (`questions::Cards.skipped`) | every dialog that stayed local (approvals with remote approvals off, unconvertible forms, failed posts) | forgotten once the lead's dialogs no longer list it | `local_only_dialogs_are_forgotten_when_gone` |
+| Stuck answer sources (`relay::pipeline.stuck`) | every answer whose part was once refused or uncertain | only sources still `posting` are kept | `stuck_deliveries_are_forgotten_once_settled` |
+| Discord channel types (`Rest.channel_types`) | every channel posted to, each lane thread among them | at most 512, then the cache starts over | `channel_type_cache_is_bounded` |
+| Cancelled spend offers (`host::headless` state) | every cancelled offer of a session | newest 64 kept (the fence allows two per 10 minutes, so five hours) | `cancelled_offers_are_bounded_and_repeats_known` |
+| Scheduler heap (`jobs::schedule::Sched.heap`) | every reschedule, reload or command left the earlier due time until it came; a monthly job kept them a month | rebuilt with only current entries beyond two per job plus 16 | `superseded_due_times_are_dropped` |
+
+Bounded already:
+
+- Store: the writer's page cache 2 MiB, each reader's 512 KiB; at most two idle readers kept (an
+  extra one is closed after use); rusqlite's prepared-statement cache, 16 per connection; the
+  writer queue is a bounded channel. Rows on disk follow DESIGN 7.2 retention.
+- Hub events: one unbounded channel drained one commit at a time; it holds what is in flight.
+- Lead: the current session is replaced at a restart; restarts 5 per 10 minutes; followers a
+  256-slot broadcast; the latency rings 1000 samples each.
+- Headless and terminal sessions: dialogs leave on answer or end (cleared at stop), output ring 40,
+  numbered events 256, spend offers within 10 minutes; Tern's pending calls are removed on reply
+  or timeout and drained at detach, its forms with their dialogs.
+- Inbox and receipts live in the store (see the receipt cap below).
+- Bridge registry: launch tokens 64 (expired ones pruned), tool answers 256, session PIDs 256,
+  terminal ports removed when their block ends. One task per bridge or control connection, its
+  writer task aborted at close; the control socket's request dedupe keeps 256.
+- Lanes: `live` and `opening` are removed at close, death and failed start; slots drop empty
+  entries.
+- Discord REST rate-limit buckets: keyed by about 20 fixed route names. Intake scope: listed
+  channels from the config, followed threads replaced at every active-thread listing (at most
+  128) and removed on archive or delete, lookups 256. Live arrivals leave the pipeline's map at
+  hand-off. The context cache keeps 500 entries for 60 s. Telegram's update guard 100; Slack's
+  senders come from the config. Gateway state is per connection.
+- Question cards: open cards leave on answer, local answer, expiry or a gone dialog.
+- Voice: the Gateway facts hold the guild's channels and members' voice states, replaced by each
+  guild snapshot; voice replies 64.
+- Jobs: scheduler slots follow the config; the running set per run; command channel 64; ops inbox
+  256, alerts kept 24 h after resolution, posted marks 1 h, recent 3; quota causes until release;
+  stream jobs 16; `items` seen keys 5000 and PR cursors are job memory in the store, replaced per
+  tick.
+- OMP: one probe report, one usage snapshot.
+- Subprocesses: every child is waited for and its output pumps joined (`sys::command`); the soak
+  shows descriptors and threads level across 20 lead restarts and 40 lane cycles.
+
+Found here, fixed in the follow-up (decision 20): the lead's receipt store held at most 512 request
+IDs for target `lead` across all its sessions, kept 7 days, and refused the 513th; the 513th owner
+message on Discord within 7 days held the room ("the receipt store of this target is full (512)"),
+about 73 owner messages a day. See "Receipts per session" below.
+
+## Measuring
+
+`cataly stats --json` now reports `tasks` (live tokio tasks, `RuntimeMetrics::num_alive_tasks`) and
+`retained` (bridge links, lane turn locks, lane spend readers). The soak (`tests/soak.rs`, ignored)
+samples `/proc/<pid>/status` (VmRSS, RssAnon, RssFile, Threads), `/proc/<pid>/fd` and `tasks`. A
+counting global allocator was not written: `GlobalAlloc` needs `unsafe impl`, which the workspace
+forbids (`unsafe_code = "forbid"` cannot be relaxed in a test target).
+
+The fake Discord now gives a new message an ID above every message already in its channel, as
+Discord does; before, the bot's posts (900…) sorted above later owner messages, so after a
+catch-up read the room's position passed every later owner message and they were never taken.
+
+# Receipts per session and the heap slope (LeakHunt2, 2026-11-26)
+
+## Receipts per session (decision 20)
+
+- Schema v9 (additive): `receipts.session`, the handle of the session the message was written into
+  (set when its inbox row goes `sent`, moved by a resend's rebind; NULL while pending). Indexes on
+  `(target, session, created_ms)`, `inbox_id`, and the hand-offs still `handed`.
+- Admission no longer counts receipts: `Admitted::Full` and the refusal "the receipt store of this
+  target is full (512)" are gone, for owner and other messages alike, and the early wake no longer
+  checks room. Each write of a batch trims its session to 512 receipts by evicting the oldest
+  settled ones: inbox row `delivered` or gone (or no row), and no relay hand-off of that request ID
+  still `handed`. Pending, sent, in-doubt and failed receipts are never evicted, so the session may
+  exceed 512 only by open ones, and an in-doubt or failed one still holds its room.
+- Exactly-once: the request-ID lookup still spans the whole target (all sessions), so a retry after a
+  lead restart is caught. A repeat is caught while its receipt is kept: every open one, the newest 512
+  settled ones per session, and at most 7 days (retention). Discord's own guard is unchanged: one
+  hand-off per message, ever, and a hand-off whose receipt the relay may read again is protected.
+- Retention also deletes settled receipts whose session record is gone (HOST req. 60).
+- Test: `store::host::receipt_cap::settled_receipts_are_evicted_oldest_first_per_session` (2,000 owner
+  messages to one room in one session all stored; 512 kept; repeats of recent ones caught; the
+  in-doubt one still reads in doubt; the unsettled hand-off keeps its receipt; a second session
+  counts apart). The soak now sends every fifth iteration on Discord with no limit: 600 to 2,400
+  owner messages per run went through with no hold (`docs/measurements.md`).
+
+## The heap slope
+
+- Attributed with a `mallinfo2()` sampler preloaded into the soak's hub and arena-count runs
+  (`docs/measurements.md`, "Heap slope"): the live heap stays at about 4 MiB over 6,000 iterations
+  while glibc's held heap grows to 40 MiB, nearly all of it free space kept in 13 per-thread arenas.
+  No object accumulates; bisection by part showed no single cause.
+- Fix: the systemd unit sets `MALLOC_ARENA_MAX=1` for the hub. Anonymous RSS after 12,000 iterations
+  11.4 MiB instead of 42.2 MiB (two arenas: 16.3 MiB); children never inherit it (`sys::command`
+  allow-list). An existing unit gets the line when the service is enabled again (the unit is
+  rewritten then).
+- `tests/soak.rs` takes `CATALY_SOAK_SKIP` and passes `MALLOC_*`, `GLIBC_TUNABLES` and
+  `LD_PRELOAD` to the hub.
+

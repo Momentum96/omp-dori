@@ -554,7 +554,7 @@ impl<R: Runtime> Lanes<R> {
                     return Err("the lane's process is still running; the close is held".into());
                 }
             }
-            self.live_map().remove(&rec.key);
+            self.drop_session(&rec.key);
             intent
                 .receipt
                 .push(format!("session was live: {}", live.is_some()));
@@ -863,7 +863,7 @@ impl<R: Runtime> Lanes<R> {
         if rec.intent.is_some() || !rec.open() || !current {
             return;
         }
-        self.live_map().remove(key);
+        self.drop_session(key);
         let last: Vec<String> = session
             .snapshot()
             .recent

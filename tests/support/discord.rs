@@ -729,7 +729,14 @@ fn create(s: &mut State, id: &str, body: &Value) -> Response<Full<Bytes>> {
     let message = if let Some(m) = existing {
         m
     } else {
-        s.next_id += 1;
+        // As on Discord, a new message's ID is above every message already in the channel.
+        let newest = s.history.get(id).map_or(0, |l| {
+            l.iter()
+                .filter_map(|m| m["id"].as_str()?.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0)
+        });
+        s.next_id = s.next_id.max(newest) + 1;
         s.created += 1;
         s.next_id
     };

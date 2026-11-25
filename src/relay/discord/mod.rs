@@ -36,6 +36,8 @@ const INPUT_MAX: usize = 256 * 1024;
 const NONCE_LEN: usize = 25;
 /// Channel types that take no plain post: forum, media.
 const FORUM_TYPES: [u64; 2] = [15, 16];
+/// Channel types cached at most; the cache starts over when full (each lane thread adds one).
+const CHANNEL_TYPES_MAX: usize = 512;
 
 /// Discord's unknown-message error code (DISC-OUT req. 26).
 const UNKNOWN_MESSAGE: u64 = 10_008;
@@ -386,10 +388,14 @@ impl Rest {
             .get("type")
             .and_then(Value::as_u64)
             .ok_or("Discord did not report the channel type")?;
-        self.channel_types
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, kind);
+        cache_type(
+            &mut self
+                .channel_types
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            id,
+            kind,
+        );
         Ok(kind)
     }
 
@@ -1014,9 +1020,27 @@ fn confirmed(resp: &Response, channel: Snowflake) -> Result<Snowflake, Sent> {
     }
 }
 
+/// Caches a channel's type; a full cache starts over (`CHANNEL_TYPES_MAX`).
+fn cache_type(cache: &mut HashMap<Snowflake, u64>, id: Snowflake, kind: u64) {
+    if cache.len() >= CHANNEL_TYPES_MAX {
+        cache.clear();
+    }
+    cache.insert(id, kind);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_type_cache_is_bounded() {
+        let mut cache = HashMap::new();
+        for n in 1..=10_000u64 {
+            cache_type(&mut cache, Snowflake::parse(&n.to_string()).unwrap(), 0);
+        }
+        assert!(cache.len() <= CHANNEL_TYPES_MAX, "{}", cache.len());
+        assert!(!cache.is_empty());
+    }
 
     #[test]
     fn ids_names_and_nonces() {

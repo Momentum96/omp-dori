@@ -382,3 +382,121 @@ after runs is within the spread of single 21-sample runs on the loaded machine (
 higher; their path lost two reads and gained nothing [inference: load, not the change]). What is left
 of the Discord hub part is the readback (2 ms) and about 1 ms of reads and scheduling. macOS figures
 are not measured.
+
+## Memory soak (2026-11-26, Linux x64, release build, fake OMP and fake Discord)
+
+Commands: `cargo test --release --test soak -- --ignored --nocapture --test-threads=1 hub_soak`
+(`CATALY_SOAK_ITER=2000`), once against main (dfd9c6f, the test copied in) and once with the fixes
+(`docs/build-notes.md`, "Memory audit"); `CATALY_PLAN_ROUNDS=24 cargo test --release --test coord --
+--ignored --nocapture planner_pass` (12,005 passes) on main. One iteration is an owner message on
+Discord answered (every fifth, 400 per run; every 100th an `ask` card, half answered, half expired
+after 2 s) or a `cataly lead send` turn; every 50 a lane open, bridge hello, disconnect and close;
+every 100 a lead stop and start; every 20 a dry tick of each job kind (probe, cron, github, pr,
+quota, backup, health, items, pressure); Gateway reconnects (op 7 and op 9) once the 60 s backoff
+reset allows. 2000 iterations take 207-216 s.
+
+| Measure (slope after the first quarter, per 1000 iterations) | Main | Fixed |
+| --- | --- | --- |
+| RSS = anonymous RSS (file-backed flat at 13.6 MiB) | +3.8 MiB | +4.3 MiB |
+| Anonymous RSS at 0 / 1000 / 2000 iterations | 3.5 / 10.3 / 13.5 MiB | 3.2 / 10.6 / 13.2 MiB |
+| Anonymous RSS, last 600 iterations | +1.2 MiB | +0.1 MiB |
+| Open descriptors | -0.5 (30-31 throughout) | -0.7 (29-30) |
+| Threads | 0 (14) | 0 (13) |
+| Live tokio tasks | not reported | 0 (46 throughout) |
+| `retained` at the end | not reported | bridge links 40, lane spend readers 0, lane turn locks 1 |
+
+Descriptors, threads and tasks are level: no child, connection or task outlives its work across
+20 lead restarts, 40 lane cycles and 3 reconnects. The fixed structures are small per entry (a
+bridge link, a turn lock, one lane's call IDs), so they do not move these slopes; they grew with
+lanes and sessions over the hub's life. The anonymous growth of about 10 MiB in 2000 iterations is
+the same with and without the fixes. A 6000-iteration run with the fixes (480 Discord messages,
+5520 `lead send` turns, 60 lead restarts, 120 lane cycles, 2699 job ticks, 350 s): anonymous RSS
+3.5, 7.9, 11.9, 13.6, 14.4, 14.6, 15.5, 16.5, 17.5, 17.9, 18.4 MiB every 600 iterations; slope
+after warm-up +1.2 MiB per 1000 iterations, still falling but not flat; descriptors 30, threads 13,
+tasks 46 throughout; `retained` bridge links 64 (the cap), spend readers 0, turn locks 1. The
+remaining slope is attributed in "Heap slope" below: freed memory kept by glibc's arenas.
+
+**The planner's late rise.** Main, 100 items, no lead, sampled every 500 passes (anonymous RSS):
+4.88 MiB at 505, 6.35 at 2,005, flat 6.46-6.49 from 2,505 to 5,005, then 6.60, 6.77, 6.99, 7.22,
+7.35, 7.52, 7.86, 8.16, 8.64, 9.42 at 10,005, then 9.70, 9.76, 9.82, 9.84 at 12,005. File-backed
+RSS stays 12.4-12.7 MiB (one step of 1 MiB at 10,005). The database grows 1 KB per pass (0.9 MB to
+11.6 MB), the write-ahead log stays at 4.1 MB. So the rise is anonymous heap, it comes in two
+steps, each levelling off (the 0.5 MiB of slice 3b and milestone 4 was the start of the second),
+and it tracks the database's size rather than the pass count. The writer's page cache (2 MiB) and
+the two readers' (512 KiB each) explain the first step; the second (3.4 MiB) exceeds those caps,
+which points at the allocator keeping freed memory of transient reads that grow with the tables
+[inference, the `MALLOC_ARENA_MAX=1` run that would confirm it was cut short: 6.42 MiB at 2,505,
+6.67 at 4,505, 7.74 at 6,505, the same course so far]. No per-pass retention: 2,500 passes added
+0.03 MiB on the plateau.
+
+## Heap slope (2026-11-26, LeakHunt2, Linux x64, release build, fake OMP and fake Discord)
+
+Same soak as above, with the receipt fix (decision 20), so every fifth iteration is a Discord
+message with no limit (600 per 3,000 iterations, 2,400 per 12,000; none held a room). Runs went
+three to five at a time on the 16-core host. Two tools, both outside the product:
+
+- `CATALY_SOAK_SKIP` leaves parts out (`discord`, `send`, `restarts`, `lanes`, `jobs`,
+  `reconnects`); `MALLOC_*` and `GLIBC_TUNABLES` reach the hub.
+- A heap sampler preloaded into the hub (`LD_PRELOAD`, a 30-line C file built locally, not in the
+  repository; Rust may not use `unsafe` for a counting allocator): every 5 s it appends glibc's
+  `mallinfo2()`: `arena` (heap obtained from the system), `uordblks` + `hblkhd` (live, in use) and
+  `fordblks` (free but kept).
+
+**Bisection, 3,000 iterations, anonymous RSS slope after the first quarter (KiB per 1000):**
+
+| Run | Slope | Anon RSS at the end |
+| --- | --- | --- |
+| All parts | 3,231 | 16.5 MiB |
+| No Discord | 2,865 | 13.9 MiB |
+| No `lead send` turns | 2,470 | 10.8 MiB |
+| Messages only (no restarts, lanes, jobs, reconnects) | 2,950 | 13.8 MiB |
+| All parts, `MALLOC_ARENA_MAX=1` | 546 | 7.0 MiB |
+
+No part explains it: leaving any one out lowers the slope by 9-24 %, roughly in proportion to the
+work left out. One malloc arena removes 83 % of it.
+
+**Live heap against heap held (sampler, 6,000 iterations, all parts):**
+
+| Allocator | Held from the system, at 0 / ¼ / ½ / ¾ / end | Live (in use), same points | Free but kept at the end | Anon RSS at the end |
+| --- | --- | --- | --- | --- |
+| glibc default (13 threads, one arena each) | 3.7 / 13.1 / 20.7 / 32.6 / 39.9 MiB | 2.3 / 3.6 / 4.0 / 3.6 / 3.6 MiB | 36.3 MiB | 25.2 MiB |
+| `MALLOC_ARENA_MAX=1` | 2.4 / 6.4 / 7.0 / 8.9 / 8.9 MiB | 2.3 / 4.0 / 3.4 / 5.1 / 5.4 MiB | 3.5 MiB | 8.3 MiB |
+
+The live heap is level: its mean is 3.9 MiB from the first quarter to the half and 4.3 MiB over the
+second half (default), 3.8 and 4.0 MiB (one arena); single samples reach 5.9 MiB with what is in
+flight. The 3,000-iteration runs without Discord and without turns show the same (live 3.2 and
+4.6 MiB mean over their second half, held 17.6 and 11.5 MiB). So no object accumulates per message,
+turn, restart, lane or job tick, and none of the suspects in the brief (event rings and broadcast
+channels, transcript reader buffers, the ops panel's recent list, rate-limit and nonce maps,
+prepared statements, actor state, Gateway resume buffers, tokio task allocations) retains memory
+that grows; all of those would show in the live heap. The growth is freed memory that glibc keeps:
+the hub has 13 threads (2 runtime workers, up to 8 blocking-pool threads, the store writer, the
+stall watch, main), glibc gives each its own arena, and each arena keeps its own fragmented free
+space, which no other thread can use and which is returned only from the top of a heap.
+
+**Longer runs, 12,000 iterations (2,400 Discord messages, 9,600 turns, 120 lead restarts, 240 lane
+cycles, 5,400 job ticks, 1,125 s), anonymous RSS every 1,500 iterations:**
+
+- glibc default: 3.4, 13.0, 14.6, 19.6, 22.4, 25.6, 36.9, 39.3, 42.2 MiB; slope +3.4 MiB per 1000
+  after warm-up. It does not level off within the run. Each arena should settle at its own plateau,
+  so the default allocator probably levels at several times the one-arena figure [inference: 13
+  arenas, the one-arena run keeps 3.5 MiB free].
+- `MALLOC_ARENA_MAX=1`: 2.5, 6.6, 7.1, 7.8, 8.8, 9.1, 10.4, 10.4, 11.4 MiB; slope +0.48 MiB per 1000,
+  in steps (flat 10.4 MiB from 8,700 to 11,100).
+- `MALLOC_ARENA_MAX=2` (run alone, 933 s): 3.0, 8.5, 9.8, 10.5, 10.9, 11.9, 13.4, 15.2, 16.3 MiB;
+  slope +0.73 MiB per 1000. Sampler: held 13.6 MiB at the half, 17.2 MiB at the end, 13.0 MiB of it
+  free; live mean 4.4, 4.6, 4.8 MiB over the second, third and last quarter (+0.06 MiB per 1000,
+  within what is in flight).
+
+With one or two arenas what remains grows in steps while the live heap stays level. The soak's data
+grows without bound in compressed time: the lead resumes one transcript for the whole run (12,000
+turns), and the store keeps every row because its 7-day retention never comes due. Transient reads
+of both (the transcript tail of up to 8 MiB for answers, queries over growing tables) grow with
+them, which leaves larger free holes [inference, as in the planner run above, where the rise tracked
+the tables]. In real use the tail read stops growing at 8 MiB and the tables at 7 days of rows.
+
+**Fix.** The systemd unit now sets `MALLOC_ARENA_MAX=1` for the hub (`sys::service`); children do not
+inherit it (their environment is an allow-list). One arena rather than two: 11.4 against 16.3 MiB
+after 12,000 iterations, and the run took no longer (1,126 s against 1,124 s for the default, run
+side by side); glibc's per-thread caches serve most small allocations without the arena lock. A hub
+started by hand gets glibc's default. macOS uses its own allocator; not measured there.

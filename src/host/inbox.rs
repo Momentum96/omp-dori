@@ -529,9 +529,6 @@ impl Mailbox {
             HostDone::Admitted(Admitted::Mismatch) => {
                 Err("this request ID was used before with different text".into())
             }
-            HostDone::Admitted(Admitted::Full) => {
-                Err("the receipt store of this target is full (512)".into())
-            }
             HostDone::Admitted(Admitted::Seen) => Ok((
                 Receipt {
                     request_id: rid,

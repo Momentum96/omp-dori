@@ -700,11 +700,34 @@ fn planner_pass_with_100_items_and_rss() {
     }
     let five = rss(&hub);
     let mut trend = Vec::new();
-    for _ in 0..12 {
+    // `CATALY_PLAN_ROUNDS` rounds of 500 passes (default 12); each round also prints the hub's
+    // anonymous and file-backed resident memory and the store's file sizes.
+    let rounds = std::env::var("CATALY_PLAN_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
+    for round in 1..=rounds {
         for _ in 0..500 {
             let _ = plan(&hub);
         }
         trend.push(rss(&hub));
+        let status = std::fs::read_to_string(format!("/proc/{}/status", hub.pid())).unwrap();
+        let field = |name: &str| {
+            status
+                .lines()
+                .find(|l| l.starts_with(name))
+                .map_or_default(|l| l.split_whitespace().nth(1).unwrap_or("?").to_string())
+        };
+        let size = |f: &str| std::fs::metadata(hub.state().join(f)).map_or(0, |m| m.len());
+        println!(
+            "PLAN passes {}: rss {} kB, anon {} kB, file {} kB, database {} B, write-ahead log {} B",
+            5 + round * 500,
+            field("VmRSS:"),
+            field("RssAnon:"),
+            field("RssFile:"),
+            size("cataly.db"),
+            size("cataly.db-wal")
+        );
     }
     let status = lane(&hub, "plan-status", &json!({})).unwrap();
     let mut durations = pass_durations(&hub);
