@@ -60,6 +60,9 @@ pub struct Script {
     /// Spacing in ms between the calls of that delegation and before its completion (0: all at
     /// once), so a call can be answered while its response is still running.
     pub call_gap_ms: u32,
+    /// The session starts this long after it is requested, as the real API initializes it first:
+    /// the WebRTC POST is answered, and the WebSocket's `session.started` sent, only then.
+    pub start_delay_ms: u32,
     /// An error event right after `session.started`.
     pub fail_after_start: Option<String>,
     /// Never send `session.started`.
@@ -215,6 +218,7 @@ async fn post(mut stream: TcpStream, script: Arc<Script>, log: Arc<Mutex<Log>>) 
         l.input_bytes.push(Vec::new());
         l.sessions.len() - 1
     };
+    tokio::time::sleep(Duration::from_millis(u64::from(script.start_delay_ms))).await;
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let local = socket.local_addr().unwrap();
     let mut rtc = Rtc::builder()
@@ -260,6 +264,7 @@ async fn websocket(stream: TcpStream, script: Arc<Script>, log: Arc<Mutex<Log>>)
     };
     let mut fake = Fake::new(script, log, index, start["session"].clone());
     let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tokio::time::sleep(Duration::from_millis(u64::from(fake.script.start_delay_ms))).await;
     fake.opened(Instant::now());
     loop {
         for out in fake.take() {

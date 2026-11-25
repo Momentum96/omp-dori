@@ -8,7 +8,8 @@
 //! - `CATALY_LIVE_VOICE_RECORDING`: a WAV file (24 kHz, mono, 16-bit) of the owner asking, for
 //!   example, "Please pass this to the lead: check the build."
 //!
-//! Optional: `CATALY_LIVE_VOICE_API_BASE` (default `https://api.openai.com`), the model names
+//! Optional: `CATALY_LIVE_VOICE_TRANSPORTS` (`websocket`, `webrtc` or both comma-separated, the
+//! default), `CATALY_LIVE_VOICE_API_BASE` (default `https://api.openai.com`), the model names
 //! `CATALY_LIVE_VOICE_SPEECH_MODEL`, `_BACKEND_MODEL`, `_SUMMARY_MODEL`, `_VOICE`, and the prices
 //! `CATALY_LIVE_VOICE_SPEECH_USD_PER_MIN`, `_BACKEND_USD_PER_MTOK` (input,cached,write,output) and
 //! `_SUMMARY_USD_PER_MTOK`. Check the defaults against `OpenAI`'s current price list first.
@@ -90,6 +91,7 @@ struct Book {
     passes: Vec<(String, String)>,
     posts: Vec<String>,
     holds: Vec<String>,
+    /// Realtime sessions started: WebSocket connections and WebRTC session POSTs.
     connects: usize,
     held: Option<String>,
 }
@@ -150,6 +152,9 @@ impl VoiceHost for LiveHost {
         }
         let tail = url.strip_prefix("https://").unwrap();
         let (authority, path) = tail.split_at(tail.find('/').unwrap_or(tail.len()));
+        if path == "/v1/live/sessions" {
+            self.book.lock().unwrap().connects += 1;
+        }
         let (host, port) = authority
             .rsplit_once(':')
             .map_or((authority, 443), |(h, p)| (h, p.parse().unwrap()));
@@ -441,15 +446,24 @@ async fn transport(g: &Gate, t: Transport) -> f64 {
     r.presence.send(true).unwrap();
     r.feed(&vec![vec![0i16; 480]; 100]).await;
     r.feed(&g.frames).await;
-    let spoke = r
-        .quiet_until(Duration::from_secs(60), || {
-            !host.book.lock().unwrap().passes.is_empty() && *r.played.lock().unwrap() > 0
-        })
-        .await;
+    r.quiet_until(Duration::from_secs(60), || {
+        let book = host.book.lock().unwrap();
+        book.held.is_some() || (!book.passes.is_empty() && *r.played.lock().unwrap() > 0)
+    })
+    .await;
     let played = *r.played.lock().unwrap();
     r.finish().await;
+    let (passes, holds) = {
+        let book = host.book.lock().unwrap();
+        (book.passes.len(), book.holds.clone())
+    };
+    println!(
+        "LIVE {t:?}: exchange: {passes} pass(es), {played} frames played, holds {holds:?}, \
+         cost so far {:.4} USD",
+        host.spent()
+    );
     assert!(
-        spoke,
+        passes > 0 && played > 0,
         "{t:?}: the model answered and passed the request ({played} frames)"
     );
     {
@@ -480,11 +494,19 @@ async fn transport(g: &Gate, t: Transport) -> f64 {
                 .unwrap()
                 .posts
                 .iter()
-                .any(|p| p.contains("cap"))
+                .any(|p| p.starts_with("Voice is off for now"))
         })
         .await;
     r.finish().await;
-    assert!(notice, "{t:?}: the cap notice went out");
+    let (posts, holds) = {
+        let book = host.book.lock().unwrap();
+        (book.posts.clone(), book.holds.clone())
+    };
+    assert!(
+        notice,
+        "{t:?}: the cap notice went out; holds {holds:?}, posts {posts:?}, cost so far {:.4} USD",
+        host.spent()
+    );
     assert_eq!(
         host.book.lock().unwrap().connects,
         connects,
@@ -498,13 +520,29 @@ async fn transport(g: &Gate, t: Transport) -> f64 {
     spent
 }
 
+/// The transports to run, from `CATALY_LIVE_VOICE_TRANSPORTS`; both by default.
+fn transports() -> Vec<Transport> {
+    let Some(v) = env("CATALY_LIVE_VOICE_TRANSPORTS") else {
+        return vec![Transport::WebSocket, Transport::WebRtc];
+    };
+    v.split(',')
+        .map(|t| {
+            Transport::parse(t.trim())
+                .unwrap_or_else(|| panic!("CATALY_LIVE_VOICE_TRANSPORTS: unknown transport {t}"))
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: real realtime API, owner-approved spending limit"]
 async fn live_voice_both_transports() {
     let mut g = gate();
-    let ws = transport(&g, Transport::WebSocket).await;
-    g.max_usd -= ws;
-    assert!(g.max_usd > 0.0, "the limit is used up after WebSocket");
-    let rtc = transport(&g, Transport::WebRtc).await;
-    println!("LIVE total cost used {:.4} USD", ws + rtc);
+    let mut total = 0.0;
+    for t in transports() {
+        assert!(g.max_usd > 0.0, "the limit is used up before {t:?}");
+        let spent = transport(&g, t).await;
+        g.max_usd -= spent;
+        total += spent;
+    }
+    println!("LIVE total cost used {total:.4} USD");
 }

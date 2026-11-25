@@ -9,6 +9,9 @@
 - The limits a Discord form checks (number ranges, text lengths, required fields) are worded in
   your language (`[hub] language`), in the Fill in placeholder, a refused Fill in and a refused
   Submit, like the rest of the question card.
+- Voice over WebRTC no longer stops at the start of a call. Setting up a WebRTC session takes the
+  provider a few seconds, and voice used to give up as soon as more than 3 s of your audio was
+  waiting; it now keeps the newest 3 s until the session is up and sends them then.
 
 ## 0.1.2 (2026-11-26)
 

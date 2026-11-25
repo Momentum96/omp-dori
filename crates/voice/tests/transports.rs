@@ -599,6 +599,47 @@ async fn failure_holds(t: Transport) {
 }
 both!(check6_failure_holds, failure_holds);
 
+/// The real API initializes a session before it starts it, which takes seconds over WebRTC (the
+/// session POST is answered only then, and ICE, DTLS and SCTP follow). The owner's audio arriving
+/// meanwhile neither fails the session nor piles up: once live, the newest 3 s go out, paced.
+async fn slow_start(t: Transport) {
+    let script = Script {
+        start_delay_ms: 4000,
+        greet_ms: 200,
+        ..Script::default()
+    };
+    let host = FakeHost::new();
+    let mut h = harness(t, script, Arc::clone(&host), |_| {}).await;
+    h.presence.send(true).unwrap();
+    let live = h
+        .until(Duration::from_secs(15), |h| {
+            h.played > 0 && !h.server.log.lock().unwrap().input.is_empty()
+        })
+        .await;
+    h.speak(1000, false).await;
+    assert!(
+        live && host.seen.lock().unwrap().holds.is_empty(),
+        "the session went live without a failure: {:?}",
+        host.seen.lock().unwrap().holds
+    );
+    let log = h.server.log.lock().unwrap();
+    let arrivals: Vec<(Instant, usize)> = log.input.iter().map(|(_, t, n)| (*t, *n)).collect();
+    let first = arrivals[0].0;
+    let mut total = 0usize;
+    for (at, n) in &arrivals {
+        total += n;
+        let elapsed = at.duration_since(first).as_secs_f64();
+        let limit = 144_000.0 + 1.15 * 48_000.0 * elapsed + 9_600.0;
+        assert!(
+            (total as f64) <= limit,
+            "at most the newest 3 s at once, then paced: {total} bytes after {elapsed:.3}s"
+        );
+    }
+    drop(log);
+    h.task.abort();
+}
+both!(check3_slow_start, slow_start);
+
 /// Check 1: never starts while a cap is reached (one notice); a corrupt ledger stops voice and is
 /// never reset.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,6 +1,7 @@
 //! Input pacing (VOICE-10, VOICE req. 62): a token bucket refilling at 1.15x real time, holding at
 //! most 3 s and starting full. When the stream falls over 100 ms behind real time with nothing
-//! pending, silence fills the gap within the bucket. Over 3 s of pending input fails the session.
+//! pending, silence fills the gap within the bucket. Over 3 s of pending input fails the session;
+//! before the session starts, nothing drains input, so only the newest 3 s are kept instead.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -51,6 +52,21 @@ impl Pacer {
             return Err(Overflow);
         }
         Ok(())
+    }
+
+    /// Queues input while nothing can drain it (the session is starting): beyond 3 s the oldest
+    /// input is dropped instead of failing, and the clock moves past it so no silence replaces it.
+    pub(crate) fn keep_newest(&mut self, pcm: &[u8]) {
+        self.pending.extend(pcm);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let max = bytes_for(HOLD) as usize;
+        // Whole samples only.
+        let excess = (self.pending.len().saturating_sub(max) + 1) & !1;
+        let dropped = excess.min(self.pending.len());
+        self.pending.drain(..dropped);
+        #[allow(clippy::cast_precision_loss)]
+        let skipped = Duration::from_secs_f64(dropped as f64 / MODEL_BYTES_PER_SECOND as f64);
+        self.clock += skipped;
     }
 
     /// Pending bytes.
@@ -126,5 +142,25 @@ mod tests {
         let out = p.pull(t0 + Duration::from_millis(500));
         assert!(out.len() >= 19_000 && out.iter().all(|&b| b == 0));
         assert_eq!(p.push(&vec![0u8; 150_000]), Err(Overflow));
+    }
+
+    #[test]
+    fn keeps_the_newest_three_seconds_while_starting() {
+        let t0 = Instant::now();
+        let mut p = Pacer::new(t0);
+        // 5 s of input while the session starts: the oldest 2 s go, nothing fails.
+        for i in 0..250u8 {
+            p.keep_newest(&[i; 960]);
+        }
+        assert_eq!(p.pending(), 144_000);
+        let out = p.pull(t0 + Duration::from_secs(5));
+        assert_eq!(out.len(), 144_000);
+        assert_eq!(
+            (out[0], out[143_999]),
+            (100, 249),
+            "the newest 3 s, in order"
+        );
+        // The dropped 2 s count as sent: no silence is padded in their place.
+        assert_eq!(p.pull(t0 + Duration::from_millis(5020)).len(), 0);
     }
 }
