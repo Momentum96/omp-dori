@@ -19,10 +19,11 @@ use crate::sys::fs::{create_atomic, read_private, write_atomic};
 use crate::sys::paths::Paths;
 
 /// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 14] = [
+const MANAGED: [(&str, &str, &str); 15] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
+    ("discord", "guild", "--discord-guild"),
     ("discord", "owner", "--discord-owner"),
     ("discord", "channels", "--discord-channels"),
     ("telegram", "token_file", "--telegram-token-file"),
@@ -42,20 +43,20 @@ type Identity = (u64, u64, u32, u32, u32, u64, i64, i64, i64, i64);
 
 /// What identifies the file: any change of it means someone else wrote meanwhile.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Snapshot {
+pub(super) struct Snapshot {
     identity: Option<Identity>,
-    bytes: Option<Vec<u8>>,
+    pub(super) bytes: Option<Vec<u8>>,
 }
 
 impl Snapshot {
-    fn digest(&self) -> String {
+    pub(super) fn digest(&self) -> String {
         self.bytes
             .as_deref()
             .map_or_else(|| "none".to_string(), sha256_hex)
     }
 }
 
-fn snapshot(path: &Path) -> Result<Snapshot, String> {
+pub(super) fn snapshot(path: &Path) -> Result<Snapshot, String> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -94,7 +95,7 @@ fn snapshot(path: &Path) -> Result<Snapshot, String> {
 fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
     let int = v.parse::<i64>().ok();
     let ok = match (section, key) {
-        ("discord", "owner") => crate::relay::discord::Snowflake::parse(v).is_some(),
+        ("discord", "owner" | "guild") => crate::relay::discord::Snowflake::parse(v).is_some(),
         ("telegram", "owner") => int.is_some_and(|n| n > 0),
         ("telegram", "group") => int.is_some_and(|n| n < 0),
         ("telegram", "topic") => int.is_some_and(|n| n > 0),
@@ -107,6 +108,7 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         _ => true,
     };
     (!ok).then_some(match (section, key) {
+        ("discord", "guild") => "expected the server's Discord ID",
         ("discord", _) => "expected the owner's Discord user ID",
         ("telegram", "owner") => "expected the owner's Telegram user ID (a positive number)",
         ("telegram", "group") => "expected the group's Telegram chat ID (a negative number)",
@@ -129,7 +131,7 @@ fn comma_list(v: &str) -> Vec<&str> {
 }
 
 /// A TOML basic string.
-fn toml_string(value: &str) -> String {
+pub(super) fn toml_string(value: &str) -> String {
     let mut out = String::from("\"");
     for c in value.chars() {
         match c {
@@ -272,6 +274,13 @@ fn value_of(
             );
             (config.omp.path.clone(), Some(note))
         }
+        ("discord", "guild") => (
+            config
+                .discord
+                .guild
+                .map_or_else(|| "-".to_string(), |g| g.to_string()),
+            Some("your server; destinations may name its channels".to_string()),
+        ),
         ("discord", "owner") => (
             config
                 .discord
@@ -425,13 +434,7 @@ fn set_value(
 }
 
 pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
-    let path = &paths.config_file;
-    let before = snapshot(path).map_err(Failure::Refused)?;
-    let mut text = match &before.bytes {
-        Some(b) => String::from_utf8(b.clone())
-            .map_err(|_| Failure::Refused(format!("{} is not UTF-8", path.display())))?,
-        None => NEW_FILE.to_string(),
-    };
+    let (before, mut text) = load(paths)?;
     let creating = before.bytes.is_none();
     text = managed(p, text, creating)?;
     let home = if p.flag("--backup") {
@@ -442,11 +445,42 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
     if let Some(h) = &home {
         text = h.config(&text);
     }
-    finish(p, paths, &before, creating, &text, home.as_ref(), as_json)
+    let mut flags: String = MANAGED
+        .iter()
+        .filter_map(|(_, _, f)| p.value(f).map(|v| format!(" {f} {v}")))
+        .collect();
+    if p.flag("--backup") {
+        flags.push_str(" --backup");
+        if let Some(r) = p.value("--backup-repo") {
+            let _ = write!(flags, " --backup-repo {r}");
+        }
+    }
+    let plan = Plan {
+        apply: p.flag("--apply"),
+        expect: p.value("--expect"),
+        command: "setup",
+        flags,
+        always_offer: home.is_some(),
+        extra: None,
+    };
+    let home = home.as_ref().map(|h| (h, p.flag("--create")));
+    finish(paths, &before, creating, &text, home, as_json, &plan)
+}
+
+/// The snapshot of the config file and its text (a new file's header when there is none).
+pub(super) fn load(paths: &Paths) -> Result<(Snapshot, String), Failure> {
+    let path = &paths.config_file;
+    let before = snapshot(path).map_err(Failure::Refused)?;
+    let text = match &before.bytes {
+        Some(b) => String::from_utf8(b.clone())
+            .map_err(|_| Failure::Refused(format!("{} is not UTF-8", path.display())))?,
+        None => NEW_FILE.to_string(),
+    };
+    Ok((before, text))
 }
 
 /// Sets the managed settings the flags name (a new file gets the ones OMP and the hub need).
-fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<String, Failure> {
+pub(super) fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<String, Failure> {
     for (section, key, flag) in MANAGED {
         let value = match (p.value(flag), creating, section) {
             (Some(v), _, _) => Some(v.to_string()),
@@ -462,15 +496,31 @@ fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<String, Failu
     Ok(text)
 }
 
-/// Validates, writes when applying (after the home backup is prepared), and reports.
-fn finish(
-    p: &Parsed,
+/// How one setup run writes and reports.
+pub(super) struct Plan<'a> {
+    pub(super) apply: bool,
+    /// The digest the preview showed; applying refuses a file that no longer has it.
+    pub(super) expect: Option<&'a str>,
+    /// The verb of the apply command the preview prints: `setup` or `setup discord`.
+    pub(super) command: &'static str,
+    /// The flags that repeat this run in that command.
+    pub(super) flags: String,
+    /// Offer the apply command even when the file stays as it is (it does more than write it).
+    pub(super) always_offer: bool,
+    /// A further section of the report: its key and value.
+    pub(super) extra: Option<(&'static str, Value)>,
+}
+
+/// Validates, writes when applying (after the home backup is prepared, `--create` given with it),
+/// and reports.
+pub(super) fn finish(
     paths: &Paths,
     before: &Snapshot,
     creating: bool,
     text: &str,
-    home: Option<&super::home::Home>,
+    home: Option<(&super::home::Home, bool)>,
     as_json: bool,
+    plan: &Plan<'_>,
 ) -> Result<(), Failure> {
     let path = &paths.config_file;
     let after = sha256_hex(text.as_bytes());
@@ -482,14 +532,13 @@ fn finish(
         "update"
     };
     let valid = config::parse(text).map_err(|errors| config::describe(&errors));
-    let apply = p.flag("--apply");
-    if apply {
+    if plan.apply {
         if let Err(e) = &valid {
             return Err(Failure::Refused(format!(
                 "the result would not be a valid config: {e}"
             )));
         }
-        if let Some(expect) = p.value("--expect")
+        if let Some(expect) = plan.expect
             && expect != before.digest()
         {
             return Err(Failure::Refused(format!(
@@ -498,8 +547,8 @@ fn finish(
                 before.digest()
             )));
         }
-        if let Some(h) = home {
-            super::install::block_on(h.apply(p.flag("--create"))).map_err(Failure::Refused)?;
+        if let Some((h, create)) = home {
+            super::install::block_on(h.apply(create)).map_err(Failure::Refused)?;
         }
         if action != "keep" {
             publish(path, before, text.as_bytes())?;
@@ -509,26 +558,31 @@ fn finish(
         .ok()
         .and_then(|mut c| c.call(method::STATUS, json!({}), CALL_TIMEOUT).ok())
         .and_then(|v| serde_json::from_value::<Status>(v).ok());
-    let report = json!({
+    let mut report = json!({
         "file": path.display().to_string(),
         "action": action,
-        "applied": apply,
+        "applied": plan.apply,
         "before": before.digest(),
         "after": after,
         "managed": MANAGED.iter().map(|(s, k, _)| format!("{s}.{k}")).collect::<Vec<_>>(),
         "unknown_keys": "kept as they are",
         "valid": valid.as_ref().map_or_else(|e| Value::String(e.clone()), |_| Value::Bool(true)),
         "sources": sources(paths, text, hub.as_ref(), &after),
-        "backup": home.map(super::home::Home::report),
+        "backup": home.map(|(h, _)| h.report()),
     });
+    if let Some((key, value)) = &plan.extra
+        && let Some(map) = report.as_object_mut()
+    {
+        map.insert((*key).to_string(), value.clone());
+    }
     if as_json {
         out::json(&report);
         return Ok(());
     }
     let invalid = valid.as_ref().err().map(String::as_str);
-    print_report(p, &report, apply, action, &before.digest(), &after, invalid);
-    if let Some(h) = home {
-        for l in h.lines(apply) {
+    print_report(&report, plan, action, &before.digest(), &after, invalid);
+    if let Some((h, _)) = home {
+        for l in h.lines(plan.apply) {
             out::line(&l);
         }
     }
@@ -536,9 +590,8 @@ fn finish(
 }
 
 fn print_report(
-    p: &Parsed,
     report: &Value,
-    apply: bool,
+    plan: &Plan<'_>,
     action: &str,
     before: &str,
     after: &str,
@@ -548,7 +601,7 @@ fn print_report(
         .get("file")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let verb = if apply { "done" } else { "preview" };
+    let verb = if plan.apply { "done" } else { "preview" };
     out::line(&format!("setup {verb}: {action} {path}"));
     out::line(&format!("  before {before}"));
     out::line(&format!("  after  {after}"));
@@ -559,22 +612,10 @@ fn print_report(
     if let Some(e) = invalid {
         out::line(&format!("  the result is not a valid config: {e}"));
     }
-    if !apply && (action != "keep" || p.flag("--backup")) {
+    if !plan.apply && (action != "keep" || plan.always_offer) {
         out::line(&format!(
-            "  write it with: cataly setup --apply --expect {before}{}{}",
-            MANAGED
-                .iter()
-                .filter_map(|(_, _, f)| p.value(f).map(|v| format!(" {f} {v}")))
-                .collect::<String>(),
-            if p.flag("--backup") {
-                format!(
-                    " --backup{}",
-                    p.value("--backup-repo")
-                        .map_or_else(String::new, |r| format!(" --backup-repo {r}"))
-                )
-            } else {
-                String::new()
-            }
+            "  write it with: cataly {} --apply --expect {before}{}",
+            plan.command, plan.flags
         ));
     }
     let text = |s: &Value, k: &str| {

@@ -12,7 +12,7 @@ no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.
 | ring | 0.17 | Apache-2.0 AND ISC | https://crates.io/crates/ring | none beyond defaults off: SHA-256 (condition-job output, config and receipt digests); `rand::SystemRandom` (the operating system's secure generator) for the secure tokens of the session host: single-use launch tokens (`CATALY_LAUNCH`), session handles and delivery IDs (`host::random_hex`) |
 | toml | 0.9 | MIT OR Apache-2.0 | https://crates.io/crates/toml | `std`, `parse`, `serde`: reading the config (no writer) |
 | jiff | 0.2 | Unlicense OR MIT | https://crates.io/crates/jiff | `std`, `tzdb-zoneinfo`: IANA zones from the system zoneinfo, DST gaps and folds |
-| rustix | 1.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://crates.io/crates/rustix | `std`, `fs`, `process`: `statvfs`, `getuid`, `kill(SIGTERM)` to own children, `O_NOFOLLOW` |
+| rustix | 1.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | https://crates.io/crates/rustix | `std`, `fs`, `process`, `termios`: `statvfs`, `getuid`, `kill(SIGTERM)` to own children, `O_NOFOLLOW`, echo off for the hidden token prompt |
 | hyper | 1.13 | MIT | https://crates.io/crates/hyper | `client`, `http1`: the HTTP/1.1 client under `relay::http`. Replaces reqwest by the measurement `DESIGN.md` 10.2 asked for (`docs/measurements.md`). |
 | hyper-util | 0.1 | MIT | https://crates.io/crates/hyper-util | `tokio`: the tokio I/O adapter for hyper; no pool or legacy client |
 | http-body-util | 0.1 | MIT | https://crates.io/crates/http-body-util | defaults off: a full request body and a size-limited response body (2 MiB cap) |

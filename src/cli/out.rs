@@ -7,6 +7,13 @@ pub(crate) fn text(s: &str) {
     let _ = std::io::stdout().lock().write_all(s.as_bytes());
 }
 
+/// Writes a question without a line end and flushes it, so it shows before the answer is typed.
+pub(crate) fn prompt(s: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(s.as_bytes());
+    let _ = out.flush();
+}
+
 /// Writes one line to stdout.
 pub(crate) fn line(s: &str) {
     let mut out = std::io::stdout().lock();

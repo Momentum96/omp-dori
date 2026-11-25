@@ -342,19 +342,16 @@ impl Rest {
         let guild = self
             .guild
             .ok_or("a channel name needs [discord] guild in the config")?;
-        let list = self
-            .get("GET guilds/channels", &format!("/guilds/{guild}/channels"))
-            .await?;
-        let matches: Vec<Snowflake> = list.as_array().map_or_else(Vec::new, |all| {
-            all.iter()
-                .filter(|c| c.get("name").and_then(Value::as_str) == Some(name.as_str()))
-                .filter_map(|c| {
-                    c.get("id")
-                        .and_then(Value::as_str)
-                        .and_then(Snowflake::parse)
-                })
-                .collect()
-        });
+        let all = self.guild_channels(guild).await.map_err(|e| e.why)?;
+        let matches: Vec<Snowflake> = all
+            .iter()
+            .filter(|c| c.get("name").and_then(Value::as_str) == Some(name.as_str()))
+            .filter_map(|c| {
+                c.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(Snowflake::parse)
+            })
+            .collect();
         match matches.as_slice() {
             [one] => Ok(*one),
             [] => Err(format!("no channel named '{name}' in the guild")),
@@ -512,6 +509,64 @@ impl Rest {
         .await
     }
 
+    /// Sets the application's flags. Discord takes only the limited intent flags from a bot.
+    pub(crate) async fn set_application_flags(&self, flags: u64) -> Result<Value, RestError> {
+        self.call(
+            "PATCH applications/@me",
+            Method::PATCH,
+            "/applications/@me",
+            Some(json!({ "flags": flags })),
+            Kind::Idempotent,
+        )
+        .await
+    }
+
+    /// The servers the bot is in (at most 200 per page; a Cataly bot is in one or a few).
+    pub(crate) async fn guilds(&self) -> Result<Vec<Value>, RestError> {
+        let v = self
+            .call(
+                "GET users/@me/guilds",
+                Method::GET,
+                "/users/@me/guilds",
+                None,
+                Kind::Read,
+            )
+            .await?;
+        list(v, "Discord sent no server list")
+    }
+
+    /// Every channel of a guild.
+    pub(crate) async fn guild_channels(&self, guild: Snowflake) -> Result<Vec<Value>, RestError> {
+        let v = self
+            .call(
+                "GET guilds/channels",
+                Method::GET,
+                &format!("/guilds/{guild}/channels"),
+                None,
+                Kind::Read,
+            )
+            .await?;
+        list(v, "Discord sent no channel list")
+    }
+
+    /// Creates one text channel. Never repeated after an uncertain outcome: a second run finds the
+    /// channel by name instead.
+    pub(crate) async fn create_text_channel(
+        &self,
+        guild: Snowflake,
+        name: &str,
+        topic: &str,
+    ) -> Result<Value, RestError> {
+        self.call(
+            "POST guilds/channels",
+            Method::POST,
+            &format!("/guilds/{guild}/channels"),
+            Some(json!({ "name": name, "type": 0, "topic": topic })),
+            Kind::Once,
+        )
+        .await
+    }
+
     /// The Gateway URL Discord names.
     pub(crate) async fn gateway_url(&self) -> Result<String, RestError> {
         let v = self
@@ -559,15 +614,7 @@ impl Rest {
                 Kind::Read,
             )
             .await?;
-        match v {
-            Value::Array(page) => Ok(page),
-            _ => Err(RestError {
-                status: None,
-                code: None,
-                why: "Discord sent no message list".into(),
-                uncertain: false,
-            }),
-        }
+        list(v, "Discord sent no message list")
     }
 
     pub(crate) async fn message(
@@ -814,6 +861,19 @@ impl Rest {
             Err(e) if e.uncertain => PartOutcome::Uncertain(e.why),
             Err(e) => PartOutcome::Rejected(e.why),
         }
+    }
+}
+
+/// A JSON array answer as its items; anything else is an error named by `what`.
+fn list(v: Value, what: &str) -> Result<Vec<Value>, RestError> {
+    match v {
+        Value::Array(items) => Ok(items),
+        _ => Err(RestError {
+            status: None,
+            code: None,
+            why: what.into(),
+            uncertain: false,
+        }),
     }
 }
 

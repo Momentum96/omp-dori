@@ -1,9 +1,11 @@
 //! A fake Discord on loopback only (DISC-OUT-27): the REST calls Cataly makes (bot and application
 //! identity, the Gateway URL, channels, history, single messages, active threads, message create and
-//! edit, reactions, typing, interaction callbacks, avatar) and a Gateway WebSocket server. It records
+//! edit, reactions, typing, interaction callbacks, avatar; for setup the intent flags, the bot's
+//! servers, a server's channels and channel create) and a Gateway WebSocket server. It records
 //! every request, deduplicates creates by their enforced nonce as Discord does, keeps a history per
 //! channel, answers a reply with message type 19 and its reference, and lets a test script the next
-//! create statuses, push dispatches, and send op 7, op 9 or a close code.
+//! create statuses, push dispatches, and send op 7, op 9 or a close code. With a token set, any
+//! other token gets 401.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,8 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 pub const BOT: &str = "500000000000000001";
 pub const APP: &str = "500000000000000002";
 pub const GUILD: &str = "500000000000000003";
+/// The user who owns the fake application.
+pub const APP_OWNER: &str = "500000000000000004";
 
 /// One request as the server saw it.
 #[derive(Debug, Clone)]
@@ -71,6 +75,11 @@ struct State {
     guild: Option<Value>,
     voice_ops: Vec<Value>,
     intents: Vec<u64>,
+    /// Setup: the token the fake accepts (any when unset), the application's flags, the servers
+    /// the bot is in.
+    token: Option<String>,
+    app_flags: u64,
+    guilds: Vec<Value>,
 }
 
 pub struct FakeDiscord {
@@ -90,6 +99,7 @@ impl FakeDiscord {
         let state = Arc::new(Mutex::new(State {
             next_id: 900_000_000_000_000_000,
             interval_ms: 1_000,
+            app_flags: 1 << 18,
             ..State::default()
         }));
         let shared = Arc::clone(&state);
@@ -284,6 +294,37 @@ impl FakeDiscord {
         self.state.lock().unwrap().intents.clone()
     }
 
+    /// Only this token is accepted from now on; any other gets 401.
+    pub fn set_token(&self, token: &str) {
+        self.state.lock().unwrap().token = Some(token.into());
+    }
+
+    /// The application's flags (default: the Message Content intent for 100 or more servers).
+    pub fn set_app_flags(&self, flags: u64) {
+        self.state.lock().unwrap().app_flags = flags;
+    }
+
+    pub fn app_flags(&self) -> u64 {
+        self.state.lock().unwrap().app_flags
+    }
+
+    /// The bot joins a server.
+    pub fn join(&self, id: &str, name: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .guilds
+            .push(json!({ "id": id, "name": name, "owner": false, "permissions": "0" }));
+    }
+
+    /// A named channel of a server, as the channel list shows it.
+    pub fn named(&self, id: &str, name: &str, kind: u64, guild: &str) {
+        self.state.lock().unwrap().channels.insert(
+            id.into(),
+            json!({ "id": id, "name": name, "type": kind, "guild_id": guild }),
+        );
+    }
+
     pub fn set_resume_url(&self, url: &str) {
         self.state.lock().unwrap().resume_url = Some(url.into());
     }
@@ -415,6 +456,12 @@ async fn gateway(stream: tokio::net::TcpStream, state: Arc<Mutex<State>>, port: 
     }
 }
 
+/// The application object, owned by [`APP_OWNER`].
+fn application(s: &State) -> Value {
+    json!({ "id": APP, "flags": s.app_flags, "interactions_endpoint_url": null,
+        "owner": { "id": APP_OWNER, "username": "fake-owner" }, "team": null })
+}
+
 fn reply(status: u16, body: &Value) -> Response<Full<Bytes>> {
     let bytes = if status == 204 {
         Bytes::new()
@@ -435,6 +482,44 @@ fn param(query: &str, key: &str) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
+/// The calls only `cataly setup discord` makes: the application's intent flags, the bot's
+/// servers, a server's channels and a new channel.
+fn setup_route(
+    s: &mut State,
+    method: &str,
+    parts: &[&str],
+    body: &Value,
+) -> Option<Response<Full<Bytes>>> {
+    Some(match (method, parts) {
+        ("PATCH", ["applications", "@me"]) => {
+            // Only the limited intent flags may be changed by a bot.
+            let limited = (1 << 13) | (1 << 15) | (1 << 19);
+            let asked = body["flags"].as_u64().unwrap_or(0);
+            s.app_flags = (s.app_flags & !limited) | (asked & limited);
+            reply(200, &application(s))
+        }
+        ("GET", ["users", "@me", "guilds"]) => reply(200, &Value::Array(s.guilds.clone())),
+        ("GET", ["guilds", guild, "channels"]) => {
+            let list: Vec<Value> = s
+                .channels
+                .values()
+                .filter(|c| c["guild_id"] == *guild && c.get("name").is_some())
+                .cloned()
+                .collect();
+            reply(200, &Value::Array(list))
+        }
+        ("POST", ["guilds", guild, "channels"]) => {
+            s.next_id += 1;
+            let id = s.next_id.to_string();
+            let channel = json!({ "id": id, "type": body["type"], "name": body["name"],
+                "topic": body["topic"], "guild_id": guild });
+            s.channels.insert(id, channel.clone());
+            reply(201, &channel)
+        }
+        _ => return None,
+    })
+}
+
 async fn answer(
     req: Request<Incoming>,
     state: Arc<Mutex<State>>,
@@ -450,6 +535,10 @@ async fn answer(
     let bytes = req.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let mut s = state.lock().unwrap();
+    let refused = s
+        .token
+        .as_ref()
+        .is_some_and(|t| authorization.as_deref() != Some(format!("Bot {t}").as_str()));
     s.seen.push(Seen {
         method: method.clone(),
         path: path.clone(),
@@ -458,14 +547,23 @@ async fn answer(
         body: body.clone(),
     });
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if refused {
+        return Ok(reply(
+            401,
+            &json!({ "message": "401: Unauthorized", "code": 0 }),
+        ));
+    }
+    if let Some(r) = setup_route(&mut s, &method, &parts, &body) {
+        return Ok(r);
+    }
     let unknown = json!({ "message": "Unknown Message", "code": 10008 });
     let response = match (method.as_str(), parts.as_slice()) {
-        ("GET", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": null})),
-        ("PATCH", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": "a"})),
-        ("GET", ["applications", "@me"]) => reply(
+        ("GET", ["users", "@me"]) => reply(
             200,
-            &json!({"id": APP, "flags": 1 << 18, "interactions_endpoint_url": null}),
+            &json!({"id": BOT, "username": "fake-bot", "bot": true, "avatar": null}),
         ),
+        ("PATCH", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": "a"})),
+        ("GET", ["applications", "@me"]) => reply(200, &application(&s)),
         ("GET", ["gateway"]) => {
             let url = s
                 .channels

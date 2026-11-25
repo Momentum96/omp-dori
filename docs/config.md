@@ -76,12 +76,61 @@ group or others.
 |---|---|
 | `--log-level` | `[hub] log_level` |
 | `--omp` | `[omp] path` |
-| `--discord-token-file`, `--discord-owner`, `--discord-channels` (comma-separated IDs) | `[discord] token_file`, `owner`, `channels` |
+| `--discord-token-file`, `--discord-guild`, `--discord-owner`, `--discord-channels` (comma-separated IDs) | `[discord] token_file`, `guild`, `owner`, `channels` |
 | `--telegram-token-file`, `--telegram-owner`, `--telegram-group`, `--telegram-topic` | `[telegram] token_file`, `owner`, `group`, `topic` |
 | `--slack-token-file`, `--slack-role`, `--slack-owner` | `[slack] token_file`, `role`, `owner` |
 | `--fallback-on` | `[fallback] on` |
 | `--fallback-chain` (comma-separated `provider/id`) | `[fallback.chains] default` |
 | `--backup [--backup-repo owner/name] [--create]` | the `[jobs.home]` backup job (see [Home backup](#home-backup)) |
+
+### `cataly setup discord`
+
+The guided Discord setup. Discord leaves three steps to you, because they need your own Discord
+login; setup prints them and does everything else with the bot's token:
+
+1. In the [Developer Portal](https://discord.com/developers/applications): **New Application**,
+   name it, **Create**.
+2. **Bot**, **Reset Token**, copy it. At a terminal setup asks for it without showing it, checks
+   it with Discord and saves it in the token file (`[discord] token_file`, default
+   `secrets/discord-token`, mode `600`). A script saves it there itself. The token is never read
+   from the command line.
+3. Open the invite link setup prints, pick your server, **Authorize**.
+
+What setup does, in order, reading everything again on each run:
+
+- **Token**: `GET /users/@me`; a token Discord refuses (401) or one that is not a bot's stops the
+  run and says where to reset it.
+- **Message Content intent**: read from `GET /applications/@me`. When it is off, setup offers to
+  switch it on (`--enable-intent` in scripts) through `PATCH /applications/@me`, which Discord
+  allows for a bot in fewer than 100 servers. If Discord does not take it, setup names the place:
+  Developer Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content
+  Intent**, **Save Changes**.
+- **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=<n>`
+  with exactly the permissions Cataly uses: View Channels, Send Messages, Read Message History,
+  Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads
+  (`326417583168`); plus Manage Channels (`326417583184`) only when setup is to create channels.
+- **Server**: `GET /users/@me/guilds`, read every 3 s until the bot joins, for at most `--wait`
+  (up to `1h`; 10 minutes at a terminal, no wait in a script). With several servers setup asks
+  which (`--guild <id>` in scripts; `[discord] guild` when already set).
+- **Channels**: the text channels named `cataly` (your talks with the lead) and `cataly-ops` (job
+  notices) are reused. Missing ones are created with `POST /guilds/{id}/channels` only after you
+  confirm (`--create-channels` in scripts). No other channel is changed. Two
+  text channels with the same name stop the run until you rename one.
+- **Owner**: `--owner <id>`, else `[discord] owner`, else the application's owner (the team's
+  owner for a team application) after you confirm (`--owner app` in scripts), else the ID you
+  type.
+- **Config**, through the same preview, `--expect` and apply rules as `cataly setup`:
+  `[discord] guild`, `owner`, `channels` (the lead's channel added to any already listed; `home`
+  set to it when the list has more than one) and `[destinations.cataly-ops]` with
+  `kind = "discord"` and the `cataly-ops` channel. A setting is written only when the file says
+  something else, so a second run changes nothing. At a terminal setup shows the preview and asks
+  before writing; a script writes with `--apply --expect <hash>`.
+
+`--json` never asks and prints one JSON report: the `cataly setup` report with a `discord` section
+(`stage`, `next`, bot, application, `message_content`, `invite`, `guilds`, `guild`, `channels`
+with `existing` or `created`, `owner` with its source). A step that still needs you ends the run
+with exit status 1, `stage` naming it (`token`, `intent`, `guild`, `channels`, `owner`) and `next`
+saying what to do; run setup again afterwards.
 
 ## Value formats
 
@@ -185,12 +234,12 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | Key | Type | Default | Allowed | What it does | Setup |
 |---|---|---|---|---|---|
 | `token_file` | string | `secrets/discord-token` | absolute path | The bot token file. | `--discord-token-file` |
-| `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | |
+| `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | `--discord-guild`, `setup discord` |
 | `api_base` | string | Discord's API | `http(s)://` on localhost only | Test override of the API address. | |
-| `owner` | string | none | Discord user ID | Your account. | `--discord-owner` |
-| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `--discord-channels` |
+| `owner` | string | none | Discord user ID | Your account. | `--discord-owner`, `setup discord` |
+| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `--discord-channels`, `setup discord` |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
-| `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | |
+| `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `setup discord` |
 | `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button. | |
 | `form_default_after` | duration | `"3m"` | 1s–1h | A question with one recommended choice takes it after this long. | |
 | `profile` | boolean | `true` | | Clear the bot's avatar at start. | |

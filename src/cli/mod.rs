@@ -7,6 +7,7 @@ mod install;
 mod lead;
 pub(crate) mod out;
 mod setup;
+mod setup_discord;
 mod slot;
 mod transcribe;
 
@@ -152,6 +153,9 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
             .value("--file")
             .map_or(paths.config_file.as_path(), Path::new);
         return config_check(file, as_json);
+    }
+    if p.is(&["setup", "discord"]) {
+        return setup_discord::run(p, paths, as_json);
     }
     if p.is(&["setup"]) {
         return setup::run(p, paths, as_json);

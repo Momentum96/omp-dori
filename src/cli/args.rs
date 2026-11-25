@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 54] = [
+pub(crate) const COMMANDS: [Spec; 55] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -172,6 +172,7 @@ pub(crate) const COMMANDS: [Spec; 54] = [
             "--expect",
             "--omp",
             "--discord-token-file",
+            "--discord-guild",
             "--discord-owner",
             "--discord-channels",
             "--telegram-token-file",
@@ -187,6 +188,16 @@ pub(crate) const COMMANDS: [Spec; 54] = [
             "--backup-repo",
         ],
         summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview); --backup [--backup-repo owner/name] [--create] sets up the private home backup",
+    },
+    Spec {
+        path: &["setup", "discord"],
+        args: &[],
+        flags: &["--json", "--apply", "--enable-intent", "--create-channels"],
+        values: &["--expect", "--guild", "--owner", "--wait"],
+        summary: "guided Discord setup: checks the bot token and its Message Content intent, prints the invite \
+                  link, waits for the bot to join, finds or creates #cataly and #cataly-ops, previews the config \
+                  (--apply --expect <hash> writes it); --guild <id>, --owner <id|app>, --wait 5m, \
+                  --enable-intent and --create-channels answer its questions in scripts",
     },
     Spec {
         path: &["health"],
