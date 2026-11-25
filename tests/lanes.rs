@@ -932,3 +932,101 @@ fn oversight_cpu_with_eight_lanes() {
     eprintln!("MEASURE oversight_cpu_8_lanes ticks={used} per_hour_s={per_hour:.2}");
     hub.stop();
 }
+
+/// The lead's bridge, connected with the lead session's launch token.
+fn lead_bridge(hub: &TestHub) -> (Bridge, Value) {
+    let session = hub.until(WAIT, || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live").then(|| v["session"]["session_id"].clone())
+    });
+    let (bridge, hello) = Bridge::connect(
+        hub,
+        json!({ "ext": 1, "token": token(hub, &session), "session": session, "agent": "main" }),
+    );
+    (bridge, json!({ "hello": hello, "session": session }))
+}
+
+fn lead_tool(bridge: &mut Bridge, session: &Value, call: &str, input: Value) -> (String, bool) {
+    let mut params = json!({ "call": call, "tool": "cataly", "session": session });
+    params["input"] = input;
+    let v = bridge.call("bridge.tool", params);
+    (
+        v["text"].as_str().unwrap_or_default().to_string(),
+        v["error"] == true,
+    )
+}
+
+/// Milestone 7 check 8: onboarding asks one consent question before reading anything (no tool is
+/// recorded before it), a "no" is stored and not asked again (also after a restart), and messenger
+/// writes from the lead (tool posts and `cataly` commands in its shell) are refused while it runs.
+#[test]
+fn onboarding_consent_is_stored_and_writes_wait() {
+    let (mut hub, work) = lane_hub("");
+    let text = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!(
+        "{text}[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        work.display()
+    ));
+    start(&mut hub);
+    let (mut b, meta) = lead_bridge(&hub);
+    assert_eq!(meta["hello"]["role"], "lead");
+    assert_eq!(meta["hello"]["shell"], true);
+    let s = meta["session"].clone();
+    let (state, _) = lead_tool(&mut b, &s, "o1", json!({ "op": "onboarding" }));
+    assert!(state.contains("\"phase\":\"new\""), "{state}");
+    let (_, err) = lead_tool(&mut b, &s, "o2", json!({ "op": "onboarding.start" }));
+    assert!(!err);
+    // Nothing is read before the consent answer.
+    let early = json!({ "op": "onboarding.tool", "name": "mail", "answer": "allowed", "reads": "subjects", "message": "m1" });
+    let (_, err) = lead_tool(&mut b, &s, "o3", early);
+    assert!(err, "a tool before consent is refused");
+    // Writes wait while onboarding runs.
+    let ask = json!({ "op": "question.ask", "text": "Which?", "source": "discord:1:2", "options": ["a", "b"] });
+    let (why, err) = lead_tool(&mut b, &s, "o4", ask.clone());
+    assert!(err && why.contains("onboarding"), "{why}");
+    let (why, err) = lead_tool(&mut b, &s, "o5", json!({ "op": "lane.open", "key": "k" }));
+    assert!(err && why.contains("onboarding"), "{why}");
+    let (why, _) = lead_tool(&mut b, &s, "o6", json!({ "op": "lane.list" }));
+    assert!(!why.contains("onboarding"), "reads stay allowed: {why}");
+    let shell = |b: &mut Bridge, command: &str| {
+        b.call(
+            "bridge.shell",
+            json!({ "tool": "bash", "command": command, "session": s }),
+        )
+    };
+    assert_eq!(shell(&mut b, "cataly lead send hello")["allow"], false);
+    assert_eq!(
+        shell(&mut b, "/usr/bin/cataly slack upload T1/C1 /tmp/x")["allow"],
+        false
+    );
+    assert_eq!(shell(&mut b, "ls ~/.config")["allow"], true);
+    // A "no" is stored and ends onboarding; it is not asked again.
+    let no = json!({ "op": "onboarding.consent", "answer": "no", "message": "owner-msg-1" });
+    let (_, err) = lead_tool(&mut b, &s, "o7", no);
+    assert!(!err);
+    let (why, err) = lead_tool(&mut b, &s, "o8", json!({ "op": "onboarding.start" }));
+    assert!(err && why.contains("declined"), "{why}");
+    let (why, _) = lead_tool(&mut b, &s, "o9", ask);
+    assert!(
+        !why.contains("onboarding"),
+        "writes are allowed again: {why}"
+    );
+    assert_eq!(shell(&mut b, "cataly lead send hello")["allow"], true);
+    drop(b);
+    hub.stop();
+    start(&mut hub);
+    let (mut b, meta) = lead_bridge(&hub);
+    let s = meta["session"].clone();
+    let (why, err) = lead_tool(&mut b, &s, "p1", json!({ "op": "onboarding.start" }));
+    assert!(
+        err && why.contains("declined"),
+        "kept across a restart: {why}"
+    );
+    let (state, _) = lead_tool(&mut b, &s, "p2", json!({ "op": "onboarding" }));
+    assert!(state.contains("\"consent\":\"no\""), "{state}");
+    let reopen = json!({ "op": "onboarding.start", "reopen": true, "message": "owner-msg-2" });
+    let (_, err) = lead_tool(&mut b, &s, "p3", reopen);
+    assert!(!err, "the owner may raise it again");
+    drop(b);
+    hub.stop();
+}

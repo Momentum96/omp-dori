@@ -6,6 +6,7 @@
 
 pub(crate) mod bridge;
 pub(crate) mod dispatch;
+mod onboarding;
 pub(crate) mod socket;
 mod streams;
 pub(crate) mod supervisor;
