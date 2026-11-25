@@ -1,0 +1,118 @@
+# Cataly configuration: a complete example to copy.
+#
+# Put it at ~/.config/cataly/config.toml (or $XDG_CONFIG_HOME/cataly/config.toml), make it
+# owner-only with `chmod 600`, check it with `cataly config check`, and apply it to a running hub
+# with `cataly config reload`. Every key is described in docs/config.md.
+#
+# Replace the placeholders: /home/owner, the 1000000000000000xx Discord IDs, example-owner/example-repo,
+# the backup author, and the mail command. Tokens never go in this file: put the Discord bot token in
+# ~/.config/cataly/secrets/discord-token (chmod 600).
+
+[hub]
+log_level = "info"                      # error, warn, info or debug
+
+[omp]
+path = "omp"                            # or an absolute path to the OMP executable
+
+[sessions]
+cap = 6                                 # live OMP sessions at most, all roles (1-32)
+credentials = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]   # passed from the hub's environment to OMP
+
+# The standing lead, on a configured model.
+[lead]
+model = "anthropic/claude-sonnet-4-5"   # provider/id
+thinking = "medium"
+cwd = "/home/owner/work"
+autostart = true
+
+# When the lead's model fails, OMP moves to the next model of the chain. Never a reset, credits
+# or overage.
+[fallback]
+on = "usage-limit"                      # any, usage-limit or except-usage-limit
+
+[fallback.chains]
+default = ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]
+
+# Discord intake: your messages in the watched channel reach the lead.
+[discord]
+guild = "100000000000000001"            # your server
+owner = "100000000000000002"            # your user ID
+channels = ["100000000000000003"]       # watched channels; the only one is also the lead's home
+remote_approvals = false
+
+# Lanes: the worker sessions the lead opens.
+[lanes]
+model = "anthropic/claude-sonnet-4-5"
+max = 4
+
+# Refuse outgoing text that still holds placeholders.
+[outgoing]
+placeholder_words = ["TODO", "lorem ipsum"]
+
+# The account-limits view (`cataly limits`); the quota job shares its cache.
+[limits]
+enabled = true
+cache = "5m"
+warn_percent = 80
+
+[health]
+ignore = []                             # check names to leave out, such as "bridge"
+
+# Where job events go besides the local event log.
+[destinations.owner-dm]
+kind = "discord"
+channel = "100000000000000004"
+
+# Watch one GitHub repository through `gh`: new pull requests and notifications.
+[jobs.github]
+kind = "github"
+every = "3m"
+repos = [{ repo = "example-owner/example-repo" }]
+notifications = true
+login = "example-owner"
+destinations = ["owner-dm", "log"]
+
+# The quota gate: alerts at 70/85/95 % and holds new session starts from 85 %.
+[jobs.quota]
+kind = "quota"
+levels = [70, 85, 95]
+hold = 85
+destinations = ["owner-dm"]
+
+# Back up the state folder to the private repository <login>/cataly-home. `cataly setup --backup`
+# writes this job and prepares the folder; the remote is https://github.com/example-owner/cataly-home.git
+[jobs.home]
+kind = "backup"
+dir = "/home/owner/.local/state/cataly"
+remote = "origin"
+branch = "main"
+name = "Example Owner"
+email = "example-owner@users.noreply.github.com"
+include_cataly = true
+every = "30m"
+destinations = ["owner-dm"]
+
+# Health: report a warning after two bad ticks in a row; also watch a notes file's age.
+[jobs.health]
+kind = "health"
+strikes = 2
+files = [{ path = "/home/owner/notes/today.md", max_age = "24h" }]
+destinations = ["owner-dm"]
+
+# Mail watch: the command prints one new mail per line as "<id><TAB><subject>".
+[jobs.mail]
+kind = "items"
+argv = ["/home/owner/bin/new-mail", "--unread"]
+cwd = "/home/owner"
+every = "15m"
+destinations = ["owner-dm"]
+templates = { "items.new" = "mail: {title}" }
+
+# Pressure limits: hold new session starts when the host is short of CPU, memory or disk.
+[jobs.pressure]
+kind = "pressure"
+alert_load = 150
+ready_load = 80
+min_free_memory = 20
+min_free_disk_gb = 20
+max_sessions = 6

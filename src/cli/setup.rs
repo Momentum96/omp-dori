@@ -66,24 +66,9 @@ fn snapshot(path: &Path) -> Result<Snapshot, String> {
         }
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    if !meta.is_file() {
-        return Err(format!(
-            "{} is not a regular file; setup refuses it",
-            path.display()
-        ));
-    }
-    if meta.uid() != crate::sys::own_uid() {
-        return Err(format!(
-            "{} is owned by another user; setup refuses it",
-            path.display()
-        ));
-    }
-    if meta.mode() & 0o022 != 0 {
-        return Err(format!(
-            "{} is writable by group or others; run chmod 600 on it first",
-            path.display()
-        ));
-    }
+    // The same rule the hub applies when it reads the file: refuse, naming the fix.
+    crate::sys::fs::check_private_file(path, &meta)
+        .map_err(|e| format!("{e}; setup refuses it"))?;
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CONFIG_MAX {
         return Err(format!("{} is larger than 1 MiB", path.display()));
@@ -567,10 +552,10 @@ fn print_report(
     out::line(&format!("setup {verb}: {action} {path}"));
     out::line(&format!("  before {before}"));
     out::line(&format!("  after  {after}"));
-    out::line(
-        "  managed: hub.log_level, omp.path, discord.token_file/owner/channels, telegram.token_file/owner/group/topic, \
-         slack.token_file/role/owner; tokens stay in their owner-only files; other keys and comments are kept",
-    );
+    out::line(&format!(
+        "  managed: {}; tokens stay in their owner-only files; other keys and comments are kept",
+        managed_summary()
+    ));
     if let Some(e) = invalid {
         out::line(&format!("  the result is not a valid config: {e}"));
     }
@@ -642,6 +627,22 @@ fn publish(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), Failure> 
     }
 }
 
+/// The managed settings as one line, grouped by section, built from [`MANAGED`].
+fn managed_summary() -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (section, key, _) in MANAGED {
+        match groups.last_mut() {
+            Some((s, keys)) if *s == section => keys.push(key),
+            _ => groups.push((section, vec![key])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(s, keys)| format!("{s}.{}", keys.join("/")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,5 +663,36 @@ mod tests {
         let out = set_key("[omp]\n# keep\n\n[hub]\n", "omp", "path", "omp");
         assert_eq!(out, "[omp]\n# keep\npath = \"omp\"\n\n[hub]\n");
         assert!(config::parse(&set_key(NEW_FILE, "hub", "log_level", "info")).is_ok());
+    }
+
+    #[test]
+    fn managed_summary_lists_every_managed_setting() {
+        let line = managed_summary();
+        assert!(line.contains("fallback.on"), "{line}");
+        assert!(line.contains("fallback.chains.default"), "{line}");
+        assert!(
+            line.contains("telegram.token_file/owner/group/topic"),
+            "{line}"
+        );
+        assert_eq!(
+            line.matches('/').count() + line.matches(", ").count() + 1,
+            MANAGED.len()
+        );
+    }
+
+    #[test]
+    fn snapshot_refuses_a_group_readable_file_like_the_hub() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("cataly-setup-perm-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.toml");
+        assert!(std::fs::write(&path, "[hub]\n").is_ok());
+        assert!(std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).is_ok());
+        let err = snapshot(&path).err().unwrap_or_default();
+        assert!(err.contains("chmod go="), "{err}");
+        assert!(read_private(&path, CONFIG_MAX).is_err());
+        assert!(std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_ok());
+        assert!(snapshot(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

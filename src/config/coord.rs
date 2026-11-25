@@ -185,12 +185,7 @@ fn parse_planner(
     if let Some(n) = p.integer(errors, "max_starts", 0, 100) {
         planner.max_starts = u32::try_from(n).unwrap_or(2);
     }
-    planner.notes_hour = p.typed(
-        errors,
-        "notes_hour",
-        "a whole number",
-        toml::Value::as_integer,
-    );
+    planner.notes_hour = p.integer(errors, "notes_hour", 0, 23);
     for (key, slot) in [
         ("import_label", &mut planner.import_label),
         ("decision_label", &mut planner.decision_label),
@@ -239,8 +234,8 @@ pub(super) fn parse(
         e.finish(errors);
     }
     for mut root in c.tables(errors, "publish").unwrap_or_default() {
-        let dir = root.required_string(errors, "dir").unwrap_or_default();
-        if !std::path::Path::new(dir).is_absolute() {
+        let dir = root.required_string(errors, "dir");
+        if dir.is_some_and(|d| !std::path::Path::new(d).is_absolute()) {
             errors.push(root.error("dir", "must be an absolute directory"));
         }
         let url = root.string(errors, "url").map(str::to_string);
@@ -257,7 +252,7 @@ pub(super) fn parse(
         }
         root.finish(errors);
         out.publish.push(PublishRoot {
-            dir: PathBuf::from(dir),
+            dir: PathBuf::from(dir.unwrap_or_default()),
             url,
         });
     }
@@ -308,5 +303,24 @@ mod tests {
         let paths: Vec<&str> = errors.iter().map(|e| e.path.as_str()).collect();
         assert!(paths.contains(&"coord.events.report[1]"), "{paths:?}");
         assert!(paths.contains(&"coord.board[0]"), "{paths:?}");
+    }
+
+    #[test]
+    fn notes_hour_and_publish_dir_are_checked_at_load() {
+        let paths = |text: &str| -> Vec<String> {
+            crate::config::parse(text)
+                .unwrap_err()
+                .into_iter()
+                .map(|e| e.path)
+                .collect()
+        };
+        assert_eq!(
+            paths("[coord.planner]\nnotes_hour = 24\n"),
+            ["coord.planner.notes_hour"]
+        );
+        assert_eq!(
+            paths("[[coord.publish]]\nurl = \"https://x.test/p\"\n"),
+            ["coord.publish[0].dir"]
+        );
     }
 }
