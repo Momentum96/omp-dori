@@ -2,8 +2,8 @@
 //! lead's memory. Onboarding starts with one consent question; a "no" is stored and
 //! `onboarding.start` refuses to ask again unless the owner raises it himself. Tools are asked about
 //! one at a time and each answer is kept. While onboarding runs it is read-only: the lead's tool
-//! refuses every operation that would post to a messenger or start work, and so does the lead's
-//! shell for `cataly` commands that write.
+//! refuses every operation that would post to a messenger or start work. The lead's shell never runs
+//! a `cataly` command that writes, onboarding or not (shell rule 0, `lanes::shell`).
 
 use serde_json::{Value, json};
 
@@ -63,26 +63,6 @@ fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|t| !t.is_empty())
 }
 
-/// `cataly` command words that write (send, post, upload, start or change something).
-const CLI_WRITES: [&str; 16] = [
-    "send",
-    "upload",
-    "answer",
-    "release",
-    "reset",
-    "start",
-    "stop",
-    "enable",
-    "disable",
-    "run",
-    "follow",
-    "unfollow",
-    "lift",
-    "confirm",
-    "interrupt",
-    "lane",
-];
-
 /// Whether onboarding runs; an unreadable record counts as running (fail closed).
 async fn running(hub: &Hub) -> bool {
     load(hub)
@@ -102,27 +82,6 @@ pub(crate) async fn blocks(hub: &Hub, op: &str) -> Option<String> {
             "{op} is refused while onboarding runs: onboarding is read-only (no posts, reactions, \
              lanes or jobs). Finish it with onboarding.finish first."
         )
-    })
-}
-
-/// Why the lead's shell command is refused, if it is: a `cataly` command that writes while
-/// onboarding runs.
-pub(crate) async fn shell_blocks(hub: &Hub, command: &str) -> Option<String> {
-    let words: Vec<&str> = command
-        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
-        .filter(|w| !w.is_empty())
-        .collect();
-    let cataly = words
-        .iter()
-        .any(|w| w.trim_matches(['"', '\'']).rsplit('/').next() == Some("cataly"));
-    let writes = cataly
-        && words
-            .iter()
-            .any(|w| CLI_WRITES.contains(&w.trim_matches(['"', '\''])));
-    (writes && running(hub).await).then(|| {
-        "No command ran: onboarding runs and is read-only; Cataly commands that send, post or \
-         start anything wait until onboarding.finish."
-            .to_string()
     })
 }
 

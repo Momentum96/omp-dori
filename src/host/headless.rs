@@ -105,6 +105,10 @@ impl Runtime for Headless {
         let stderr = self.logs.join(format!("session-{}.err", spec.handle));
         let mut child = command::attach(&argv, Some(&spec.cwd), &env, Some(&stderr), STDERR_CAP)
             .map_err(|e| StartError::Refused(e.to_string()))?;
+        // Its shell and tools act in this session's role on the control socket (DESIGN 8).
+        if let Some(pid) = child.pid() {
+            self.links.adopt(pid, &spec.handle, spec.role);
+        }
         let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
             child.close(CLOSE_WAIT, KILL_GRACE).await;
             return Err(StartError::Failed("OMP's pipes are not available".into()));

@@ -68,7 +68,16 @@ impl Paths {
             .map(|dir| dir.join("cataly"))
             .filter(|dir| socket_fits(dir))
             .unwrap_or_else(|| PathBuf::from(format!("/tmp/cataly-{uid}")));
-        Ok(Self::layout(config_file, state_dir, runtime_dir))
+        let mut paths = Self::layout(config_file, state_dir, runtime_dir);
+        // A process inside a session the hub started uses the hub's exact socket (DESIGN 8): the
+        // hub's own runtime variables are not passed on to its children.
+        if let Some(socket) = absolute("CATALY_SOCKET")
+            && let Some(dir) = socket.parent()
+        {
+            paths.runtime_dir = dir.to_path_buf();
+            paths.socket = socket;
+        }
+        Ok(paths)
     }
 
     /// The same layout with the state directory at its real location (symlinks resolved; it must
@@ -78,11 +87,13 @@ impl Paths {
     /// behind a symlink into `/private`.
     pub(crate) fn real_state(&self) -> std::io::Result<Self> {
         let state_dir = std::fs::canonicalize(&self.state_dir)?;
-        Ok(Self::layout(
+        let mut real = Self::layout(
             self.config_file.clone(),
             state_dir,
             self.runtime_dir.clone(),
-        ))
+        );
+        real.socket.clone_from(&self.socket);
+        Ok(real)
     }
 
     fn layout(config_file: PathBuf, state_dir: PathBuf, runtime_dir: PathBuf) -> Self {
@@ -177,6 +188,24 @@ mod tests {
         let long = format!("/{}", "x".repeat(120));
         let p = Paths::resolve(env(&[("HOME", "/h"), ("XDG_RUNTIME_DIR", &long)]), 7).unwrap();
         assert_eq!(p.runtime_dir, PathBuf::from("/tmp/cataly-7"));
+    }
+
+    #[test]
+    fn a_session_uses_the_hubs_exact_socket() {
+        let p = Paths::resolve(
+            env(&[
+                ("HOME", "/h"),
+                ("XDG_RUNTIME_DIR", "/run/user/7"),
+                ("CATALY_SOCKET", "/run/hub/x.sock"),
+            ]),
+            7,
+        )
+        .unwrap();
+        assert_eq!(p.socket, PathBuf::from("/run/hub/x.sock"));
+        assert_eq!(p.runtime_dir, PathBuf::from("/run/hub"));
+        let relative =
+            Paths::resolve(env(&[("HOME", "/h"), ("CATALY_SOCKET", "x.sock")]), 7).unwrap();
+        assert_eq!(relative.socket, PathBuf::from("/tmp/cataly-7/hub.sock"));
     }
 
     #[test]

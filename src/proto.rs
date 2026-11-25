@@ -68,6 +68,9 @@ pub(crate) mod method {
     pub(crate) const VOICE_REPLY: &str = "voice.reply";
     /// A held slot request (a stream for the life of the connection).
     pub(crate) const SLOT: &str = "slot";
+    /// The caller's authority as the hub assigned it (DESIGN 8): `owner`, `lead`, `lane` or
+    /// `unplaced`. Commands that act locally with the owner's authority ask it first.
+    pub(crate) const WHOAMI: &str = "whoami";
 }
 
 /// Error codes besides the decision classes.
@@ -88,6 +91,9 @@ pub(crate) struct Request<'a> {
     pub(crate) id: u64,
     pub(crate) method: &'a str,
     pub(crate) params: Value,
+    /// The launch token the caller's environment carries (`CATALY_LAUNCH`): it runs inside a session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) launch: Option<&'a str>,
 }
 
 /// A request as the hub reads it, after [`decode`] checked its `v`.
@@ -97,6 +103,9 @@ pub(crate) struct Incoming {
     pub(crate) method: String,
     #[serde(default)]
     pub(crate) params: Value,
+    /// Present when the caller carries a session's launch token.
+    #[serde(default)]
+    pub(crate) launch: Option<String>,
 }
 
 /// An error body.

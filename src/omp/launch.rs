@@ -130,6 +130,9 @@ pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
         retry.insert("fallbackChains".into(), json!(fallback.chains));
     }
     json!({
+        // `eval` runs Python and JavaScript that can start any command, and no shell rule sees it:
+        // a user `deny` is absolute in OMP, subagents included (OMP approval-mode docs).
+        "tools": { "approval": { "eval": "deny" } },
         "ask": { "timeout": 0 },
         "goal": { "enabled": lane, "continuationModes": ["interactive", "rpc"] },
         "codexResets": { "autoRedeem": "no" },
@@ -223,5 +226,13 @@ mod tests {
         );
         assert!(env.iter().any(|(k, _)| k == "CATALY_LAUNCH"));
         assert!(!env.iter().any(|(k, _)| k == "CATALY_NOT_SET_ANYWHERE"));
+    }
+
+    #[test]
+    fn overlay_denies_eval_in_every_session() {
+        for lane in [false, true] {
+            let o = overlay(&FallbackSettings::default(), lane);
+            assert_eq!(o["tools"]["approval"]["eval"], "deny", "lane {lane}");
+        }
     }
 }

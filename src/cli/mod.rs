@@ -154,7 +154,16 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
         return config_check(file, as_json);
     }
     if p.is(&["setup"]) {
+        if p.flag("--apply") {
+            owner_only(paths)?;
+        }
         return setup::run(p, paths, as_json);
+    }
+    if matches!(
+        p.spec.path,
+        ["install" | "update" | "rollback" | "uninstall"] | ["service", _]
+    ) {
+        owner_only(paths)?;
     }
     if let Some(done) = install::run(p, paths) {
         return done;
@@ -227,6 +236,32 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+
+/// Commands that act locally with the owner's authority first ask the hub who calls (DESIGN 8):
+/// inside a session they are refused. With no hub to ask, a caller that carries a session's launch
+/// token is refused too (fail closed); anyone else is the owner.
+fn owner_only(paths: &Paths) -> Result<(), Failure> {
+    let role = match Client::connect(&paths.socket) {
+        Ok(mut hub) => hub
+            .call(method::WHOAMI, json!({}), CALL_TIMEOUT)
+            .ok()
+            .and_then(|v| v.get("role").and_then(Value::as_str).map(str::to_string)),
+        Err(ClientError::Unsafe(e)) => return Err(Failure::Refused(e)),
+        Err(_) => None,
+    };
+    match role.as_deref() {
+        Some("owner") => Ok(()),
+        None if client::launch_token().is_none() => Ok(()),
+        Some(other) => Err(Failure::Refused(format!(
+            "only the owner may run this; it runs inside a Cataly session ({other})"
+        ))),
+        None => Err(Failure::Refused(
+            "only the owner may run this; it runs inside a Cataly session and no hub confirms \
+             otherwise"
+                .into(),
+        )),
+    }
 }
 
 /// `job enable` (resume, `--ack` after a broken-off run) and `job disable` (hold).

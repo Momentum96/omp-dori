@@ -16,6 +16,8 @@ const TOKEN_LIFE_MS: i64 = 10 * 60 * 1000;
 const TOKENS_MAX: usize = 64;
 /// Tool answers kept per hub for repeated call IDs (EXT req. 18).
 const ANSWERS_MAX: usize = 256;
+/// Session processes kept at most, oldest dropped first (a hub starts few sessions).
+const PIDS_MAX: usize = 256;
 
 /// What the hub shows about one session's bridge.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
@@ -47,6 +49,8 @@ struct Inner {
     answers: VecDeque<(String, String)>,
     /// The control port of each terminal-runtime session (DESIGN 4.3).
     ports: HashMap<String, Arc<super::tern::Port>>,
+    /// The OMP process of each session: the hub's own child, or the peer of its accepted bridge.
+    pids: VecDeque<(u32, String, Role)>,
 }
 
 /// Launch tokens and accepted bridge connections of this hub run.
@@ -181,6 +185,29 @@ impl Links {
             .answers
             .push_back((call.to_string(), answer.to_string()));
     }
+
+    /// Records the OMP process of a session, so a control connection from it or from one of its
+    /// descendants gets that session's role (DESIGN 8).
+    pub(crate) fn adopt(&self, pid: u32, handle: &str, role: Role) {
+        let mut inner = self.lock();
+        inner.pids.retain(|(p, _, _)| *p != pid);
+        if inner.pids.len() >= PIDS_MAX {
+            inner.pids.pop_front();
+        }
+        inner.pids.push_back((pid, handle.to_string(), role));
+    }
+
+    /// The session whose OMP process comes first in `chain` (a process, then its ancestors).
+    pub(crate) fn place(&self, chain: &[u32]) -> Option<(String, Role)> {
+        let inner = self.lock();
+        chain.iter().find_map(|pid| {
+            inner
+                .pids
+                .iter()
+                .find(|(p, _, _)| p == pid)
+                .map(|(_, handle, role)| (handle.clone(), *role))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +234,13 @@ mod tests {
         assert!(!links.view("h1").connected);
         links.remember("c1", "done");
         assert_eq!(links.answered("c1").as_deref(), Some("done"));
+        links.adopt(40, "h1", Role::Lead);
+        links.adopt(50, "h2", Role::Lane);
+        assert_eq!(
+            links.place(&[60, 50, 40, 1]),
+            Some(("h2".into(), Role::Lane))
+        );
+        assert_eq!(links.place(&[41, 40]), Some(("h1".into(), Role::Lead)));
+        assert_eq!(links.place(&[41, 1]), None);
     }
 }

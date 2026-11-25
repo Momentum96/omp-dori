@@ -58,6 +58,12 @@ pub(crate) fn ensure_private_dir(path: &Path) -> Result<(), FsError> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(FsError::io(path, e)),
     }
+    check_private_dir(path)
+}
+
+/// Checks that an existing directory is the owner's, not a symlink and has mode 0700 or stricter: the
+/// hub's own, and what a client requires of the socket's directory before it connects (DESIGN 8).
+pub(crate) fn check_private_dir(path: &Path) -> Result<(), FsError> {
     let meta = fs::symlink_metadata(path).map_err(|e| FsError::io(path, e))?;
     check_owner_only(path, &meta)?;
     if !meta.is_dir() {

@@ -4,6 +4,10 @@
 // accepted session forwards events, offers the hub's tools, appends its guidance, asks it at stop and keeps
 // tool-result fingerprints; a Tern session also takes commands, fences switches and offers forms. The hub decides.
 
+import { lstatSync } from "node:fs";
+import { dirname } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+
 const PROTOCOL = 1;
 const VERSION = "0.0.0-source"; // `cataly extension` writes the release file with it filled in (IR req. 5-6)
 const MARKER = "cataly";
@@ -15,8 +19,8 @@ const BACKOFF_S = [1, 2, 4, 8, 16, 30];
 const UNSURE = "nothing was recorded or started unless the hub reports otherwise. Retrying is safe.";
 
 type Json = Record<string, unknown>;
-type Ctx = any;
-type Pi = any;
+type Ctx = ExtensionContext;
+type Pi = ExtensionAPI;
 
 /** One stream connection, as returned by `Deps.connect`. */
 export interface Wire { write(line: string): void; close(): void }
@@ -27,8 +31,9 @@ export interface Deps {
 	uid(): number;
 }
 
-/** Bun's Unix socket client, line-framed. */
+/** Bun's Unix socket client, line-framed; only in the user's own private socket directory (DESIGN 8). */
 async function unixConnect(path: string, onLine: (line: string) => void, onClose: () => void): Promise<Wire> {
+	if (!privateDir(dirname(path), process.getuid?.() ?? -1)) throw new Error("the hub socket's directory is not private");
 	let buf = "";
 	let closed = false;
 	const end = () => {
@@ -55,6 +60,12 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
 	return promise;
 }
 
+/** The user's own directory, mode 0700 or stricter, not a symlink: no other user can stand in for the hub. */
+export function privateDir(dir: string, uid: number): boolean {
+	const s = safe(() => lstatSync(dir));
+	return Boolean(s && !s.isSymbolicLink() && s.isDirectory() && s.uid === uid && (s.mode & 0o077) === 0);
+}
+
 /** The hub socket: the launch's `CATALY_SOCKET`, else the per-user default (EXT-33). */
 export function socketPath(deps: Deps): string {
 	const env = deps.env;
@@ -71,8 +82,8 @@ function safe<T>(fn: () => T): T | undefined {
 }
 
 function marked(ctx: Ctx): boolean {
-	const branch: Json[] = safe(() => ctx.sessionManager?.getBranch?.()) ?? [];
-	return branch.some(e => e?.type === "custom" && e?.customType === MARKER);
+	const branch = safe(() => ctx.sessionManager.getBranch()) ?? [];
+	return branch.some(e => e.type === "custom" && e.customType === MARKER);
 }
 
 function textOf(content: unknown): string {
@@ -107,6 +118,16 @@ function modelOf(ctx: Ctx): string {
 	return m ? `${m.provider}/${m.id}` : "";
 }
 
+/** Agent registry IDs of this process's accepted sessions and subagents, with the session the hub knows. */
+const owners = new Map<string, string>();
+
+/** A subagent's parent session (EXT req. 9): its spawner's, else (inside a hub launch) its own header's. */
+function parentOf(ctx: Ctx, launched: boolean): string {
+	const known = owners.get(String(ctx.agent?.parentId ?? ""));
+	const header = launched ? String(safe(() => ctx.sessionManager.getHeader()?.parentSession) ?? "") : "";
+	return known ?? (header.endsWith(".jsonl") ? header.slice(header.lastIndexOf("_") + 1, -6) : header);
+}
+
 /** The bridge state of one OMP process. */
 export class Bridge {
 	wired = false;
@@ -114,7 +135,7 @@ export class Bridge {
 	key: string | undefined;
 	guidance = "";
 	session = "";
-	ctx: Ctx;
+	ctx!: Ctx;
 	// The connection, its numbering, its offline buffer and its reconnect state (EXT req. 13-15).
 	wire: Wire | undefined;
 	connecting = false; shutting = false;
@@ -136,14 +157,17 @@ export class Bridge {
 	delivered = new Map<string, { key: string; out: Json }>();
 	forms = new Map<string, (answer: unknown) => void>();
 	token: string | undefined;
+	parent = "";
 
 	constructor(readonly pi: Pi, readonly deps: Deps) {
 		this.token = deps.env.CATALY_LAUNCH || undefined;
 	}
 
-	/** Session start or switch: a candidate connects; anything else stays inert (EXT req. 1-3). */
+	/** Session start or switch: a candidate connects; anything else stays inert (EXT req. 1-3). A subagent of an
+	 * accepted session connects as `sub` with its parent, so the shell veto holds in it too (EXT req. 9). */
 	async consider(ctx: Ctx, transition?: Json): Promise<void> {
-		if (ctx?.agent?.kind === "sub") return;
+		const sub = ctx?.agent?.kind === "sub";
+		if (sub && this.wired) return;
 		const id = String(ctx.sessionManager?.getSessionId?.() ?? "");
 		if (this.wired) {
 			this.ctx = ctx;
@@ -151,12 +175,14 @@ export class Bridge {
 			if (id !== this.session) {
 				this.calls.clear();
 				this.session = id;
+				owners.set(String(ctx.agent?.id), id);
 				const answer = await this.request("bridge.switch", { session: id, file: this.file(), ...transition }, TOOL_MS);
 				this.apply(answer);
 			}
 			return;
 		}
-		if (!this.token && !marked(ctx)) return;
+		if (sub) [this.parent, this.token] = [parentOf(ctx, Boolean(this.token)), undefined];
+		if (sub ? !this.parent : !this.token && !marked(ctx)) return;
 		this.ctx = ctx;
 		this.session = id;
 		await this.connect();
@@ -168,9 +194,8 @@ export class Bridge {
 
 	/** Idle, model, thinking and goal as OMP reports them now (HOST req. 94-95). */
 	facts(ctx: Ctx): Json {
-		const modes = safe(() => ctx?.sessionModes?.getState?.());
-		const g = modes?.goal;
-		const goal = modes ? { status: typeof g === "string" ? g : g?.status, objective: modes.goalObjective ?? g?.objective } : undefined;
+		const modes = safe(() => ctx.sessionModes?.getState());
+		const goal = modes && { status: modes.goal.status, objective: modes.goal.objective };
 		const thinking = safe(() => this.pi.getThinkingLevel?.());
 		return { idle: Boolean(safe(() => ctx?.isIdle?.())), model: modelOf(ctx) || undefined, thinking, goal };
 	}
@@ -178,7 +203,7 @@ export class Bridge {
 	hello(): Json {
 		const ctx = this.ctx;
 		const [cwd, agent, mode] = [ctx?.cwd ?? "", ctx?.agent?.kind ?? "main", ctx?.mode ?? ""].map(String);
-		const ids = { version: VERSION, token: this.token, key: this.key, session: this.session, file: this.file() };
+		const ids = { version: VERSION, token: this.token, key: this.key, session: this.session, file: this.file(), parent: this.parent };
 		return { ext: PROTOCOL, ...ids, pid: process.pid, cwd, agent, mode, marker: marked(ctx), ...this.facts(ctx) };
 	}
 
@@ -199,6 +224,7 @@ export class Bridge {
 		}
 		this.attempt = 0;
 		this.key = String(answer.key ?? "");
+		owners.set(String(this.ctx.agent?.id), this.parent || this.session);
 		this.tern ||= answer.tern === true;
 		this.apply(answer);
 		if (!this.wired) this.wire_up(answer);
@@ -213,7 +239,7 @@ export class Bridge {
 		if (typeof answer.guidance === "string") this.guidance = answer.guidance;
 		if (typeof answer.pin === "string") this.pin = answer.pin;
 		if (answer.shell !== undefined) this.shell = Boolean(answer.shell);
-		if (this.role !== "none") this.mark();
+		if (this.role !== "none" && !this.parent) this.mark();
 	}
 
 	/** Reconnect: snapshot first, then what was buffered, then how much was lost (EXT req. 13-14). */
@@ -321,32 +347,32 @@ export class Bridge {
 			const name = String(def.name);
 			// The hub sets each tool's answer deadline (a lane report reads evidence files).
 			const ms = Number(def.timeout_ms) || TOOL_MS;
-			const [label, description, parameters] = [String(def.label ?? name), String(def.description ?? ""), def.parameters ?? { type: "object" }];
+			const parameters = (def.parameters ?? { type: "object" }) as ToolDefinition["parameters"];
+			const [label, description] = [String(def.label ?? name), String(def.description ?? "")];
 			// The hub checks every operation these tools request, so OMP need not ask first
 			// (extension API `approval`; a user deny policy still wins).
-			const approval = { tier: "write", policy: "allow" };
-			const execute = (callId: string, params: Json, _s: unknown, _u: unknown, ctx: Ctx) => this.tool(name, ms, callId, params, ctx);
+			const approval = { tier: "write", policy: "allow" } as const;
+			const execute: ToolDefinition["execute"] = (callId, params, _s, _u, ctx) => this.tool(name, ms, callId, params as Json, ctx);
 			pi.registerTool({ name, label, description, parameters, approval, execute });
 		}
 		safe(() => pi.setActiveTools?.([...(pi.getActiveTools?.() ?? []).filter((n: string) => !names.includes(n)), ...names]));
 		this.status(answer.status as string | undefined);
 		this.timer(() => this.beat(), HEARTBEAT_MS, true);
-		pi.on("before_agent_start", async (e: Json, ctx: Ctx) => (await this.barrier(ctx), this.guide(e, ctx)));
+		pi.on("before_agent_start", async (e, ctx) => (await this.barrier(ctx), this.guide(e, ctx)));
 		// Lane and terminal hooks, added only once the hub said they apply (EXT req. 1, 32, 34, 38, 42).
 		if (this.shell || this.tern)
-			pi.on("tool_call", (e: Json, ctx: Ctx) =>
-				this.tern && e.toolName === "ask" ? this.form(e, ctx) : this.shell ? this.veto(e, ctx) : undefined,
-			);
-		if (this.tern) for (const k of ["switch", "branch", "tree"]) pi.on(`session_before_${k}`, (_e: Json, ctx: Ctx) => this.guard(ctx));
-		if (this.pin) pi.on("retry_fallback_applied", (e: Json) => void (this.fallbackTo = String(e.to ?? "")));
-		pi.on("session_stop", (_e: Json, ctx: Ctx) => this.stop(ctx));
-		pi.on("session_shutdown", (_e: Json, ctx: Ctx) => this.shutdown(ctx));
-		pi.on("session_branch", (e: Json, ctx: Ctx) => this.transition("session_branch", e, ctx));
-		pi.on("session_tree", (e: Json, ctx: Ctx) => this.transition("session_tree", e, ctx));
-		pi.on("turn_start", async (_e: Json, ctx: Ctx) => (await this.barrier(ctx), this.main(ctx) && this.event("turn_start")));
-		pi.on("message_end", (e: Json, ctx: Ctx) => this.message(e, ctx));
-		pi.on("tool_execution_start", (e: Json, ctx: Ctx) => this.toolStart(e, ctx));
-		pi.on("tool_execution_end", (e: Json, ctx: Ctx) => this.toolEnd(e, ctx));
+			pi.on("tool_call", (e, ctx) => (this.tern && e.toolName === "ask" ? this.form(e, ctx) : this.shell ? this.veto(e, ctx) : undefined));
+		const guard = (_e: unknown, ctx: Ctx) => this.guard(ctx);
+		if (this.tern) [pi.on("session_before_switch", guard), pi.on("session_before_branch", guard), pi.on("session_before_tree", guard)];
+		if (this.pin) pi.on("retry_fallback_applied", e => void (this.fallbackTo = e.to));
+		pi.on("session_stop", (_e, ctx) => this.stop(ctx));
+		pi.on("session_shutdown", (_e, ctx) => this.shutdown(ctx));
+		pi.on("session_branch", (e, ctx) => this.transition("session_branch", e.reason, ctx));
+		pi.on("session_tree", (_e, ctx) => this.transition("session_tree", undefined, ctx));
+		pi.on("turn_start", async (_e, ctx) => void (await this.barrier(ctx), this.main(ctx) && this.event("turn_start")));
+		pi.on("message_end", (e, ctx) => this.message(e, ctx));
+		pi.on("tool_execution_start", (e, ctx) => this.toolStart(e, ctx));
+		pi.on("tool_execution_end", (e, ctx) => this.toolEnd(e, ctx));
 		// The main agent's events the hub follows, each with the fields it reads.
 		const none = () => ({});
 		const dialog = (e: Json) => ({ call: e.toolCallId ?? e.reviewId, tool: e.toolName, choice: e.choice });
@@ -362,7 +388,9 @@ export class Bridge {
 			),
 		];
 		if (this.tern) forwards.push(["session_clear", none]);
-		for (const [kind, fields] of forwards) pi.on(kind, (e: Json, ctx: Ctx) => this.main(ctx) && this.event(kind, fields(e)));
+		// One forwarder for events whose payload fields differ across OMP versions, so read loosely.
+		const on = pi.on as unknown as (event: string, handler: (e: Json, ctx: Ctx) => unknown) => void;
+		for (const [kind, fields] of forwards) on(kind, (e, ctx) => this.main(ctx) && this.event(kind, fields(e)));
 	}
 
 	main(ctx: Ctx): boolean {
@@ -375,12 +403,12 @@ export class Bridge {
 		this.send("bridge.ping", {});
 	}
 
-	transition(kind: string, e: Json, ctx: Ctx): void {
+	transition(kind: string, reason: string | undefined, ctx: Ctx): void {
 		if (!this.main(ctx)) return;
 		this.changing = 0;
 		this.calls.clear();
 		this.session = String(ctx.sessionManager?.getSessionId?.() ?? this.session);
-		this.event(kind, { file: this.file(), reason: e.reason });
+		this.event(kind, { file: this.file(), reason });
 	}
 
 	/** A user's switch, branch or tree move (EXT req. 31; PATCH-01 rules 6-7): cancelled while a hub command is
@@ -422,15 +450,14 @@ export class Bridge {
 		if (c.op === "shutdown") return !idle && !c.force ? { refused: "busy: a turn is running" } : (ctx.shutdown(), {});
 		if (c.op === "model") {
 			if (!idle) return { refused: "a turn is running" };
-			const [provider, ...id] = String(c.model).split(":")[0].split("/");
-			const model = ctx?.modelRegistry?.find?.(provider, id.join("/"));
+			const model = ctx.models.resolve(String(c.model));
 			if (!model) return { refused: `OMP does not know the model ${c.model}` };
 			if ((await this.pi.setModel(model)) === false) return { refused: "OMP did not set the model" };
 			return { model: modelOf(ctx) };
 		}
 		if (c.op === "goal") {
 			if (!ctx?.sessionModes) return { refused: "goal control needs OMP's TUI session modes" };
-			const done = await ctx.sessionModes.set({ mode: "goal", action: c.action, objective: c.objective });
+			const done = await ctx.sessionModes.set({ mode: "goal", action: c.action, objective: c.objective } as Parameters<typeof ctx.sessionModes.set>[0]);
 			return done?.ok === false ? { refused: `${done.code}: ${done.message}` } : this.facts(ctx);
 		}
 		return { refused: `unknown command ${c.op}` };
@@ -577,8 +604,9 @@ export class Bridge {
 	}
 
 	async shutdown(ctx: Ctx): Promise<void> {
-		if (ctx?.agent?.kind === "sub") return;
-		this.event("session_shutdown");
+		// A subagent's events reach the main bridge too; only a subagent's own bridge closes for it.
+		if (ctx?.agent?.kind === "sub" && !this.parent) return;
+		if (!this.parent) this.event("session_shutdown");
 		this.shutting = true;
 		if (this.wire) await Bun.sleep(SHUTDOWN_MS / 10);
 		this.wire?.close();

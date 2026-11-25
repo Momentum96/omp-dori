@@ -16,240 +16,273 @@ use crate::proto::{
 };
 use crate::sys::ErrorClass;
 
-/// Who is calling. Every CLI connection of the owner's user is the owner in this slice; session roles
-/// arrive with the bridge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Who is calling (DESIGN 8, 9.1). A control connection is the owner unless its process is, or
+/// descends from, the OMP process of a session the hub runs: then it has that session's role.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Authority {
     Owner,
+    /// A process of the lead's session.
+    Lead,
+    /// A process of a lane's session, with the lane's key.
+    Lane(String),
+    /// A process that carries a session's launch token but whose session the hub cannot place
+    /// (its ancestry is unknown or leads to no session): it is never the owner.
+    Unplaced,
+}
+
+impl Authority {
+    /// The role's name in `whoami` and refusals.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Lead => "lead",
+            Self::Lane(_) => "lane",
+            Self::Unplaced => "unplaced",
+        }
+    }
+}
+
+/// What a method needs from its caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    /// `Owner` only: the method changes, sends, answers or authorises something.
+    Owner,
+    /// `Owner`, `Lead`, `Lane` or `Unplaced`: the method only reads.
+    Any,
 }
 
 struct Method {
     name: &'static str,
-    needs: Authority,
+    needs: Needs,
     mutating: bool,
 }
 
-const METHODS: [Method; 43] = [
+const METHODS: [Method; 44] = [
     Method {
         name: method::STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::STATS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::EVENTS_SINCE,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::JOB_LIST,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::JOB_RUN,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::JOB_ENABLE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::JOB_DISABLE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::CONFIG_RELOAD,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::HEALTH,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::LIMITS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::QUOTA,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     // Only the owner lifts the quota gate (OJ req. 25).
     Method {
         name: method::QUOTA_LIFT,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::PR_FOLLOW,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::PR_UNFOLLOW,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::PR_LIST,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::LEAD_START,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_STOP,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     // Its `request_id` is the receipt key with its own digest rule (HOST req. 57), not the
     // dispatcher's reply dedupe.
     Method {
         name: method::LEAD_SEND,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: false,
     },
     Method {
         name: method::LEAD_RECEIPT,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: false,
     },
     Method {
         name: method::LEAD_INBOX,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: false,
     },
     Method {
         name: method::LEAD_CONFIRM,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_RELEASE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_INTERRUPT,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_MODEL,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_ACCEPT_MODEL,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_ANSWER,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::LEAD_EVENTS,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: false,
     },
     Method {
         name: method::DISCORD_STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::DISCORD_RELEASE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::DISCORD_RESET,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::TELEGRAM_STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::TELEGRAM_RELEASE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::TELEGRAM_RESET,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::SLACK_STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     Method {
         name: method::SLACK_RELEASE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::SLACK_RESET,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::SLACK_UPLOAD,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::VOICE_STATUS,
-        needs: Authority::Owner,
+        needs: Needs::Any,
         mutating: false,
     },
     // The hold is lifted only by the owner (VOICE req. 83).
     Method {
         name: method::VOICE_RESTART,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     Method {
         name: method::VOICE_REPLY,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: true,
     },
     // A lane open's `request_id` is the lane's own dedupe with its digest rule (LANE req. 10), not
     // the dispatcher's reply dedupe, which would answer other inputs with the earlier reply.
     Method {
         name: method::LANE,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
         mutating: false,
     },
     // The orderly stop the restart option asks for (IR req. 33): refused while a session works.
     Method {
         name: method::HUB_STOP,
-        needs: Authority::Owner,
+        needs: Needs::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::WHOAMI,
+        needs: Needs::Any,
         mutating: false,
     },
 ];
@@ -340,11 +373,25 @@ pub(crate) async fn dispatch(hub: &Hub, request: Incoming, caller: Authority) ->
     let Some(spec) = METHODS.iter().find(|m| m.name == name) else {
         return Response::err(id, code::UNKNOWN_METHOD, format!("unknown method '{name}'"));
     };
-    if caller != spec.needs {
+    if spec.needs == Needs::Owner && caller != Authority::Owner {
         return Response::err(
             id,
             ErrorClass::Rejected.as_str(),
-            "not allowed for this caller",
+            format!(
+                "{name} is the owner's alone; this caller runs inside a Cataly session ({}) and \
+                 cannot act with the owner's authority",
+                caller.name()
+            ),
+        );
+    }
+    if spec.name == method::WHOAMI {
+        let lane = match &caller {
+            Authority::Lane(key) => Some(key.clone()),
+            _ => None,
+        };
+        return Response::ok(
+            id,
+            serde_json::json!({ "role": caller.name(), "lane": lane }),
         );
     }
     let request_id = spec
