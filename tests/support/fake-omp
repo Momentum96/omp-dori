@@ -196,7 +196,15 @@ session)
     fi
     ;;
 *)
-    if [ -f "$dir/rpc" ]; then
+    if [ -f "$dir/tui" ] && ! printf ' %s ' "$*" | grep -q ' rpc-ui '; then
+        # TUI mode (the terminal runtime): record what a bridge would present, then stay up for the
+        # test's own bridge client; this fake has no bridge of its own.
+        tty=no
+        [ -t 0 ] && tty=yes
+        printf '{"token":"%s","socket":"%s","pid":%s,"tty":"%s","cwd":"%s","args":"%s"}\n' \
+            "$CATALY_LAUNCH" "$CATALY_SOCKET" "$$" "$tty" "$PWD" "$*" >> "$dir/tui.jsonl"
+        exec sleep 600
+    elif [ -f "$dir/rpc" ]; then
         rpc "$@"
     else
         echo 'fake omp: no rpc-ui in this fake' >&2

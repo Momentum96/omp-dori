@@ -142,45 +142,46 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     mut writer: OwnedWriteHalf,
 ) {
+    let raw = params.clone();
     let hello: Hello = serde_json::from_value(params).unwrap_or_default();
     let decided = decide(hub, &hello).await;
     let lane_pin = match &decided {
         Ok((handle, Role::Lane, _)) => hub.lanes.hello(handle).await,
         _ => None,
     };
+    let (key, sub) = (crate::host::random_hex(16), hello.agent == "sub");
+    let (tx, rx) = mpsc::channel::<Response>(64);
+    // A terminal session is controlled over this connection (DESIGN 4.3): its port takes the hello.
     let decided = match decided {
         Ok((_, Role::Lane, _)) if lane_pin.is_none() => {
             Err("no open lane holds this session".to_string())
         }
-        other => other,
+        Ok((handle, role, fresh)) => match (!sub).then(|| hub.links.port(&handle)).flatten() {
+            Some(port) => port
+                .attach(&raw, &key, tx.clone())
+                .map(|()| (handle, role, fresh, Some(port))),
+            None => Ok((handle, role, fresh, None)),
+        },
+        Err(e) => Err(e),
     };
-    let (handle, role, fresh) = match decided {
+    let (handle, role, fresh, port) = match decided {
         Ok(found) => found,
-        Err(reason) => {
-            if hello.ext != PROTOCOL {
-                let emit = Emit::new(EventKind::BridgeRefused, Severity::Warning, false, "bridge")
-                    .with("reason", &reason);
-                let _ = hub.jobs.hub_event(emit).await;
-            }
-            log::debug("bridge refused", &[("reason", &reason)]);
-            let _ = write(
-                &mut writer,
-                &Response::ok(id, json!({ "role": "none", "reason": reason })),
-            )
-            .await;
-            return;
-        }
+        Err(reason) => return refuse(hub, &mut writer, id, hello.ext != PROTOCOL, reason).await,
     };
-    let key = crate::host::random_hex(16);
-    let sub = hello.agent == "sub";
     if !sub {
         hub.links.connect(&handle, role, &key, &hello.session);
     }
     let role_name = if role == Role::Lane { "lane" } else { "lead" };
     let notes = crate::jobs::notes::Notes::new(&hub.paths.state_dir).exists();
-    let answer = welcome(&key, sub, lane_pin.as_ref(), notes);
+    let mut answer = welcome(&key, sub, lane_pin.as_ref(), notes);
+    if let (Some(_), Some(map)) = (&port, answer.as_object_mut()) {
+        map.insert("tern".into(), Value::Bool(true));
+    }
     if !write(&mut writer, &Response::ok(id, answer)).await {
         hub.links.disconnect(&handle, &key);
+        if let Some(port) = &port {
+            port.detach(&key);
+        }
         return;
     }
     log::info(
@@ -191,7 +192,6 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         recap(hub, &handle, "start").await;
     }
     let mut session = hello.session.clone();
-    let (tx, rx) = mpsc::channel::<Response>(64);
     let writer_task = tokio::spawn(pump(writer, rx));
     loop {
         let line = match tokio::time::timeout(SILENT, read_line(reader)).await {
@@ -201,10 +201,15 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         let Ok(request) = crate::proto::decode(&line) else {
             continue;
         };
+        let form = terminal(port.as_ref(), &request);
         let method = request.method.clone();
         match method.as_str() {
-            "bridge.ping" => {}
+            "bridge.ping" | "bridge.reply" => {}
             "bridge.event" => event(hub, &handle, role, &request.params).await,
+            "bridge.form" => {
+                let reply = form.unwrap_or_else(|| json!({ "mirrored": false }));
+                let _ = tx.send(Response::ok(request.id, reply)).await;
+            }
             "bridge.switch" => {
                 let switched = request.params.get("session").and_then(Value::as_str);
                 hub.links.observe(&handle, 0, switched, 0);
@@ -230,7 +235,40 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
     }
     writer_task.abort();
     hub.links.disconnect(&handle, &key);
+    if let Some(port) = &port {
+        port.detach(&key);
+    }
     log::info("bridge closed", &[("handle", &handle)]);
+}
+
+/// Tells a refused hello `none`; a protocol mismatch is also recorded (EXT req. 4).
+async fn refuse(hub: &Hub, writer: &mut OwnedWriteHalf, id: u64, mismatch: bool, reason: String) {
+    if mismatch {
+        let emit = Emit::new(EventKind::BridgeRefused, Severity::Warning, false, "bridge")
+            .with("reason", &reason);
+        let _ = hub.jobs.hub_event(emit).await;
+    }
+    log::debug("bridge refused", &[("reason", &reason)]);
+    let answer = json!({ "role": "none", "reason": reason });
+    let _ = write(writer, &Response::ok(id, answer)).await;
+}
+
+/// The terminal runtime's part of a bridge line (DESIGN 4.3): every line keeps the link alive,
+/// events and switches move the session, replies answer its commands, and a form is offered for
+/// mirroring; returns the form's answer.
+fn terminal(
+    port: Option<&Arc<crate::host::tern::Port>>,
+    request: &crate::proto::Incoming,
+) -> Option<Value> {
+    let port = port?;
+    port.heard();
+    match request.method.as_str() {
+        "bridge.event" | "bridge.switch" => port.event(&request.params),
+        "bridge.reply" => port.reply(&request.params),
+        "bridge.form" => return Some(port.form(&request.params)),
+        _ => {}
+    }
+    None
 }
 
 /// Writes queued responses to the bridge, with a heartbeat while nothing else is queued.

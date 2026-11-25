@@ -25,6 +25,8 @@ use crate::sys::now_ms;
 pub(crate) const LEAD: &str = "lead";
 /// A written batch without its entry is in doubt after this long (PATCH-01 rules 4 and 10).
 pub(crate) const CONFIRM_WITHIN_MS: i64 = 30_000;
+/// A record whose session the user left waits this long for it to be current again (PATCH-01 rule 13).
+const LEFT_KEEP_MS: i64 = 24 * 60 * 60 * 1000;
 /// Sender label of the hub's own notices.
 pub(crate) const HUB_SENDER: &str = "cataly";
 /// Identity prefix of in-doubt notices: such a batch in doubt raises no further notice.
@@ -107,6 +109,13 @@ pub(crate) enum Note {
         delivery: String,
         rows: usize,
         reason: String,
+    },
+    /// The batch was found in another session's file (PATCH-01 rule 9): never resent, the owner is
+    /// told once.
+    Misdelivered {
+        delivery: String,
+        target_session: String,
+        found_session: String,
     },
 }
 
@@ -222,6 +231,8 @@ enum Check {
     Resend,
     InDoubt(String),
     Failed(String),
+    /// Found in the file of this other session.
+    Misdelivered(String),
 }
 
 /// One target's inbox over the store.
@@ -671,6 +682,26 @@ impl Mailbox {
                         reason,
                     });
                 }
+                Check::Misdelivered(found_session) => {
+                    let detail = format!(
+                        "misdelivered: meant for session {}, found in session {found_session}",
+                        delivery.session_id
+                    );
+                    self.resolve(&delivery.id, "misdelivered", Some(detail))
+                        .await?;
+                    crate::log::warn(
+                        "delivery misdelivered",
+                        &[
+                            ("target_session", &delivery.session_id),
+                            ("found_session", &found_session),
+                        ],
+                    );
+                    notes.push(Note::Misdelivered {
+                        delivery: delivery.id.clone(),
+                        target_session: delivery.session_id.clone(),
+                        found_session,
+                    });
+                }
             }
         }
         if let Some(note) = self.send(session, quota_blocked).await? {
@@ -719,11 +750,27 @@ impl Mailbox {
             return Check::Delivered(age);
         }
         let snapshot = session.map(Control::snapshot);
+        // PATCH-01 rule 9: the ID in the file of the session now current, which is another one.
+        if let Some(s) = &snapshot
+            && let (Some(id), Some(file)) = (&s.session_id, &s.session_file)
+            && *file != d.session_file
+            && transcript::search(file.clone().into(), marker(&d.id)).await == Ok(Found::Yes)
+        {
+            return Check::Misdelivered(id.clone());
+        }
         let same_process = snapshot
             .as_ref()
             .is_some_and(|s| s.handle == d.handle && s.stop.is_none());
         if same_process {
-            return if age < CONFIRM_WITHIN_MS {
+            // PATCH-01 rule 13: the user left the target session; the record waits for it.
+            let left = snapshot
+                .as_ref()
+                .is_some_and(|s| s.session_id.as_ref().is_some_and(|id| *id != d.session_id));
+            return if left && age < LEFT_KEEP_MS {
+                Check::Wait
+            } else if left {
+                Check::Failed("its session was not current again within 24 h".into())
+            } else if age < CONFIRM_WITHIN_MS {
                 Check::Wait
             } else {
                 Check::InDoubt("no entry in the session file within 30 s".into())

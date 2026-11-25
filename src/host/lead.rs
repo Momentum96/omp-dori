@@ -25,6 +25,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
 use super::inbox::{self, HUB_SENDER, LEAD, Listed, Mailbox, Message, Note, QUOTA_PREFIX, Receipt};
 use super::{Control, Role, Runtime, SessionEvent, Snapshot, StartError, StartSpec, Status};
 use crate::config::Config;
+use crate::config::session::RuntimeKind;
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 use crate::omp::Omp;
@@ -44,8 +45,9 @@ const AUTOSTART_TICK: Duration = Duration::from_secs(30);
 /// Bound for a graceful stop at hub shutdown: 15 s, TERM, 5 s, KILL.
 pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(22);
 
-/// Builds the runtime for a start from the config in force and the resolved OMP executable.
-pub(crate) type Factory<R> = Box<dyn Fn(&Config, &Path) -> R + Send + Sync>;
+/// Builds the runtime of one start from the config in force, the resolved OMP executable and the
+/// runtime the session runs on: the config's for a new session, the stored one for a resume.
+pub(crate) type Factory<R> = Box<dyn Fn(&Config, &Path, RuntimeKind) -> R + Send + Sync>;
 /// Records a hub event.
 pub(crate) type Events = Arc<dyn Fn(Emit) + Send + Sync>;
 
@@ -523,12 +525,26 @@ impl<R: Runtime> Lead<R> {
             None => self.target(&settings, fresh, &cwd).await?,
         };
         self.overlay(&config)?;
+        let kind = match &expected {
+            Some(id) => self.stored_runtime(id).await?,
+            None => config.sessions.runtime,
+        };
+        if kind != config.sessions.runtime {
+            log::info(
+                "the lead resumes on the runtime it was started with",
+                &[
+                    ("runtime", &kind.name()),
+                    ("configured", &config.sessions.runtime.name()),
+                ],
+            );
+        }
         let handle = super::random_hex(8);
         let now = now_ms();
+        let runtime = (self.env.make)(&config, &exe, kind);
         let row = SessionRow {
             handle: handle.clone(),
             role: "lead".into(),
-            runtime: "headless".into(),
+            runtime: runtime.kind().into(),
             cwd: cwd.display().to_string(),
             name: "lead".into(),
             model: settings.model.clone(),
@@ -562,7 +578,6 @@ impl<R: Runtime> Lead<R> {
             .await
             .map_err(|e| e.to_string())?;
         self.set_phase(Phase::Starting, None);
-        let runtime = (self.env.make)(&config, &exe);
         let spec = StartSpec {
             handle: handle.clone(),
             role: Role::Lead,
@@ -749,6 +764,26 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
+    /// The runtime the lead session `id` was started with: a resume stays on it whatever the
+    /// config says now (HOST req. 91). Every resume target comes from the newest lead record.
+    async fn stored_runtime(&self, id: &str) -> Result<RuntimeKind, String> {
+        let last = self
+            .env
+            .store
+            .read(|r| r.latest_session("lead"))
+            .await
+            .map_err(|e| e.to_string())?
+            .filter(|row| row.session_id.as_deref() == Some(id))
+            .ok_or_else(|| format!("no record of lead session {id} to resume"))?;
+        RuntimeKind::from_name(&last.runtime).ok_or_else(|| {
+            format!(
+                "lead session {id} was started on the runtime '{}', which this Cataly does not run; \
+                 start a fresh lead with `cataly lead start --fresh`",
+                last.runtime
+            )
+        })
+    }
+
     /// How long until the planned automatic restart; zero when it is due.
     fn restart_wait(&self) -> Option<Duration> {
         self.restarts()
@@ -905,6 +940,7 @@ impl<R: Runtime> Lead<R> {
                 SessionEvent::TurnEnded { .. }
                 | SessionEvent::Quiet
                 | SessionEvent::Settled { .. }
+                | SessionEvent::LinkRestored
                 | SessionEvent::Message { .. } => self.wake.notify_one(),
                 SessionEvent::Fallback { from, to, reason } => self.emit(
                     Emit::new(EventKind::ModelFallback, Severity::Info, false, "lead")
@@ -970,6 +1006,7 @@ impl<R: Runtime> Lead<R> {
                 | SessionEvent::DialogOpened { .. }
                 | SessionEvent::DialogClosed { .. }
                 | SessionEvent::ModelChanged { .. }
+                | SessionEvent::LinkLost
                 | SessionEvent::InterruptUnconfirmed => {}
             }
         }
@@ -1051,6 +1088,24 @@ impl<R: Runtime> Lead<R> {
                             .with("reason", &reason),
                     );
                 }
+                // Text from one conversation reached another: the owner is told once, nothing is
+                // resent (PATCH-01 rule 9).
+                Note::Misdelivered {
+                    delivery,
+                    target_session,
+                    found_session,
+                } => self.emit(
+                    Emit::new(EventKind::DeliveryFailed, Severity::Warning, true, "lead")
+                        .with("target", LEAD)
+                        .with("delivery", delivery)
+                        .with(
+                            "reason",
+                            format!(
+                                "misdelivered: a message for session {target_session} reached \
+                                 session {found_session}; it is not resent"
+                            ),
+                        ),
+                ),
             }
         }
     }

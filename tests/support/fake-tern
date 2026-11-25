@@ -1,0 +1,35 @@
+#!/bin/sh
+# A stand-in for Tern's command line in tests (Tern 0.9.33 `tern new --help`). It never opens a
+# window and never talks to a Tern daemon. Each call is appended to `tern-data/calls.log`.
+#   tern new tab [SESSION] [--json] [--cwd DIR] [--keep-open] -- COMMAND...
+#       runs COMMAND in DIR in a pseudo-terminal (Python's pty module), in the background, its
+#       screen output going to tern-data/block-<id>.out; prints {"id":"<id>"}
+#   tern close ID   ends that block's program
+#   tern --version
+dir=$(cd "$(dirname "$0")" && pwd)/tern-data
+mkdir -p "$dir"
+printf '%s\n' "$*" >> "$dir/calls.log"
+case "$1" in
+--version) echo "tern 0.0.0 (test stand-in)"; exit 0 ;;
+close) [ -f "$dir/block-$2.pid" ] && kill "$(cat "$dir/block-$2.pid")" 2>/dev/null; exit 0 ;;
+new) [ "$2" = tab ] || { echo "stand-in: only new tab" >&2; exit 2; }; shift 2 ;;
+*) echo "stand-in: unsupported command $1" >&2; exit 2 ;;
+esac
+cwd=$PWD
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+    case "$1" in
+    --cwd) cwd=$2; shift 2 ;;
+    *) shift ;;
+    esac
+done
+[ "$1" = "--" ] || { echo "stand-in: no command" >&2; exit 2; }
+shift
+cd "$cwd" || exit 3
+id="b$$"
+# Measurements type into the block through the named pipe tern-data/input when it exists.
+input=/dev/null
+[ -p "$dir/input" ] && input=$dir/input
+TERM=${TERM:-xterm-256color} nohup python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' "$@" \
+    > "$dir/block-$id.out" 2>&1 < "$input" &
+echo $! > "$dir/block-$id.pid"
+printf '{"id":"%s"}\n' "$id"

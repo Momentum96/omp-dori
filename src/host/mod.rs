@@ -8,8 +8,10 @@
 pub(crate) mod bridge;
 pub(crate) mod dialogs;
 pub(crate) mod headless;
+pub(crate) mod hosted;
 pub(crate) mod inbox;
 pub(crate) mod lead;
+pub(crate) mod tern;
 #[cfg(test)]
 pub(crate) mod testing;
 #[cfg(feature = "voice")]
@@ -186,6 +188,11 @@ pub(crate) enum SessionEvent {
         reason: String,
     },
     InterruptUnconfirmed,
+    /// The terminal runtime's bridge was silent for 45 s: the session is lost until the same OMP
+    /// process reconnects with the same session (HOST req. 97).
+    LinkLost,
+    /// The lost bridge came back.
+    LinkRestored,
     Stopped {
         record: StopRecord,
     },
@@ -245,6 +252,9 @@ pub(crate) struct EventPage {
 /// Starts sessions of one runtime (DESIGN 4.1).
 pub(crate) trait Runtime: Send + Sync + 'static {
     type Session: Control;
+
+    /// The runtime's name as stored with each session (`headless`, `tern`).
+    fn kind(&self) -> &'static str;
 
     /// Spawns and binds a session; returns only after the handshake completed or failed (HOST req. 28).
     fn start(

@@ -3,7 +3,7 @@
 //! about each session's bridge. Roles are assigned here, never claimed by the bridge.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
 
@@ -31,6 +31,7 @@ struct Issued {
     handle: String,
     role: Role,
     at_ms: i64,
+    life_ms: i64,
 }
 
 struct Link {
@@ -44,6 +45,8 @@ struct Inner {
     tokens: HashMap<String, Issued>,
     links: HashMap<String, Link>,
     answers: VecDeque<(String, String)>,
+    /// The control port of each terminal-runtime session (DESIGN 4.3).
+    ports: HashMap<String, Arc<super::tern::Port>>,
 }
 
 /// Launch tokens and accepted bridge connections of this hub run.
@@ -63,9 +66,15 @@ impl Links {
 
     /// Records the token handed to a session's OMP child before it is spawned.
     pub(crate) fn issue(&self, token: &str, handle: &str, role: Role) {
+        self.issue_for(token, handle, role, TOKEN_LIFE_MS);
+    }
+
+    /// A token good for `life_ms`: a terminal block's token is visible in the process list, so it
+    /// lives 60 s (DESIGN 4.3).
+    pub(crate) fn issue_for(&self, token: &str, handle: &str, role: Role, life_ms: i64) {
         let now = now_ms();
         let mut inner = self.lock();
-        inner.tokens.retain(|_, t| now - t.at_ms < TOKEN_LIFE_MS);
+        inner.tokens.retain(|_, t| now - t.at_ms < t.life_ms);
         if inner.tokens.len() >= TOKENS_MAX {
             return;
         }
@@ -75,6 +84,7 @@ impl Links {
                 handle: handle.to_string(),
                 role,
                 at_ms: now,
+                life_ms,
             },
         );
     }
@@ -82,7 +92,20 @@ impl Links {
     /// Uses a token: the session it was issued for, once (EXT req. 5).
     pub(crate) fn redeem(&self, token: &str) -> Option<(String, Role)> {
         let issued = self.lock().tokens.remove(token)?;
-        (now_ms() - issued.at_ms < TOKEN_LIFE_MS).then_some((issued.handle, issued.role))
+        (now_ms() - issued.at_ms < issued.life_ms).then_some((issued.handle, issued.role))
+    }
+
+    /// Registers the control port of a terminal session under its handle.
+    pub(crate) fn add_port(&self, handle: &str, port: Arc<super::tern::Port>) {
+        self.lock().ports.insert(handle.to_string(), port);
+    }
+
+    pub(crate) fn port(&self, handle: &str) -> Option<Arc<super::tern::Port>> {
+        self.lock().ports.get(handle).cloned()
+    }
+
+    pub(crate) fn remove_port(&self, handle: &str) {
+        self.lock().ports.remove(handle);
     }
 
     /// The session a reconnect key belongs to.

@@ -147,6 +147,9 @@ pub(crate) struct Record {
     /// 1 runs first, 9 last; shared with items and slot waiters (COORD req. 41).
     #[serde(default = "default_priority")]
     pub(crate) priority: u8,
+    /// The runtime the lane's session was started with; a resume or reopen stays on it (HOST req. 91).
+    #[serde(default)]
+    pub(crate) runtime: crate::config::session::RuntimeKind,
 }
 
 pub(crate) const fn default_priority() -> u8 {

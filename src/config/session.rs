@@ -55,6 +55,40 @@ pub(crate) struct SessionSettings {
     pub(crate) extra_flags: Vec<String>,
     /// Owner phrases that mark a dialog as a spend offer, besides the built-in ones.
     pub(crate) spend_phrases: Vec<String>,
+    /// The runtime of new sessions (HOST-30): `headless` (default) or `tern`.
+    pub(crate) runtime: RuntimeKind,
+    /// The Tern executable: an absolute path or a name on `PATH` (HOST req. 92).
+    pub(crate) tern: String,
+    /// The Tern session new blocks open in; absent: the session shown (HOST req. 93).
+    pub(crate) tern_session: Option<String>,
+}
+
+/// Which runtime starts a session (DESIGN 4.1). New sessions take the config's; a stored session
+/// keeps the one it was started with (HOST req. 91).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RuntimeKind {
+    #[default]
+    Headless,
+    Tern,
+}
+
+impl RuntimeKind {
+    /// The name stored with each session (`headless`, `tern`).
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Tern => "tern",
+        }
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "headless" => Some(Self::Headless),
+            "tern" => Some(Self::Tern),
+            _ => None,
+        }
+    }
 }
 
 impl Default for SessionSettings {
@@ -64,6 +98,9 @@ impl Default for SessionSettings {
             credentials: Vec::new(),
             extra_flags: Vec::new(),
             spend_phrases: Vec::new(),
+            runtime: RuntimeKind::Headless,
+            tern: "tern".into(),
+            tern_session: None,
         }
     }
 }
@@ -138,6 +175,26 @@ pub(crate) fn extra_flag_error(flag: &str) -> Option<String> {
     None
 }
 
+/// `runtime`, `tern` and `tern_session` of `[sessions]` (HOST-30, HOST req. 92-93).
+fn runtime(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, sessions: &mut SessionSettings) {
+    match s.string(errors, "runtime").map(RuntimeKind::from_name) {
+        None => {}
+        Some(Some(kind)) => sessions.runtime = kind,
+        Some(None) => errors.push(s.error("runtime", "expected headless or tern")),
+    }
+    if let Some(tern) = s.string(errors, "tern") {
+        if tern.trim().is_empty() {
+            errors.push(s.error("tern", "must name the Tern executable"));
+        } else {
+            sessions.tern = tern.to_string();
+        }
+    }
+    sessions.tern_session = s
+        .string(errors, "tern_session")
+        .filter(|n| !n.trim().is_empty())
+        .map(str::to_string);
+}
+
 pub(super) fn parse(
     errors: &mut Vec<ConfigError>,
     root: &mut Section<'_>,
@@ -172,6 +229,7 @@ pub(super) fn parse(
             .map(|p| p.to_lowercase())
             .filter(|p| !p.trim().is_empty())
             .collect();
+        runtime(errors, &mut s, sessions);
         s.finish(errors);
     }
     if let Some(mut l) = root.table(errors, "lead") {
