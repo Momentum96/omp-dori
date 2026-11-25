@@ -31,17 +31,39 @@ jobs:
           - target: darwin-arm64
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # Two feature sets, each tested and built in release: about twice the single-set time.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.0
       - name: Format
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      # The voice build adds the `cataly-voice` workspace crate; `--workspace` also lints and tests its
+      # own targets, which a build of the root package alone leaves out.
+      - name: Clippy (voice)
+        run: cargo clippy --locked --workspace --all-targets --features voice -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
+      # The later test steps run even when an earlier one failed, so one run shows every failure.
+      - name: Test (voice)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --no-fail-fast --workspace --features voice
+      - name: Bridge tests (Bun)
+        if: ${{ !cancelled() }}
+        working-directory: extension
+        run: bun test
+      - name: Release build (voice)
+        run: cargo build --locked --release --features voice
+      - name: Binary size (voice)
+        shell: bash
+        run: |
+          echo "release binary bytes with voice: $(wc -c < target/release/cataly | tr -d ' ')"
       - name: Release build
         run: cargo build --locked --release
       - name: Binary size and idle memory
