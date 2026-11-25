@@ -430,8 +430,8 @@ export class Bridge {
 		}
 		if (c.op === "goal") {
 			if (!ctx?.sessionModes) return { refused: "goal control needs OMP's TUI session modes" };
-			const done = await ctx.sessionModes.set({ mode: "goal", action: c.action });
-			return String(done?.status ?? done) === "busy" ? { refused: "busy" } : this.facts(ctx);
+			const done = await ctx.sessionModes.set({ mode: "goal", action: c.action, objective: c.objective });
+			return done?.ok === false ? { refused: `${done.code}: ${done.message}` } : this.facts(ctx);
 		}
 		return { refused: `unknown command ${c.op}` };
 	}

@@ -509,19 +509,32 @@ struct Said {
     stop: Option<String>,
 }
 
+/// The custom message type the terminal runtime's bridge delivers with (EXT req. 25).
+const DELIVERY_TYPE: &str = "cataly-delivery";
+
+/// A message entry, or a delivery of the terminal runtime's bridge, which is an input like a user
+/// message.
 fn said(entry: &Value) -> Option<Said> {
-    if entry.get("type").and_then(Value::as_str) != Some("message") {
-        return None;
-    }
-    let message = entry.get("message")?;
-    let user = match message.get("role").and_then(Value::as_str)? {
-        "user" => true,
-        "assistant" => false,
+    let (user, content, stop) = match entry.get("type").and_then(Value::as_str)? {
+        "custom_message"
+            if entry.get("customType").and_then(Value::as_str) == Some(DELIVERY_TYPE) =>
+        {
+            (true, entry.get("content"), None)
+        }
+        "message" => {
+            let message = entry.get("message")?;
+            let user = match message.get("role").and_then(Value::as_str)? {
+                "user" => true,
+                "assistant" => false,
+                _ => return None,
+            };
+            (user, message.get("content"), message.get("stopReason"))
+        }
         _ => return None,
     };
     let mut text = String::new();
     let mut tool_call = false;
-    match message.get("content") {
+    match content {
         Some(Value::String(t)) => text.push_str(t),
         Some(Value::Array(parts)) => {
             for part in parts {
@@ -548,10 +561,7 @@ fn said(entry: &Value) -> Option<Said> {
         user,
         text,
         tool_call,
-        stop: message
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        stop: stop.and_then(Value::as_str).map(str::to_string),
     })
 }
 
@@ -904,8 +914,10 @@ mod tests {
             user("[d a] one"),
             said("looking", "toolUse", true),
             said("first answer", "stop", false),
-            user("[d b] two"),
+            // A tern delivery is a request; another extension's custom message is not.
+            r#"{"type":"custom_message","customType":"cataly-delivery","content":"[d b] two","display":true}"#.to_string(),
             said("thinking", "toolUse", true),
+            r#"{"type":"custom_message","customType":"other","content":"[d y] note","display":true}"#.to_string(),
             user("[d c] three [d e] five"),
             said("done", "stop", false),
         ];

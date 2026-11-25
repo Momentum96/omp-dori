@@ -164,7 +164,7 @@ command name for all six commands; `get_state` fields including `model`, `sessio
 | `models.yml` custom provider with `baseUrl` and `api: openai-completions` | Loopback fake model in tests | docs |
 | Session file: header `type: session` with id, cwd, `parentSession`; entries `message` (roles `user`, `assistant`, `toolResult`; assistant `usage`), `model_usage`, `custom_message` with `details`, `compaction`, `session_exit` | Delivery confirmation, spend, answers, reopen checks | docs |
 | Extension: `pi.on`, `registerTool` (with `defaultInactive`, late registration in `session_start`), `getActiveTools`/`setActiveTools`, `appendEntry`, `sendMessage` (`deliverAs` steer/followUp/nextTurn/aside, `triggerTurn`, `details`), `sendUserMessage`, `setModel`, `getThinkingLevel` | Bridge | docs |
-| Extension context: `ctx.agent` (`kind`, `id`, `parentId`), `ctx.sessionManager.getSessionId/getSessionFile/getBranch`, `ctx.isIdle`, `ctx.hasPendingMessages`, `ctx.abort`, `ctx.shutdown`, `ctx.getAsyncJobSnapshot`, `ctx.models.current/resolve`, `ctx.ui.notify/setStatus`, `ctx.setInterval/setTimeout`, `ctx.sessionModes` (TUI only: goal pause/resume) | Bridge | docs |
+| Extension context: `ctx.agent` (`kind`, `id`, `parentId`), `ctx.sessionManager.getSessionId/getSessionFile/getBranch`, `ctx.isIdle`, `ctx.hasPendingMessages`, `ctx.abort`, `ctx.shutdown`, `ctx.getAsyncJobSnapshot`, `ctx.models.current/resolve`, `ctx.ui.notify/setStatus`, `ctx.setInterval/setTimeout`, `ctx.sessionModes` (TUI only: goal enter/pause/resume, refused `busy` while a turn runs; installed 19.1.1) | Bridge | docs |
 | Extension events: `session_start`, `session_before_switch`/`session_switch`, `session_clear`, `session_before_branch`/`session_branch`, `session_before_tree`/`session_tree`, `session_compact`, `session_shutdown`, `before_agent_start`, `before_provider_request`, `agent_start`/`agent_end`, `turn_start`/`turn_end`, `message_end`, `tool_call` (block result), `tool_execution_start/update/end`, `tool_approval_requested/resolved`, `plan_review_requested/resolved`, `goal_updated`, `session_stop` (continue with `additionalContext`), `before_subagent_spawn` (block), `retry_fallback_applied` | Bridge | docs |
 | Global extension folder `<agent dir>/extensions/` (default `~/.omp/agent/extensions`) | Install (11.2) | docs |
 | Extension `sessionManager` flush to disk | Taking ownership of a resumed transcript (EXT-35) | **unverified** (flush is documented for session storage, not for the extension's read-only manager) |
@@ -266,7 +266,8 @@ time with immediate "busy" refusal; delivery receipts keyed by request ID (HOST-
 - Identity, status, goal state and events come from the bridge hello and event stream (HOST req. 94-97).
 - Control through the bridge: deliver (`sendMessage` custom message with the delivery ID in `details`; wake =
   `triggerTurn`, steer = `sendUserMessage` steer), interrupt (`ctx.abort`), model (`pi.setModel`), goal
-  pause/resume (`ctx.sessionModes`, TUI only), shutdown (`ctx.shutdown`).
+  create/pause/resume (`ctx.sessionModes.set`, TUI only; OMP takes a mode change only between turns, so a tern
+  lane's goal is created before its kickoff), shutdown (`ctx.shutdown`).
 - Dialogs belong to the person at the terminal. The hub observes approvals and reports the session blocked; it
   never answers. Forms may be mirrored to the owner's thread (EXT requirement 42); first answer wins.
 - Session switches by the user are detected and fenced as in PATCH-01 rules 6-9 and 12-14.

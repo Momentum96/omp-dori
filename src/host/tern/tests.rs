@@ -148,6 +148,11 @@ async fn deliveries_go_through_the_bridge_and_not_current_keeps_them_pending() {
         (Some("deliver"), Some("ab12cd34"), Some("wake"))
     );
     assert_eq!(first["session"], "s1");
+    // OMP stores the delivery before its turn starts: working from the reply on, not idle.
+    assert_eq!(session.snapshot().status, Status::Working);
+    session.port.event(&json!({ "kind": "agent_start" }));
+    session.port.event(&json!({ "kind": "agent_end" }));
+    assert_eq!(session.snapshot().status, Status::Idle);
     // A user's switch in progress: refused "not current" and kept pending (check 2).
     let out = session
         .deliver(delivery("[cataly:busy0001] later", false))
@@ -194,9 +199,18 @@ async fn deliveries_go_through_the_bridge_and_not_current_keeps_them_pending() {
 
 #[tokio::test]
 async fn interrupt_model_goal_and_shutdown_are_bridge_commands() {
-    let (session, seen) = bound(|cmd| match cmd["op"].as_str() {
+    // A create is refused "busy" once (OMP restoring its saved modes), then enters goal mode.
+    let refused = AtomicBool::new(false);
+    let (session, seen) = bound(move |cmd| match cmd["op"].as_str() {
         Some("interrupt") => json!({ "idle": true }),
         Some("model") => json!({ "model": "fake/second" }),
+        Some("goal") if cmd["action"] == "enter" => {
+            if refused.swap(true, Ordering::SeqCst) {
+                json!({ "goal": { "status": "active", "objective": cmd["objective"] } })
+            } else {
+                json!({ "refused": "busy: The session's saved modes are still being restored" })
+            }
+        }
         Some("goal") => json!({ "goal": { "status": "paused" } }),
         Some("state") => json!({ "idle": true, "session": "s1", "file": "/tmp/s1.jsonl",
             "goal": { "status": "paused" } }),
@@ -215,14 +229,19 @@ async fn interrupt_model_goal_and_shutdown_are_bridge_commands() {
         session.goal("get", None).await.unwrap().status,
         GoalStatus::Paused
     );
-    assert!(session.goal("create", Some("x")).await.is_err());
+    let goal = session.goal("create", Some("x")).await.unwrap();
+    assert_eq!(
+        (goal.status, goal.objective.as_deref()),
+        (GoalStatus::Active, Some("x"))
+    );
+    assert!(session.goal("drop", None).await.is_err());
     let ops: Vec<String> = seen
         .lock()
         .unwrap()
         .iter()
         .map(|c| c["op"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(ops, ["interrupt", "model", "goal", "state"]);
+    assert_eq!(ops, ["interrupt", "model", "goal", "state", "goal", "goal"]);
     // Shutdown: asked, then OMP reports it is going.
     let port = Arc::clone(&session.port);
     tokio::spawn(async move {

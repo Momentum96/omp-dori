@@ -70,15 +70,29 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
 - **`ctx.ui.askDialog`** in stock OMP 19.1.1 takes the question list itself (`ui.askDialog(questions,
   { signal })`, checked in the installed product); the bridge passed the whole tool input, so the local dialog
   would have been empty. Fixed; `tests/contract_tern.rs` now runs the form path in stock OMP's TUI.
-- **Tern lanes cannot set their goal.** A lane start ends with `goal create`, which the tern runtime refuses
-  (pause and resume only), so a tern lane starts "unconfirmed" and held. Stock OMP 19.1.1 has
-  `ctx.sessionModes.set({ mode: "goal", action: "enter", objective })`, but refuses it while the kickoff turn
-  runs ("busy"); wiring it needs a start step that waits for the turn end. Not done in this follow-up; the
-  lost/restored link of such a lane works (check 5 contract case).
-- **The bridge's goal reply** treats only a `"busy"` status as refused; stock OMP answers `{ ok: false, code,
-  message }` for every refusal. Left as is with the item above.
-- **Spec 30 "set model refused while a turn is running"** holds; `goal` takes only pause and resume from the hub
-  (TUI session modes), as DESIGN 4.3 says.
+- **Tern lanes set their goal through OMP's extension API** (second follow-up). Stock OMP 19.1.1 lets an
+  extension enter goal mode with `ctx.sessionModes.set({ mode: "goal", action: "enter", objective })`
+  (setting `extensionHandlers.modeControl`, on by default; read in the installed product). It refuses a change
+  while a turn runs or while the session's saved modes are restored after start (`{ ok: false, code: "busy" }`)
+  and starts no turn for the new goal, whereas rpc's `goal create` on an idle session starts one. So a tern
+  lane's goal is created right after the start, before the kickoff (a create retries "busy" for up to 10 s),
+  and the kickoff turn then runs under the goal with OMP's interactive goal continuation; a headless lane keeps
+  kickoff first, goal second. The bridge maps the hub's `create` to `enter` and reports every refusal as
+  `<code>: <message>`. Tern lanes now start `running`; `tests/contract_tern.rs` checks it in stock OMP.
+- **Goal pause in a tern lane** is still refused by OMP while a turn runs, so holding a working tern lane
+  fails "not held" (the hold flow pauses the goal before it interrupts the turn). Spec 30 "set model refused
+  while a turn is running" holds.
+- **Contract failures found in the second follow-up** (first-run screen already off): (1) after a tern wake
+  the session read `idle` with nothing pending until the bridge's `agent_start` arrived, because OMP stores the
+  delivery's `custom_message` before the turn starts (a headless prompt's user entry is stored when the turn
+  starts); a wake whose turn has not started by the reply now marks the session working, and the case waits
+  for the model request that carries each wake instead of taking the next request of any kind (a parallel run
+  still failed that way after the status fix).
+  (2) Discord answers
+  of a tern lead were never found: the reply reader counted only `user` entries as requests, not the bridge's
+  `cataly-delivery` custom messages; it now counts those too (no other custom message). (3) The lane case read
+  the events right after the lane record showed `lost`, but the hub records events on its own task; the
+  case now waits for the event.
 - One `sed -i` was used on `src/hub/bridge.rs` for a one-line type path fix, against the edit-tool rule.
 
 ## Tests
@@ -93,6 +107,7 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
 - `tests/contract_tern.rs` (stock OMP TUI in the stand-in's pty, loopback model, OMP setup wizard off): check 1,
   check 2 end to end, check 4 (an approval blocks the lead, `lead answer` is refused, the tool never runs; an
   `ask` form is posted to the fake Discord and shown in the TUI, the owner's press ends the tool call with the
-  Discord answer and the reply is posted), check 5 (a tern lane's OMP stopped with SIGSTOP is marked lost at
-  45 s; after SIGCONT the same process's bridge reconnects with the same session and the lane is restored), the
+  Discord answer and the reply is posted), check 5 (a tern lane opens `running` with its goal set in OMP's goal
+  mode; its OMP stopped with SIGSTOP is marked lost at 45 s; after SIGCONT the same process's bridge reconnects
+  with the same session and the lane is restored), the
   wake by stage against headless, and the bridge's own cost.

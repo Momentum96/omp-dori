@@ -233,7 +233,7 @@ function ternHub(sent: any[], hub: { push?: (cmd: any) => void }): Deps["connect
 	};
 }
 
-function ternCtx(pi: ReturnType<typeof fakePi>, state: { idle: boolean; aborts: number; shutdowns: number; goal: string }) {
+function ternCtx(pi: ReturnType<typeof fakePi>, state: { idle: boolean; aborts: number; shutdowns: number; goal: string; objective?: string }) {
 	return {
 		...ctxOf(pi),
 		mode: "tui",
@@ -242,9 +242,15 @@ function ternCtx(pi: ReturnType<typeof fakePi>, state: { idle: boolean; aborts: 
 		shutdown: () => (state.shutdowns += 1),
 		models: { current: () => ({ provider: "fake", id: "primary" }) },
 		modelRegistry: { find: (provider: string, id: string) => (provider === "fake" ? { provider, id } : undefined) },
+		// As stock OMP 19.1.1: a mode change is refused while a turn runs.
 		sessionModes: {
-			getState: () => ({ goal: state.goal }),
-			set: async (r: any) => void (state.goal = r.action === "pause" ? "paused" : "active"),
+			getState: () => ({ goal: { status: state.goal, objective: state.objective } }),
+			set: async (r: { action: string; objective?: string }) => {
+				if (!state.idle) return { ok: false, code: "busy", message: "The session is busy with a turn" };
+				state.goal = r.action === "pause" ? "paused" : "active";
+				if (r.action === "enter") state.objective = r.objective;
+				return { ok: true, changed: true };
+			},
 		},
 	};
 }
@@ -280,9 +286,15 @@ test("a terminal session takes deliveries, steer, interrupt, model, goal and shu
 	push({ n: 10, op: "shutdown" });
 	push({ n: 11, op: "interrupt" });
 	push({ n: 12, op: "shutdown", force: true });
+	push({ n: 13, op: "goal", action: "enter", objective: "Do it" });
+	await settle();
+	state.idle = true;
+	push({ n: 14, op: "goal", action: "enter", objective: "Do it" });
 	await settle();
 	const r = replies(sent);
-	expect(r.map(x => x.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+	expect(r.map(x => x.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+	expect(r[12].refused).toBe("busy: The session is busy with a turn");
+	expect(r[13]).toMatchObject({ goal: { status: "active", objective: "Do it" } });
 	expect(r[0]).toEqual({ n: 1, sent: true });
 	expect(r[1]).toEqual({ n: 2, sent: true });
 	expect(r[2].refused).toContain("other text");

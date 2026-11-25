@@ -53,6 +53,9 @@ const TERN_CALL: Duration = Duration::from_secs(10);
 const START_BUDGET: Duration = Duration::from_secs(30);
 /// A command the bridge must answer.
 const COMMAND_WAIT: Duration = Duration::from_secs(10);
+/// How long a goal create retries OMP's "busy" refusal, and how often.
+const GOAL_BUSY_WAIT: Duration = Duration::from_secs(10);
+const GOAL_BUSY_STEP: Duration = Duration::from_millis(200);
 /// After a shutdown request, how long the hub waits for OMP to go (DESIGN 4.2 close wait).
 const CLOSE_WAIT: Duration = Duration::from_secs(15);
 /// A link without any line for this long is lost (DESIGN 4.3, EXT req. 15).
@@ -263,6 +266,8 @@ struct State {
     forms: HashSet<String>,
     ring: VecDeque<Entry>,
     turn_started_ms: Option<i64>,
+    /// `agent_start` events seen, so a wake's reply can tell whether its turn already began.
+    turns: u64,
     wake_written: Option<std::time::Instant>,
     pending: HashMap<u64, oneshot::Sender<Value>>,
     next: u64,
@@ -639,6 +644,7 @@ impl Port {
             "snapshot" => Self::read_facts(&mut st, params),
             "agent_start" => {
                 st.idle = false;
+                st.turns = st.turns.wrapping_add(1);
                 st.turn_started_ms = Some(now_ms());
                 if let Some(written) = st.wake_written.take() {
                     self.agent_start.record(written.elapsed());
@@ -967,26 +973,41 @@ impl Control for Session {
             Err(e) => return DeliverOutcome::Refused(format!("spill file: {e}")),
         };
         let mode = if d.steer { "steer" } else { "wake" };
+        let turn_started = idle && !d.steer;
         let written = std::time::Instant::now();
+        let turns = {
+            let mut st = self.port.lock();
+            st.wake_written = turn_started.then_some(written);
+            st.turns
+        };
         let fields = json!({ "id": id, "text": text, "mode": mode, "session": d.expected_session });
-        match self.port.command("deliver", fields).await {
+        let outcome = match self.port.command("deliver", fields).await {
             Ok(reply) => match Self::refused(&reply) {
                 // The user is switching or another session is current: kept pending (PATCH-01 rule 7).
                 Some(r) if r == "not current" => DeliverOutcome::NotReady(status),
                 Some(r) => DeliverOutcome::Refused(r),
-                None => {
-                    let turn_started = idle && !d.steer;
-                    if turn_started {
-                        self.port.lock().wake_written = Some(written);
-                    }
-                    DeliverOutcome::Delivered {
-                        turn_started,
-                        written: Some(written),
-                    }
-                }
+                None => DeliverOutcome::Delivered {
+                    turn_started,
+                    written: Some(written),
+                },
             },
             Err(e) => DeliverOutcome::InDoubt(format!("delivery unconfirmed, do not resend: {e}")),
+        };
+        // OMP stores the delivery before its turn starts, so a wake whose `agent_start` has not
+        // arrived yet (events and replies share the connection, in order) is working, not idle.
+        let mut st = self.port.lock();
+        match &outcome {
+            DeliverOutcome::Delivered {
+                turn_started: true, ..
+            } if st.turns == turns => {
+                st.idle = false;
+                self.port.publish(&mut st);
+            }
+            DeliverOutcome::Delivered { .. } => {}
+            _ => st.wake_written = None,
         }
+        drop(st);
+        outcome
     }
 
     async fn interrupt(&self) -> Result<String, String> {
@@ -1036,24 +1057,43 @@ impl Control for Session {
         Ok(observed)
     }
 
-    async fn goal(&self, op: &str, _objective: Option<&str>) -> Result<Goal, String> {
-        if op == "get" {
-            self.refresh().await?;
-        } else if op == "pause" || op == "resume" {
-            let _busy = self.begin()?;
-            let reply = self.port.command("goal", json!({ "action": op })).await?;
-            if let Some(r) = Self::refused(&reply) {
-                return Err(r);
+    /// `create` enters OMP's goal mode with the objective, `pause` and `resume` move it (TUI session
+    /// modes). OMP refuses a change "busy" while a turn runs or its saved modes are restored after
+    /// start; a create, which comes while the session is idle, retries that for up to 10 s.
+    async fn goal(&self, op: &str, objective: Option<&str>) -> Result<Goal, String> {
+        let action = match op {
+            "get" => None,
+            "create" => Some("enter"),
+            "pause" | "resume" => Some(op),
+            _ => {
+                return Err(format!(
+                    "goal {op}: a terminal session takes create, pause and resume from the hub"
+                ));
             }
+        };
+        if let Some(action) = action {
+            let _busy = self.begin()?;
+            let fields = json!({ "action": action, "objective": objective });
+            let until = Instant::now() + GOAL_BUSY_WAIT;
+            let reply = loop {
+                let reply = self.port.command("goal", fields.clone()).await?;
+                match Self::refused(&reply) {
+                    Some(r)
+                        if r.starts_with("busy") && op == "create" && Instant::now() < until =>
+                    {
+                        tokio::time::sleep(GOAL_BUSY_STEP).await;
+                    }
+                    Some(r) => return Err(r),
+                    None => break reply,
+                }
+            };
             let mut st = self.port.lock();
             if let Some(goal) = goal_from(reply.get("goal")) {
                 st.goal = Some(goal);
             }
             self.port.publish(&mut st);
         } else {
-            return Err(format!(
-                "goal {op}: a terminal session takes only pause and resume from the hub"
-            ));
+            self.refresh().await?;
         }
         self.snapshot()
             .goal

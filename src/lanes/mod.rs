@@ -1158,6 +1158,13 @@ impl<R: Runtime> Lanes<R> {
         if resume.is_some() {
             return "started".into();
         }
+        // OMP's TUI (tern) takes a goal only between turns and starts no turn for it, so a tern
+        // lane's goal comes before the kickoff; over rpc (headless) a goal set while idle starts a
+        // turn of its own, so it follows the kickoff, whose turn is then running.
+        let goal_first = rec.runtime == crate::config::session::RuntimeKind::Tern;
+        if goal_first && let Err(why) = Self::set_goal(&rec, &session).await {
+            return self.unconfirmed(rec, rev, &why).await;
+        }
         let deadline = began + budget;
         let kickoff = self.kickoff_text(&rec).await;
         let delivered = self
@@ -1179,20 +1186,7 @@ impl<R: Runtime> Lanes<R> {
                 .await;
         }
         self.start_latency.record(began.elapsed());
-        let goal = session.goal("create", Some(&record::objective(&rec))).await;
-        let goal_ok = matches!(
-            goal.as_ref().map(|g| g.status),
-            Ok(crate::host::dialogs::GoalStatus::Active
-                | crate::host::dialogs::GoalStatus::Complete)
-        );
-        let same = session.alive()
-            && session.snapshot().session_id.as_deref() == rec.session_id.as_deref();
-        if !goal_ok || !same {
-            let why = match goal {
-                Err(e) => format!("goal not set: {e}"),
-                Ok(g) if !goal_ok => format!("goal reads back {:?}", g.status),
-                Ok(_) => "the session changed during the start".into(),
-            };
+        if !goal_first && let Err(why) = Self::set_goal(&rec, &session).await {
             return self.unconfirmed(rec, rev, &why).await;
         }
         rec.state = State::Running;
@@ -1254,6 +1248,25 @@ impl<R: Runtime> Lanes<R> {
             .await;
         self.alert(&rec.key, "start unconfirmed", why, true);
         format!("unconfirmed: {why}")
+    }
+
+    /// Sets the lane's goal (HOST-19) and checks it reads back set in the same session; `Err` is
+    /// why not.
+    async fn set_goal(rec: &Record, session: &Arc<R::Session>) -> Result<(), String> {
+        let goal = session.goal("create", Some(&record::objective(rec))).await;
+        let goal_ok = matches!(
+            goal.as_ref().map(|g| g.status),
+            Ok(crate::host::dialogs::GoalStatus::Active
+                | crate::host::dialogs::GoalStatus::Complete)
+        );
+        let same = session.alive()
+            && session.snapshot().session_id.as_deref() == rec.session_id.as_deref();
+        match goal {
+            _ if goal_ok && same => Ok(()),
+            Err(e) => Err(format!("goal not set: {e}")),
+            Ok(g) if !goal_ok => Err(format!("goal reads back {:?}", g.status)),
+            Ok(_) => Err("the session changed during the start".into()),
+        }
     }
 
     /// Stores a message in the lane's inbox and waits until its entry is in the session file, it is

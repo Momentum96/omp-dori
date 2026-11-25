@@ -97,18 +97,24 @@ fn settled(hub: &TestHub) -> Value {
     })
 }
 
-/// `n` wakes through `cataly lead send`: for each, the CLI start to the model request (from the
-/// request's arrival time) and to the CLI's exit.
+/// `n` wakes through `cataly lead send`: for each, the CLI start to the model request that carries
+/// the wake (from the request's arrival time, not the next request of any kind) and to the CLI's
+/// exit.
 fn wakes(hub: &TestHub, model: &FakeModel, n: usize) -> Vec<(Duration, Duration)> {
     (0..n)
         .map(|i| {
             settled(hub);
             let before = model.arrivals().len();
+            let text = format!("wake {i}");
             let sent = Instant::now();
-            let out = hub.cli(&["lead", "send", &format!("wake {i}")]);
+            let out = hub.cli(&["lead", "send", &text]);
             let cli = sent.elapsed();
             assert!(out.status.success(), "{out:?}");
-            let arrived = hub.until(WAIT, || model.arrivals().get(before).copied());
+            let arrived = hub.until(WAIT, || {
+                let bodies = model.bodies();
+                let at = (before..bodies.len()).find(|&k| bodies[k].to_string().contains(&text))?;
+                model.arrivals().get(at).copied()
+            });
             (arrived.saturating_duration_since(sent), cli)
         })
         .collect()
@@ -516,10 +522,15 @@ fn tern_lane_lost_and_restored_in_stock_omp() {
             .cloned()
             .unwrap()
     };
+    // The lane's goal is set in stock OMP's goal mode, so the start ends running, not held.
     let rec = hub.until(WAIT, || {
         let r = record();
-        (r["live"] == true && r["pid"].is_u64()).then_some(r)
+        (r["live"] == true
+            && r["pid"].is_u64()
+            && matches!(r["state"].as_str(), Some("running" | "held")))
+        .then_some(r)
     });
+    assert_eq!(rec["state"], "running", "{rec}");
     let (pid, session) = (rec["pid"].as_u64().unwrap(), rec["session_id"].clone());
     let stop = Command::new("kill")
         .args(["-STOP", &pid.to_string()])
@@ -536,11 +547,13 @@ fn tern_lane_lost_and_restored_in_stock_omp() {
         after >= Duration::from_secs(30),
         "lost after {after:?}: {lost}"
     );
-    assert!(
+    // The event is recorded by the hub's event task after the lane record changed.
+    hub.until(WAIT, || {
         hub.events()
             .iter()
             .any(|e| e["kind"] == "lane.lost" && e.to_string().contains("far-1"))
-    );
+            .then_some(())
+    });
     let cont = Command::new("kill")
         .args(["-CONT", &pid.to_string()])
         .status()
