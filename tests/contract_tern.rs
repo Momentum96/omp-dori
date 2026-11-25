@@ -262,7 +262,10 @@ fn tern_lead_in_stock_omp() {
     // The bridge's cost: the same session resumed in the stand-in, the same typed workload, with
     // the bridge active (hub-hosted tern lead) and with OMP's extensions off.
     let file = PathBuf::from(live["session"]["session_file"].as_str().unwrap());
-    assert!(hub.cli(&["lead", "stop"]).status.success());
+    // The last wake's turn may still run, and `lead stop` refuses a working lead.
+    settled(&hub);
+    let out = hub.cli(&["lead", "stop"]);
+    assert!(out.status.success(), "{out:?}");
     let input = typing(&hub);
     assert!(hub.cli(&["lead", "start"]).status.success());
     let mut input = input.join().unwrap();

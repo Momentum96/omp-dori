@@ -254,12 +254,12 @@ export class Bridge {
 		const item = msg.item as Json | undefined;
 		const cmd = item?.cmd as Json | undefined;
 		if (cmd && this.tern && cmd.op === "form") {
-			// A form answer does not wait behind a command; the rest run one at a time (EXT req. 29).
+			// A form answer does not wait behind a command; the rest run one at a time, after a hello answer read with them (EXT req. 29).
 			const resolve = this.forms.get(String(cmd.call));
 			resolve?.(cmd.answer);
 			return this.send("bridge.reply", { n: cmd.n, ...(resolve ? {} : { refused: "the form was already answered" }) });
 		}
-		if (cmd && this.tern) return void (this.chain = this.chain.then(() => this.command(cmd)));
+		if (cmd) return void (this.chain = this.chain.then(() => (this.tern ? this.command(cmd) : undefined)));
 		if (item && typeof item.status === "string") this.status(item.status);
 	}
 

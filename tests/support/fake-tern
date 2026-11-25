@@ -3,7 +3,9 @@
 # window and never talks to a Tern daemon. Each call is appended to `tern-data/calls.log`.
 #   tern new tab [SESSION] [--json] [--cwd DIR] [--keep-open] -- COMMAND...
 #       runs COMMAND in DIR in a pseudo-terminal (Python's pty module), in the background, its
-#       screen output going to tern-data/block-<id>.out; prints {"id":"<id>"}
+#       screen output going to tern-data/block-<id>.out; prints {"id":"<id>"}. The block's wrapper
+#       (PID and process group in block-<id>.pid) and COMMAND (block-<id>.omp, its own session and
+#       group) never outlive the test: see `block` below.
 #   tern close ID   ends that block's program
 #   tern --version
 dir=$(cd "$(dirname "$0")" && pwd)/tern-data
@@ -29,7 +31,85 @@ id="b$$"
 # Measurements type into the block through the named pipe tern-data/input when it exists.
 input=/dev/null
 [ -p "$dir/input" ] && input=$dir/input
-TERM=${TERM:-xterm-256color} nohup python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' "$@" \
+# The test process that installed this stand-in (tern-data/owner), else the caller.
+owner=$(cat "$dir/owner" 2>/dev/null) || owner=$PPID
+# The block's wrapper: its own process group; COMMAND in a pseudo-terminal, killed when the wrapper
+# dies (Linux: parent-death signal). On TERM, INT or HUP, and once the owner is gone (polled every
+# 0.5 s, as the wrapper's own parent is this short-lived script), it ends COMMAND's process group
+# (TERM, KILL after 3 s) and exits; when COMMAND exits it kills what is left in that group.
+block='
+import os, pty, select, signal, sys, time
+owner, record, argv = int(sys.argv[1]), sys.argv[2], sys.argv[3:]
+os.setpgid(0, 0)
+me = os.getpid()
+pid, fd = pty.fork()
+if pid == 0:
+    if sys.platform.startswith("linux"):
+        import ctypes
+        ctypes.CDLL(None).prctl(1, int(signal.SIGKILL))  # PR_SET_PDEATHSIG
+    if os.getppid() != me:
+        os._exit(1)
+    try:
+        os.execvp(argv[0], argv)
+    finally:
+        os._exit(127)
+with open(record, "w") as f:
+    f.write(str(pid))
+
+def kill(sig):
+    try:
+        os.killpg(pid, sig)
+    except OSError:
+        pass
+
+def reaped():
+    try:
+        return os.waitpid(pid, os.WNOHANG)[0] != 0
+    except ChildProcessError:
+        return True
+
+def end(*_):
+    kill(signal.SIGTERM)
+    for _ in range(30):
+        if reaped():
+            break
+        time.sleep(0.1)
+    kill(signal.SIGKILL)
+    os._exit(0)
+
+def put(to, data):
+    while data:
+        data = data[os.write(to, data):]
+
+for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(s, end)
+fds = [fd, 0]
+while True:
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        end()
+    except PermissionError:
+        pass
+    ready = select.select(fds, [], [], 0.5)[0]
+    if fd in ready:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            data = b""
+        if not data:
+            break
+        put(1, data)
+    if 0 in ready:
+        data = os.read(0, 65536)
+        if data:
+            put(fd, data)
+        else:
+            fds.remove(0)
+reaped() or os.waitpid(pid, 0)
+kill(signal.SIGKILL)
+'
+TERM=${TERM:-xterm-256color} python3 -c "$block" "$owner" "$dir/block-$id.omp" "$@" \
     > "$dir/block-$id.out" 2>&1 < "$input" &
 echo $! > "$dir/block-$id.pid"
 printf '{"id":"%s"}\n' "$id"

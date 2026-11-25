@@ -458,3 +458,61 @@ fn a_headless_lead_resumes_headless_whatever_the_config_says() {
         .arg(pid.to_string())
         .status();
 }
+
+fn running(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// A stand-in block never outlives the test that owns it (a killed test runs no `Drop`): its wrapper
+/// polls the owner named in `tern-data/owner` and, once that process is gone, ends the block's
+/// program and exits. Here the owner is a process the test ends.
+#[test]
+fn a_block_ends_when_its_owner_is_gone() {
+    let hub = TestHub::new("");
+    let tern = hub.install_fake("tern");
+    let mut owner = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    hub.fixture("tern", "owner", Some(&owner.id().to_string()));
+    let out = std::process::Command::new(&tern)
+        .args(["new", "tab", "--json", "--", "sleep", "60"])
+        .output()
+        .unwrap();
+    let id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let data = hub.root.join("bin/tern-data");
+    let wrapper = std::fs::read_to_string(data.join(format!("block-{id}.pid"))).unwrap();
+    let program = hub.until(Duration::from_secs(10), || {
+        let text = std::fs::read_to_string(data.join(format!("block-{id}.omp"))).ok()?;
+        text.parse::<u32>().is_ok().then_some(text)
+    });
+    assert!(running(wrapper.trim()) && running(&program));
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    hub.until(Duration::from_secs(10), || {
+        (!running(wrapper.trim()) && !running(&program)).then_some(())
+    });
+}
+
+/// A process still running with the sandbox on its command line when the hub is dropped fails the
+/// test, and is killed.
+#[test]
+#[should_panic(expected = "left running after the hub was dropped")]
+fn a_process_left_in_the_sandbox_fails_the_test() {
+    let hub = TestHub::new("");
+    let marker = hub.root.join("left").display().to_string();
+    let mut left = std::process::Command::new("sh")
+        .args(["-c", "while :; do sleep 0.2; done", &marker])
+        .spawn()
+        .unwrap();
+    drop(hub);
+    let _ = left.wait();
+}
