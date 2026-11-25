@@ -8,6 +8,11 @@
 //! and an owner-only environment file with the provider keys listed in `[sessions] credentials`.
 //! systemd reads that file itself (`EnvironmentFile=`); launchd has no such key, so the agent runs
 //! `/bin/sh`, which reads the file and replaces itself with the hub (`exec`, same process).
+//!
+//! On Linux the unit also caps glibc's malloc arenas at two (`MALLOC_ARENA_MAX`): with one arena per
+//! thread the hub's freed memory stayed in a dozen arenas and its RSS kept rising while the live heap
+//! stayed level (`docs/measurements.md`, "Heap slope"). Children never see it: their environment is
+//! built from an allow-list (`sys::command`).
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -124,7 +129,7 @@ pub(crate) fn definition(unit: &Unit<'_>) -> String {
         let path = systemd_escape(unit.path);
         format!(
             "[Unit]\nDescription=Cataly hub\n\n[Service]\nType=notify\nNotifyAccess=main\n\
-Environment=\"PATH={path}\"\nEnvironmentFile=-{env_file}\n\
+Environment=\"PATH={path}\"\nEnvironment=\"MALLOC_ARENA_MAX=2\"\nEnvironmentFile=-{env_file}\n\
 ExecStart={exe} hub\nRestart=on-failure\nRestartSec=5\nWatchdogSec=30\n\n\
 [Install]\nWantedBy=default.target\n"
         )
@@ -389,6 +394,7 @@ mod tests {
                 "Environment=\"PATH=/h/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\"\n"
             ));
             assert!(text.contains("EnvironmentFile=-/h/.config/cataly/secrets/service.env\n"));
+            assert!(text.contains("Environment=\"MALLOC_ARENA_MAX=2\"\n"));
         }
     }
 

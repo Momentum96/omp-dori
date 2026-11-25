@@ -1503,3 +1503,15 @@ catch-up read the room's position passed every later owner message and they were
   counts apart). The soak now sends every fifth iteration on Discord with no limit: 600 to 2,400
   owner messages per run went through with no hold (`docs/measurements.md`).
 
+## The heap slope
+
+- Attributed with a `mallinfo2()` sampler preloaded into the soak's hub and arena-count runs
+  (`docs/measurements.md`, "Heap slope"): the live heap stays at about 4 MiB over 6,000 iterations
+  while glibc's held heap grows to 40 MiB, nearly all of it free space kept in 13 per-thread arenas.
+  No object accumulates; bisection by part showed no single cause.
+- Fix: the systemd unit sets `MALLOC_ARENA_MAX=2` for the hub. Anonymous RSS after 6,000 iterations
+  10.3 MiB instead of 22-25 MiB; children never inherit it (`sys::command` allow-list). An existing
+  unit gets the line when the service is enabled again (the unit is rewritten then).
+- `tests/soak.rs` takes `CATALY_SOAK_SKIP` and passes `MALLOC_*`, `GLIBC_TUNABLES` and
+  `LD_PRELOAD` to the hub.
+
