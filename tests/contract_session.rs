@@ -900,8 +900,8 @@ fn dialogs(hub: &TestHub) -> Vec<Value> {
 }
 
 /// Sends the owner message that makes the fake model call `tool` with `args` once and returns that
-/// call's result once the turn has settled. Nobody answers dialogs here (`always-ask`), so a call
-/// that asked could never return; one that opens a dialog fails at once.
+/// call's result once the turn has settled. Nobody answers dialogs here, so a call that asked could
+/// never return; one that opens a dialog fails at once.
 fn lead_calls(hub: &TestHub, model: &FakeModel, tool: &str, args: &Value) -> String {
     let before = tool_results(model).len();
     let text = format!("Run this.\nCALL {tool} {args}");
@@ -945,11 +945,13 @@ fn lead_asks(hub: &TestHub, model: &FakeModel, command: &str) -> (Value, String)
 /// The owner's lines from the first runs of 0.1.1, where every one asked for approval: the bridge
 /// registers the lead's tool `essential`, so stock OMP 19.1.1 offers it only as a direct call that
 /// runs without asking (its `policy: allow`), and the hub's shell veto refuses a `bash` line that
-/// names it, before OMP's approval, with a pointer to the direct call. Listed read-only commands
-/// run without asking (the overlay's `bash.patterns`); a write still asks; rule 0 still refuses
-/// the CLI's `lead send` in the lead's shell; OMP's user deny still refuses `eval` (DESIGN 12.2 A13).
+/// names it, before OMP's approval, with a pointer to the direct call. Approvals follow the owner's
+/// own OMP settings (decision 19, DESIGN 12.2 A13): under OMP's default a command runs without a
+/// dialog; with the owner's `tools.approvalMode: always-ask` a write asks and the dialog reaches
+/// the hub. Rule 0 still refuses the CLI's `lead send` in the lead's shell; OMP's user deny still
+/// refuses `eval`.
 #[test]
-fn lead_tool_and_read_only_commands_run_without_asking_in_stock_omp() {
+fn lead_follows_the_owners_omp_approval_settings_in_stock_omp() {
     if !enabled() {
         return;
     }
@@ -993,20 +995,18 @@ fn lead_tool_and_read_only_commands_run_without_asking_in_stock_omp() {
         direct.contains("request-log") || direct.contains("next:"),
         "{direct}"
     );
-    // Read-only commands run without asking.
+    // OMP's default (no approval setting of the owner's): commands run without a dialog.
     for (command, shows) in [("cat notes.txt", "READ-ME-OK"), ("ls -la", "notes.txt")] {
         let read = lead_calls(&hub, model, "bash", &json!({ "command": command }));
         assert!(read.contains(shows), "{command}: {read}");
     }
-    // A command that writes still asks; denied, it does not run.
-    let (dialog, denied) = lead_asks(&hub, model, "echo made > made.txt");
-    assert!(
-        dialog["title"]
-            .as_str()
-            .is_some_and(|t| t.contains("echo made > made.txt")),
-        "{dialog}"
+    let wrote = lead_calls(
+        &hub,
+        model,
+        "bash",
+        &json!({ "command": "echo made > made.txt" }),
     );
-    assert!(!work.join("made.txt").exists(), "{denied}");
+    assert!(work.join("made.txt").exists(), "{wrote}");
     // The CLI stays refused in the lead's shell, and the refusal names the tool to use.
     let cli = json!({ "command": "cataly lead send hi" });
     let refused = lead_calls(&hub, model, "bash", &cli);
@@ -1020,5 +1020,24 @@ fn lead_tool_and_read_only_commands_run_without_asking_in_stock_omp() {
         eval.contains("blocked by user policy") && !eval.contains("EVAL-RAN"),
         "{eval}"
     );
+    // The owner's own OMP setting applies: a write asks, the dialog reaches the hub, Deny holds.
+    assert!(hub.stop().success());
+    std::fs::write(
+        lead_box.root.join("agent/config.yml"),
+        "tools:\n  approvalMode: always-ask\n",
+    )
+    .unwrap();
+    hub.start();
+    wait_lead(&hub, |v| {
+        v["phase"] == "live" && v["bridge"]["connected"] == true
+    });
+    let (dialog, denied) = lead_asks(&hub, model, "echo again > again.txt");
+    assert!(
+        dialog["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("echo again > again.txt")),
+        "{dialog}"
+    );
+    assert!(!work.join("again.txt").exists(), "{denied}");
     assert!(hub.stop().success());
 }

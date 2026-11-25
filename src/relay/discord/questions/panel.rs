@@ -31,6 +31,8 @@ pub(super) enum Item {
         multi: bool,
         required: bool,
         default: Vec<usize>,
+        /// The option OMP marks recommended (an `ask` question only).
+        recommended: Option<usize>,
     },
     Text {
         label: String,
@@ -76,6 +78,7 @@ pub(super) fn of_fields(fields: &[Field]) -> Option<Vec<Item>> {
                             .filter(|(_, c)| c.selected)
                             .map(|(i, _)| i)
                             .collect(),
+                        recommended: None,
                     })
                 }
                 FieldKind::Text | FieldKind::Hidden => Some(Item::Text {
@@ -109,6 +112,7 @@ pub(super) fn of_questions(questions: &[Question]) -> Option<Vec<Item>> {
                 multi: q.multi,
                 required: q.recommended.is_none(),
                 default: q.recommended.into_iter().collect(),
+                recommended: q.recommended,
             })
         })
         .collect()
@@ -125,18 +129,19 @@ pub(super) fn draft(items: &[Item]) -> Vec<Val> {
         .collect()
 }
 
-fn label(i: &Item) -> &str {
+pub(super) fn label(i: &Item) -> &str {
     match i {
         Item::Choice { label, .. } | Item::Text { label, .. } => label,
     }
 }
 
-fn select(stamp: &str, n: usize, item: &Item) -> Value {
+fn select(stamp: &str, n: usize, item: &Item, mark: &str) -> Value {
     let Item::Choice {
         label,
         options,
         multi,
         default,
+        recommended,
         ..
     } = item
     else {
@@ -145,7 +150,14 @@ fn select(stamp: &str, n: usize, item: &Item) -> Value {
     let opts: Vec<Value> = options
         .iter()
         .enumerate()
-        .map(|(i, o)| json!({ "label": cut(o, 100), "value": i.to_string(), "default": default.contains(&i) }))
+        .map(|(i, o)| {
+            let shown = if Some(i) == *recommended {
+                super::marked(o, mark, 100)
+            } else {
+                cut(o, 100)
+            };
+            json!({ "label": shown, "value": i.to_string(), "default": default.contains(&i) })
+        })
         .collect();
     json!({ "type": 1, "components": [{
         "type": 3, "custom_id": format!("cy:{stamp}:s:{n}"), "placeholder": cut(label, 150),
@@ -165,8 +177,9 @@ fn list(ids: &[usize]) -> String {
 }
 
 /// The components of each message: one message when it fits, else one per item (the last also
-/// carries Submit). `None` when even one item per message cannot be shown.
-pub(super) fn layout(stamp: &str, items: &[Item]) -> Option<Vec<Value>> {
+/// carries Submit). `None` when even one item per message cannot be shown. `mark` follows the
+/// option OMP recommends.
+pub(super) fn layout(stamp: &str, items: &[Item], mark: &str) -> Option<Vec<Value>> {
     let choices: Vec<usize> = items
         .iter()
         .enumerate()
@@ -184,7 +197,7 @@ pub(super) fn layout(stamp: &str, items: &[Item]) -> Option<Vec<Value>> {
     if choices.len() < ROWS_MAX && groups.len() < ROWS_MAX {
         let mut rows: Vec<Value> = choices
             .iter()
-            .filter_map(|n| Some(select(stamp, *n, items.get(*n)?)))
+            .filter_map(|n| Some(select(stamp, *n, items.get(*n)?, mark)))
             .collect();
         let mut buttons: Vec<Value> = groups
             .iter()
@@ -208,7 +221,7 @@ pub(super) fn layout(stamp: &str, items: &[Item]) -> Option<Vec<Value>> {
         .enumerate()
         .map(|(n, item)| {
             let mut rows = match item {
-                Item::Choice { .. } => vec![select(stamp, n, item)],
+                Item::Choice { .. } => vec![select(stamp, n, item, mark)],
                 Item::Text { .. } => {
                     vec![json!({ "type": 1, "components": [button(&format!("cy:{stamp}:m:{n}"), "Answer", 1)] })]
                 }
@@ -473,7 +486,7 @@ impl<T: Runtime> Intake<T> {
 }
 
 impl super::Cards {
-    fn set(&self, dialog: &str, n: usize, val: Val) {
+    pub(super) fn set(&self, dialog: &str, n: usize, val: Val) {
         let mut inner = self.lock();
         if let Some(slot) = inner
             .open
@@ -485,7 +498,7 @@ impl super::Cards {
         }
     }
 
-    fn draft(&self, dialog: &str) -> Vec<Val> {
+    pub(super) fn draft(&self, dialog: &str) -> Vec<Val> {
         self.lock()
             .open
             .get(dialog)

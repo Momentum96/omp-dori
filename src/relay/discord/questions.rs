@@ -29,6 +29,7 @@ use crate::store::relay::{QueueRow, RelayWrite};
 
 mod approval;
 mod panel;
+mod typed;
 /// The longest excerpt of a waiting dialog in its local notice.
 const NOTICE_DETAIL: usize = 300;
 /// The question summary may be at most this long (DISC-OUT req. 63).
@@ -36,6 +37,24 @@ const SUMMARY_MAX: usize = 1500;
 /// Buttons at most: 5 rows of 5 (DISC-OUT req. 67).
 const BUTTONS_MAX: usize = 25;
 const LABEL_MAX: usize = 80;
+
+/// The suffix after the option OMP marks recommended, in the owner's language.
+fn recommended_mark(language: Language) -> &'static str {
+    match language {
+        Language::Korean => " (추천)",
+        Language::English => " (recommended)",
+    }
+}
+
+/// `label` followed by `mark`, the label cut so the whole stays within `max` characters; the mark
+/// is never cut.
+fn marked(label: &str, mark: &str, max: usize) -> String {
+    let room = max.saturating_sub(mark.chars().count());
+    let mut out: String = label.chars().take(room).collect();
+    out.push_str(mark);
+    out
+}
+
 /// Finishing edits are best effort within this budget (DISC-OUT req. 75).
 const EDIT_BUDGET: Duration = Duration::from_secs(3);
 
@@ -158,9 +177,11 @@ pub(crate) fn neutral(text: &str) -> String {
 }
 
 /// The card for a dialog, or `None` when it stays local (DISC-OUT req. 59-64). `approvals` is the
-/// owner's language when remote approvals are on; an approval card is written in it.
+/// owner's language when remote approvals are on; an approval card is written in it. `language`
+/// is the owner's language for the recommended option's mark.
 fn card_of(
     dialog: &Dialog,
+    language: Language,
     approvals: Option<Language>,
 ) -> Option<(Kind, String, Vec<String>, Option<usize>)> {
     let lines = |head: &str| {
@@ -174,7 +195,7 @@ fn card_of(
     match dialog.kind {
         DialogKind::Ask => {
             let [q] = dialog.questions.as_deref()? else {
-                return asks_card(dialog.questions.as_deref()?);
+                return asks_card(dialog.questions.as_deref()?, language);
             };
             if q.options.is_empty() || q.options.len() > BUTTONS_MAX {
                 return None;
@@ -412,7 +433,10 @@ fn answer_of(card: &Card, dialog: &Dialog, index: usize) -> Option<Value> {
 }
 
 /// An `ask` dialog with several questions: each with its ID, choices and recommended choice.
-fn asks_card(questions: &[Question]) -> Option<(Kind, String, Vec<String>, Option<usize>)> {
+fn asks_card(
+    questions: &[Question],
+    language: Language,
+) -> Option<(Kind, String, Vec<String>, Option<usize>)> {
     if questions.is_empty() {
         return None;
     }
@@ -425,7 +449,12 @@ fn asks_card(questions: &[Question]) -> Option<(Kind, String, Vec<String>, Optio
             let _ = write!(text, " ({many}: {})", list.join(", "));
         }
         if let Some(r) = q.recommended.and_then(|r| q.options.get(r)) {
-            let _ = write!(text, "; default: {}", neutral(r));
+            let _ = write!(
+                text,
+                "; default: {}{}",
+                neutral(r),
+                recommended_mark(language)
+            );
         }
     }
     Some((
@@ -444,30 +473,32 @@ fn form_data(field: &str, hidden: &serde_json::Map<String, Value>, value: Value)
     json!({ "data": data })
 }
 
-/// A typed answer (DISC-OUT req. 70, 72): an option number, a unique label, for `ask` free text, or
-/// for a form with several fields a JSON map of field name to value.
-fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
+/// The index of a typed choice: an option number from 1, or a unique label in any ASCII case.
+fn pick(choices: &[String], item: &str) -> Option<usize> {
+    let item = item.trim();
+    if let Ok(n) = item.parse::<usize>() {
+        return (1..=choices.len()).contains(&n).then(|| n - 1);
+    }
+    let hits: Vec<usize> = choices
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.eq_ignore_ascii_case(item))
+        .map(|(i, _)| i)
+        .collect();
+    match hits.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// A typed answer (DISC-OUT req. 70, 72) to a card with one part: an option number, a unique
+/// label, or for `ask` free text. A card with several parts takes [`typed::part_value`].
+fn typed_answer(card: &Card, text: &str, words: &typed::Words) -> Result<Value, String> {
     let text = text.trim();
     if text.is_empty() || text.chars().count() > 2000 {
-        return Err("answers are 1 to 2000 characters".into());
+        return Err(words.length.into());
     }
-    let pick = |item: &str| -> Option<usize> {
-        let item = item.trim();
-        if let Ok(n) = item.parse::<usize>() {
-            return (1..=card.choices.len()).contains(&n).then(|| n - 1);
-        }
-        let hits: Vec<usize> = card
-            .choices
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.eq_ignore_ascii_case(item))
-            .map(|(i, _)| i)
-            .collect();
-        match hits.as_slice() {
-            [one] => Some(*one),
-            _ => None,
-        }
-    };
+    let pick = |item: &str| pick(&card.choices, item);
     match &card.kind {
         Kind::Ask { question, multi } => {
             let items: Vec<&str> = if *multi {
@@ -486,9 +517,7 @@ fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
                 }
             })
         }
-        Kind::Fields { .. } | Kind::Asks { .. } => {
-            Err("use the menus, Fill in and Submit on the question".into())
-        }
+        Kind::Fields { .. } | Kind::Asks { .. } => Err(words.which.into()),
         Kind::Form {
             field,
             values,
@@ -513,30 +542,32 @@ fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
             match picked {
                 Some(v) if *multi => Ok(form_data(field, hidden, json!(v))),
                 Some(v) => Ok(form_data(field, hidden, json!(v.first()))),
-                None => Err(format!(
-                    "answer with a number from 1 to {}",
-                    card.choices.len()
-                )),
+                None => Err(words.number(card.choices.len())),
             }
         }
         Kind::Select | Kind::Confirm => match pick(text) {
             Some(i) if card.kind == Kind::Select => Ok(json!({ "value": card.choices.get(i) })),
             Some(i) => Ok(json!({ "confirmed": i == 0 })),
-            None => Err(format!(
-                "answer with a number from 1 to {}",
-                card.choices.len()
-            )),
+            None => Err(words.number(card.choices.len())),
         },
         Kind::Approval => Err("approvals are answered with the buttons".into()),
     }
 }
 
-fn buttons(stamp: &str, choices: &[String], recommended: Option<usize>, approval: bool) -> Value {
+fn buttons(
+    stamp: &str,
+    choices: &[String],
+    recommended: Option<usize>,
+    approval: bool,
+    mark: &str,
+) -> Value {
     let row_of = |chunk: &[(usize, &String)]| {
         let components: Vec<Value> = chunk
             .iter()
             .map(|(i, label)| {
-                let label = if label.chars().count() > LABEL_MAX {
+                let label = if !approval && Some(*i) == recommended {
+                    marked(label, mark, LABEL_MAX)
+                } else if label.chars().count() > LABEL_MAX {
                     format!("Option {}", i + 1)
                 } else {
                     (*label).clone()
@@ -556,16 +587,12 @@ fn buttons(stamp: &str, choices: &[String], recommended: Option<usize>, approval
     Value::Array(indexed.chunks(5).map(row_of).collect())
 }
 
-fn choice_lines(choices: &[String], recommended: Option<usize>) -> String {
+fn choice_lines(choices: &[String], recommended: Option<usize>, mark: &str) -> String {
     choices
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let tag = if Some(i) == recommended {
-                " (recommended)"
-            } else {
-                ""
-            };
+            let tag = if Some(i) == recommended { mark } else { "" };
             format!("{}. {}{tag}", i + 1, neutral(c))
         })
         .collect::<Vec<_>>()
@@ -697,14 +724,20 @@ impl<T: Runtime> Intake<T> {
             // An approval is answered with its buttons only.
             head.to_string()
         } else {
-            format!("{head}\n{}", choice_lines(choices, recommended))
+            format!(
+                "{head}\n{}",
+                choice_lines(choices, recommended, recommended_mark(self.language))
+            )
         };
+        let words = typed::words(self.language);
         match kind {
             Kind::Approval => {}
             Kind::Fields { .. } | Kind::Asks { .. } => {
-                body.push_str("\nChoose in the menus, use Fill in for text, then press Submit.");
+                let _ = write!(body, "\n{}", words.panel_hint);
             }
-            _ => body.push_str("\nReply to this message with a number or your answer."),
+            _ => {
+                let _ = write!(body, "\n{}", words.hint);
+            }
         }
         if let Some(r) = recommended {
             let _ = write!(
@@ -844,12 +877,12 @@ impl<T: Runtime> Intake<T> {
         let skip = |me: &Self| {
             me.cards.lock().skipped.insert(dialog.id.clone());
         };
-        let Some((kind, head, choices, recommended)) = card_of(
-            dialog,
-            self.settings.remote_approvals.then_some(self.language),
-        ) else {
+        let lang = self.language;
+        let approvals = self.settings.remote_approvals.then_some(lang);
+        let Some((kind, head, choices, recommended)) = card_of(dialog, lang, approvals) else {
             return self.stay_local(dialog).await;
         };
+        let mark = recommended_mark(lang);
         let approval = kind == Kind::Approval;
         let route = self.route(approval).await;
         let Some((channel, reply_to)) = route else {
@@ -880,10 +913,8 @@ impl<T: Runtime> Intake<T> {
             Kind::Asks { questions } => panel::of_questions(questions),
             _ => None,
         };
-        let mut pages = items
-            .as_deref()
-            .and_then(|i| panel::layout(&stamp, i))
-            .unwrap_or_default();
+        let layout = |i: &[panel::Item]| panel::layout(&stamp, i, mark);
+        let mut pages = items.as_deref().and_then(layout).unwrap_or_default();
         if panel && (!self.buttons || pages.is_empty()) {
             // Without components such a question cannot be answered on Discord; it stays local.
             return self.stay_local(dialog).await;
@@ -892,7 +923,7 @@ impl<T: Runtime> Intake<T> {
             Some(pages.remove(0))
         } else {
             (self.buttons && !multi && body.encode_utf16().count() <= DISCORD_LIMIT)
-                .then(|| buttons(&stamp, &choices, recommended, approval))
+                .then(|| buttons(&stamp, &choices, recommended, approval, mark))
         };
         // The card exists before its buttons can be seen, so no press can find it missing.
         let message = self
@@ -1138,9 +1169,11 @@ impl<T: Runtime> Intake<T> {
         }
     }
 
-    /// An owner message that answers an open question (DISC-OUT req. 70-73): a reply to the question,
-    /// or a plain message in its channel when exactly one question is open there.
+    /// An owner message that answers an open question (DISC-OUT req. 70-73): a reply to the question
+    /// (or to one part of it), or a plain message in its channel when exactly one question is open
+    /// there. On a card with several parts it answers one part; the others stay open.
     pub(super) async fn answer_by_text(&self, row: &QueueRow, inbound: &Inbound) -> bool {
+        let words = typed::words(self.language);
         let target = {
             let inner = self.cards.lock();
             let here: Vec<&Card> = inner
@@ -1148,46 +1181,42 @@ impl<T: Runtime> Intake<T> {
                 .values()
                 .filter(|c| c.kind != Kind::Approval && c.channel.to_string() == row.room)
                 .collect();
-            let replied = here
-                .iter()
-                .find(|c| inbound.reply_to.as_deref() == Some(c.message.to_string().as_str()));
+            let to = inbound.reply_to.as_deref();
+            let replied = here.iter().find_map(|c| {
+                let to = to?;
+                let parts = c.items.as_ref().map_or(0, Vec::len);
+                if c.message.to_string() == to {
+                    // A card split into one message per part starts with part 1.
+                    let split = !c.extra.is_empty() && c.extra.len() + 1 == parts;
+                    return Some((*c, split.then_some(0)));
+                }
+                let k = c.extra.iter().position(|m| m.to_string() == to)?;
+                Some((*c, (c.extra.len() + 1 == parts).then_some(k + 1)))
+            });
             match (replied, here.as_slice()) {
-                (Some(c), _) => Some((*c).clone()),
-                (None, [one])
-                    if inbound.plain
-                        && row.seq > one.message.seq()
-                        && !matches!(one.kind, Kind::Fields { .. } | Kind::Asks { .. }) =>
-                {
-                    Some((*one).clone())
+                (Some((c, part)), _) => Some(((*c).clone(), part, true)),
+                (None, [one]) if inbound.plain && row.seq > one.message.seq() => {
+                    Some(((*one).clone(), None, false))
                 }
                 _ => None,
             }
         };
-        let Some(card) = target else {
+        let Some((card, part, reply)) = target else {
             return false;
         };
+        if card.items.is_some() {
+            return self
+                .answer_part(row, inbound, &card, part, reply, &words)
+                .await;
+        }
         let Some(card) = self.cards.take(&card.dialog) else {
             return false;
         };
-        let answer = match typed_answer(&card, &inbound.text) {
+        let answer = match typed_answer(&card, &inbound.text, &words) {
             Ok(a) => a,
             Err(problem) => {
                 self.cards.reopen(&card.dialog);
-                let text = format!("That answer was not taken: {problem}. Please try again.");
-                let seed = format!("correction:{}:{}", self.bot, row.message);
-                if let crate::relay::PartOutcome::Rejected(e)
-                | crate::relay::PartOutcome::Uncertain(e) = self
-                    .rest
-                    .reply_part(
-                        card.channel,
-                        Snowflake::parse(&row.message),
-                        &text,
-                        &nonce(&seed, 0),
-                    )
-                    .await
-                {
-                    log::info("correction not posted", &[("error", &e)]);
-                }
+                self.correct(&card, row, &words.retry(&problem)).await;
                 return true;
             }
         };
@@ -1201,12 +1230,78 @@ impl<T: Runtime> Intake<T> {
         };
         self.cards.remove(&card.dialog);
         let content = match outcome {
-            Ok(()) => format!("{}\n\nAnswered by the owner's reply.", card.body),
+            Ok(()) => format!("{}\n\n{}", card.body, words.answered),
             Err(e) => format!("{}\n\nClosed: {}", card.body, neutral(&e)),
         };
         self.edit_closing(card.channel, card.message, &content)
             .await;
         true
+    }
+
+    /// A typed answer to one part of a card with several questions or fields: the part replied to,
+    /// or the only part still open. The card is submitted once every part has an answer that
+    /// checks; otherwise the owner hears which part was taken. A plain message that names no part
+    /// is not an answer.
+    async fn answer_part(
+        &self,
+        row: &QueueRow,
+        inbound: &Inbound,
+        card: &Card,
+        part: Option<usize>,
+        reply: bool,
+        words: &typed::Words,
+    ) -> bool {
+        let Some(n) = typed::part_of(card, part) else {
+            if reply {
+                self.correct(card, row, &words.retry(words.which)).await;
+            }
+            return reply;
+        };
+        let val = match typed::part_value(card, n, &inbound.text, words) {
+            Ok(v) => v,
+            Err(problem) => {
+                self.correct(card, row, &words.retry(&problem)).await;
+                return true;
+            }
+        };
+        self.cards.set(&card.dialog, n, val);
+        let items = card.items.clone().unwrap_or_default();
+        let draft = self.cards.draft(&card.dialog);
+        let ready = !draft.contains(&panel::Val::Unset)
+            && panel::answer(&card.kind, &items, &draft).is_ok();
+        if !ready {
+            let name = items.get(n).map_or("", panel::label);
+            self.correct(card, row, &words.recorded(name)).await;
+            return true;
+        }
+        let Some(card) = self.cards.take(&card.dialog) else {
+            return true;
+        };
+        match panel::answer(&card.kind, &items, &card.draft) {
+            Ok(value) => {
+                let done = format!("{}\n\n{}", card.body, words.answered);
+                self.submit_value(card, value, done).await;
+            }
+            Err(_) => self.cards.reopen(&card.dialog),
+        }
+        true
+    }
+
+    /// Replies to the owner's message about a typed answer (not taken, or one part taken).
+    async fn correct(&self, card: &Card, row: &QueueRow, text: &str) {
+        let seed = format!("correction:{}:{}", self.bot, row.message);
+        if let crate::relay::PartOutcome::Rejected(e) | crate::relay::PartOutcome::Uncertain(e) =
+            self.rest
+                .reply_part(
+                    card.channel,
+                    Snowflake::parse(&row.message),
+                    text,
+                    &nonce(&seed, 0),
+                )
+                .await
+        {
+            log::info("correction not posted", &[("error", &e)]);
+        }
     }
 }
 
@@ -1214,6 +1309,10 @@ impl<T: Runtime> Intake<T> {
 mod tests {
     use super::*;
     use crate::host::dialogs::dialog_of;
+
+    fn typed_answer(card: &Card, text: &str) -> Result<Value, String> {
+        super::typed_answer(card, text, &typed::words(Language::English))
+    }
 
     fn ask(recommended: Option<u64>, multi: bool) -> Dialog {
         let mut q = json!({"id": "q1", "question": "Pick @everyone `x`", "multi": multi,
@@ -1228,7 +1327,7 @@ mod tests {
     }
 
     fn card(dialog: &Dialog) -> Card {
-        let (kind, body, choices, _) = card_of(dialog, None).unwrap();
+        let (kind, body, choices, _) = card_of(dialog, Language::English, None).unwrap();
         let items = match &kind {
             Kind::Fields { fields, .. } => panel::of_fields(fields),
             Kind::Asks { questions } => panel::of_questions(questions),
@@ -1255,7 +1354,7 @@ mod tests {
         let d = dialog_of(&json!({"id": "f", "method": "form", "html": html})).unwrap();
         let c = card(&d);
         assert_eq!(c.choices, vec!["Red", "Blue"]);
-        assert_eq!(card_of(&d, None).unwrap().3, Some(1));
+        assert_eq!(card_of(&d, Language::English, None).unwrap().3, Some(1));
         assert_eq!(
             answer_of(&c, &d, 1).unwrap(),
             json!({"data": {"color": "b", "k": "v"}})
@@ -1281,7 +1380,7 @@ mod tests {
             "no JSON answers"
         );
         let items = c.items.clone().unwrap();
-        let pages = panel::layout("s", &items).unwrap();
+        let pages = panel::layout("s", &items, " (recommended)").unwrap();
         assert_eq!(
             pages.len(),
             1,
@@ -1321,7 +1420,7 @@ mod tests {
         let mut c = card(&d);
         assert!(matches!(c.kind, Kind::Asks { .. }), "{:?}", c.kind);
         let items = c.items.clone().unwrap();
-        let pages = panel::layout("s", &items).unwrap();
+        let pages = panel::layout("s", &items, " (recommended)").unwrap();
         assert_eq!(pages.len(), 6, "one message per question");
         assert_eq!(pages[5][0]["components"][0]["custom_id"], "cy:s:m:5");
         assert_eq!(pages[5][1]["components"][0]["custom_id"], "cy:s:go");
@@ -1341,11 +1440,93 @@ mod tests {
         assert_eq!(a["answers"][5]["customInput"], "because");
     }
 
+    /// The texts around typed answers follow `[hub] language`.
+    #[test]
+    fn typed_answer_texts_follow_the_owners_language() {
+        let ko = typed::words(Language::Korean);
+        assert_eq!(
+            ko.hint,
+            "번호를 누르거나, 원하는 답을 채팅으로 보내 주세요."
+        );
+        assert_eq!(ko.answered, "보스가 채팅으로 답했습니다.");
+        assert_eq!(
+            ko.retry("x"),
+            "그 답은 받을 수 없어요: x. 다시 보내 주세요."
+        );
+        assert_eq!(ko.number(3), "1부터 3까지의 번호로 답해 주세요");
+        let en = typed::words(Language::English);
+        assert_eq!(
+            en.hint,
+            "Reply to this message with a number or your answer."
+        );
+        assert_eq!(
+            en.retry("x"),
+            "That answer was not taken: x. Please try again."
+        );
+        let confirm = dialog_of(&json!({"id": "c", "method": "confirm", "title": "Go?"})).unwrap();
+        let mut cc = card(&confirm);
+        cc.kind = Kind::Confirm;
+        assert_eq!(super::typed_answer(&cc, "maybe", &ko), Err(ko.number(2)));
+        assert_eq!(
+            super::typed_answer(&cc, " ", &ko),
+            Err(ko.length.to_string())
+        );
+    }
+
+    /// A typed reply to one part of a card with several questions or fields answers that part; the
+    /// others stay open. Without a part named, only the single open part can be answered.
+    #[test]
+    fn a_typed_reply_answers_one_part() {
+        let en = typed::words(Language::English);
+        let question = |id: &str| json!({"id": id, "question": id, "options": [{"label": "A"}, {"label": "B"}]});
+        let dialog = dialog_of(&json!({"id": "d3", "method": "ask", "questions": [question("a"), question("b"), {"id": "c", "question": "Why?", "options": []}]}))
+        .unwrap();
+        let mut c = card(&dialog);
+        assert_eq!(typed::part_of(&c, None), None, "three parts open");
+        assert_eq!(typed::part_of(&c, Some(1)), Some(1));
+        assert_eq!(
+            typed::part_value(&c, 1, "2", &en),
+            Ok(panel::Val::Picks(vec![1]))
+        );
+        assert_eq!(
+            typed::part_value(&c, 0, "b", &en),
+            Ok(panel::Val::Picks(vec![1]))
+        );
+        // OMP takes custom input for an `ask` question.
+        assert_eq!(
+            typed::part_value(&c, 0, "neither", &en),
+            Ok(panel::Val::Text("neither".into()))
+        );
+        assert_eq!(
+            typed::part_value(&c, 2, "because", &en),
+            Ok(panel::Val::Text("because".into()))
+        );
+        c.draft[0] = panel::Val::Picks(vec![0]);
+        c.draft[1] = panel::Val::Picks(vec![1]);
+        assert_eq!(typed::part_of(&c, None), Some(2), "the only open part");
+        c.draft[2] = panel::Val::Text("because".into());
+        let a = panel::answer(&c.kind, c.items.as_deref().unwrap(), &c.draft).unwrap();
+        assert_eq!(a["answers"][2]["customInput"], "because");
+        // A form's choice field takes only its options.
+        let html = r#"<form><p>Release</p><fieldset><legend>Channel</legend><label><input type="radio" name="channel" value="s"> Stable</label><label><input type="radio" name="channel" value="b"> Beta</label></fieldset><label>Note <input type="text" name="note" maxlength="5"></label></form>"#;
+        let f = card(&dialog_of(&json!({"id": "f", "method": "form", "html": html})).unwrap());
+        assert_eq!(
+            typed::part_value(&f, 0, "beta", &en),
+            Ok(panel::Val::Picks(vec![1]))
+        );
+        assert_eq!(typed::part_value(&f, 0, "gamma", &en), Err(en.number(2)));
+        assert!(typed::part_value(&f, 1, "too long", &en).is_err());
+        assert_eq!(
+            en.recorded("Channel"),
+            "Taken for Channel; fill in the rest, then press Submit."
+        );
+    }
+
     #[test]
     fn questions_convert_and_answers_validate() {
         let d = ask(Some(1), false);
         let c = card(&d);
-        assert_eq!(card_of(&d, None).unwrap().3, Some(1));
+        assert_eq!(card_of(&d, Language::English, None).unwrap().3, Some(1));
         assert!(c.body.contains("@\u{200b}everyone") && c.body.contains("\\`x\\`"));
         assert_eq!(
             answer_of(&c, &d, 1).unwrap(),
@@ -1364,16 +1545,24 @@ mod tests {
             "green please"
         );
         // A multi-select question has no recommended default.
-        assert_eq!(card_of(&ask(Some(1), true), None).unwrap().3, None);
-        let b = buttons("s", &c.choices, Some(1), false);
+        assert_eq!(
+            card_of(&ask(Some(1), true), Language::English, None)
+                .unwrap()
+                .3,
+            None
+        );
+        let b = buttons("s", &c.choices, Some(1), false, " (recommended)");
         assert_eq!(b[0]["components"][1]["style"], 1);
+        assert_eq!(b[0]["components"][1]["label"], "Blue (recommended)");
+        assert_eq!(b[0]["components"][0]["label"], "Red");
         assert_eq!(b[0]["components"][0]["custom_id"], "cy:s:0");
         // Approvals stay local unless remote approvals are on.
         let approval = dialog_of(&json!({"id": "a", "method": "select", "title": "Run bash?",
             "options": ["Approve Once", "Deny"]}))
         .unwrap();
-        assert!(card_of(&approval, None).is_none());
-        let (kind, body, choices, _) = card_of(&approval, Some(Language::Korean)).unwrap();
+        assert!(card_of(&approval, Language::English, None).is_none());
+        let (kind, body, choices, _) =
+            card_of(&approval, Language::Korean, Some(Language::Korean)).unwrap();
         assert_eq!(kind, Kind::Approval);
         assert_eq!(body, "**권한 요청**\nRun bash?");
         assert_eq!(choices, ["이번만 허용", "거부"]);
@@ -1382,6 +1571,51 @@ mod tests {
         cc.kind = Kind::Confirm;
         assert_eq!(typed_answer(&cc, "2").unwrap(), json!({"confirmed": false}));
         assert!(typed_answer(&cc, "maybe").is_err());
+    }
+
+    /// The option OMP recommends carries the owner's language's mark on buttons, menu options and
+    /// the card text; a long label is cut, never the mark; nothing is added without a recommended
+    /// option.
+    #[test]
+    fn the_recommended_option_is_marked_in_the_owners_language() {
+        let ko = recommended_mark(Language::Korean);
+        let en = recommended_mark(Language::English);
+        assert_eq!(ko, " (추천)");
+        assert_eq!(en, " (recommended)");
+        let choices = vec!["Red".to_string(), "가".repeat(120)];
+        for mark in [ko, en] {
+            let b = buttons("s", &choices, Some(1), false, mark);
+            let label = b[0]["components"][1]["label"].as_str().unwrap();
+            assert!(label.ends_with(mark), "{label}");
+            assert_eq!(label.chars().count(), LABEL_MAX, "{label}");
+            assert!(label.starts_with("가가"), "{label}");
+            assert_eq!(b[0]["components"][0]["label"], "Red");
+            let lines = choice_lines(&choices[..1], Some(0), mark);
+            assert_eq!(lines, format!("1. Red{mark}"));
+        }
+        assert_eq!(marked("Blue", ko, 80), "Blue (추천)");
+        // No recommended option: no mark anywhere.
+        let plain = buttons("s", &choices, None, false, ko);
+        assert!(!plain.to_string().contains("추천"));
+        assert!(!choice_lines(&choices, None, ko).contains("추천"));
+        // Several questions: the recommended option of a menu carries the mark, cut to fit.
+        let q = json!({"id": "a", "question": "a", "options": [{"label": "A"}, {"label": "나".repeat(150)}], "recommended": 1});
+        let d =
+            dialog_of(&json!({"id": "m", "method": "ask", "questions": [q.clone(), q]})).unwrap();
+        let (kind, text, ..) = card_of(&d, Language::Korean, None).unwrap();
+        assert!(text.contains(" (추천)"), "{text}");
+        let Kind::Asks { questions } = kind else {
+            panic!("{kind:?}")
+        };
+        let items = panel::of_questions(&questions).unwrap();
+        let pages = panel::layout("s", &items, ko).unwrap();
+        let options = &pages[0][0]["components"][0]["options"];
+        assert_eq!(options[0]["label"], "A");
+        let long = options[1]["label"].as_str().unwrap();
+        assert!(
+            long.ends_with(" (추천)") && long.chars().count() == 100,
+            "{long}"
+        );
     }
 
     #[test]

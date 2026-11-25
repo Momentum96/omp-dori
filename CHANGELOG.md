@@ -22,11 +22,19 @@
 - No more approval requests for Cataly's own tools: the lead and lanes call them directly, and
   OMP runs them without asking. A shell line that names them is refused at once with a pointer
   to the direct call, instead of asking you.
-- Read-only shell commands (`ls`, `cat`, `grep`, `head`, `git status`, `git log`, `git diff` and
-  the like) run without asking; anything that writes, deletes, pushes, installs or uses the
-  network still asks (coordinator decision P1, pending your confirmation).
+- Approvals follow your own OMP settings (decision 19): Cataly no longer forces OMP's
+  `always-ask` and keeps no list of its own, so OMP asks exactly when your OMP configuration (or
+  its default) says so. Read-only shell commands run without a prompt under OMP's default, and
+  every dialog OMP does open still reaches you in Discord.
 - The Discord approval card speaks your language (`[hub] language`): "권한 요청", the tool and the
   command in a code block, long commands cut cleanly, buttons "이번만 허용" / "거부".
+- On a Discord question card, the option OMP marks as recommended says so in your language
+  ("(추천)" or "(recommended)") on its button or menu option and in the card text; a long option
+  is cut to fit, never the mark. Nothing is added when OMP recommends none.
+- Typed answers to question cards: the hints and replies around them follow your language, and a
+  card with several questions or fields takes a typed reply to one question's part (or to the
+  only part still open), as an option number, a label or, where OMP allows, your own text; the
+  other parts stay open and the menus still work.
 - Setup's Discord invite asks for Pin Messages, so the ops panel can pin its message; without it
   the panel still posts and edits in place, unpinned.
 
