@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -40,8 +40,15 @@ pub fn sha256(bytes: &[u8]) -> String {
     hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
-/// The test release key handed to the debug binary.
+/// The test release key handed to the debug binary. A build with a release key compiled in
+/// (`CATALY_RELEASE_KEY` set while it was built, as in a shell that ran a release build) trusts that
+/// key alone and holds every test-signed install, so it cannot run these cases.
 pub fn trust_test_key(hub: &mut TestHub) {
+    assert!(
+        option_env!("CATALY_RELEASE_KEY").is_none(),
+        "this test build has a release key compiled in (CATALY_RELEASE_KEY was set while it was \
+         built) and holds every test-signed release; build the tests without CATALY_RELEASE_KEY"
+    );
     hub.env
         .push(("CATALY_RELEASE_KEY".into(), PathBuf::from(key_hex())));
 }
@@ -84,19 +91,18 @@ pub fn bump(version: &str, by: u64) -> String {
     format!("{}.{}.{}", parts[0], parts[1], parts[2])
 }
 
-/// A build of this crate reporting `version`; `broken` makes its hub exit at once. Built once into
-/// `target/install-variants` and reused.
+/// A build of this crate reporting `version`; `broken` makes its hub exit at once. Built from a copy
+/// of the sources inside this run's own target folder and kept under the SHA-256 of that copy, so a
+/// changed source never gets an older build and runs with other target folders never share one. The
+/// nested build drops the release workflow's variables: a variant with a release key compiled in
+/// would hold every test-signed update.
 pub fn variant(version: &str, broken: bool) -> PathBuf {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let out_dir = repo.join("target/install-variants");
+    let out_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("install-variants");
     std::fs::create_dir_all(&out_dir).unwrap();
     let name = format!("cataly-{version}{}", if broken { "-broken" } else { "" });
-    let out = out_dir.join(&name);
     let lock = std::fs::File::create(out_dir.join(".lock")).unwrap();
     lock.lock().unwrap();
-    if out.exists() {
-        return out;
-    }
     let copy = out_dir.join(format!("src-{name}"));
     let _ = std::fs::remove_dir_all(&copy);
     copy_tree(repo, &copy);
@@ -116,6 +122,11 @@ pub fn variant(version: &str, broken: bool) -> PathBuf {
         let text = text.replacen(head, &format!("{head}\n    if !paths.socket.as_os_str().is_empty() {{ return ExitCode::from(1); }}"), 1);
         std::fs::write(&hub, text).unwrap();
     }
+    let kept = out_dir.join(&name);
+    let out = kept.join(tree_digest(&copy));
+    if out.exists() {
+        return out;
+    }
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let built = Command::new(cargo)
         .args(["build", "--offline", "--bin", "cataly"])
@@ -123,18 +134,53 @@ pub fn variant(version: &str, broken: bool) -> PathBuf {
         .env("CARGO_TARGET_DIR", out_dir.join("target"))
         // Without debug info a debug build stays under the 128 MiB binary bound (IR req. 9).
         .env("CARGO_PROFILE_DEV_DEBUG", "false")
+        .env_remove("CATALY_RELEASE_KEY")
+        .env_remove("CATALY_COMMIT")
         .status()
         .unwrap();
     assert!(built.success(), "the {name} build failed");
-    std::fs::copy(out_dir.join("target/debug/cataly"), &out).unwrap();
+    // Builds of older sources go; the new one appears whole or not at all.
+    let _ = std::fs::remove_dir_all(&kept);
+    std::fs::create_dir_all(&kept).unwrap();
+    let part = out_dir.join(format!("{name}.part"));
+    std::fs::copy(out_dir.join("target/debug/cataly"), &part).unwrap();
+    std::fs::rename(&part, &out).unwrap();
     out
 }
 
+/// SHA-256 of every file under `dir`: its relative path, length and bytes, in name order.
+fn tree_digest(dir: &Path) -> String {
+    fn walk(dir: &Path, base: &Path, ctx: &mut ring::digest::Context) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                walk(&path, base, ctx);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let rel = path.strip_prefix(base).unwrap();
+            ctx.update(rel.as_os_str().as_encoded_bytes());
+            ctx.update(&[0]);
+            ctx.update(&(bytes.len() as u64).to_le_bytes());
+            ctx.update(&bytes);
+        }
+    }
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    walk(dir, dir, &mut ctx);
+    hex(ctx.finish().as_ref())
+}
+
+/// Copies `from` into `to`, leaving out build output, git data and the bridge's `node_modules`.
 pub fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap().filter_map(Result::ok) {
         let name = entry.file_name();
-        if name == "target" || name == ".git" {
+        if name == "target" || name == ".git" || name == "node_modules" {
             continue;
         }
         let path = entry.path();
@@ -200,8 +246,26 @@ pub fn hub_version(hub: &TestHub) -> Option<String> {
     v["ok"]["version"].as_str().map(str::to_string)
 }
 
+/// Asks the hub to stop until it accepts, then waits for its socket to close. A session still
+/// finishing a turn refuses the stop, as it holds `cataly update`, so a refusal is asked again.
 pub fn stop_hub(hub: &TestHub) {
-    let _ = hub.try_request(r#"{"v":1,"id":2,"method":"hub.stop","params":{}}"#);
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut refused = false;
+    while let Some(reply) = hub.try_request(r#"{"v":1,"id":2,"method":"hub.stop","params":{}}"#) {
+        let v: Value = serde_json::from_str(&reply).unwrap_or_default();
+        if v.get("err").is_none() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub kept refusing to stop: {reply}"
+        );
+        if !refused {
+            eprintln!("hub.stop refused, asking again: {}", reply.trim_end());
+            refused = true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
     hub.until(Duration::from_secs(30), || {
         hub_version(hub).is_none().then_some(())
     });

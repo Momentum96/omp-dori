@@ -1172,10 +1172,25 @@ Review findings Safety 1, 3, 4, 5, 6 and Design 3, 12, 13.
   binary built without `voice`. Two local runs of `tests/voice_hub.rs` failed in every case that
   way and passed with the same code once nothing else built [inference from the pattern; the
   replaced binary was not captured].
-- `tests/install.rs` builds its release variants once into `target/install-variants` and reuses
-  them by version alone. After a change to the bridge, the cached V1 variant carries the old
-  bridge, and `restart_holds_while_a_session_is_busy` fails with "the bridge … is not this
-  version's" (seen here once); delete that folder after such a change. CI starts without it.
+- The release variants of `tests/install.rs` and of the contract update case are built inside the
+  run's own target folder (`CARGO_TARGET_TMPDIR/install-variants`) and kept under the SHA-256 of
+  the copied sources, so neither a changed source nor another target folder reuses a build. They
+  used to share `target/install-variants`, reused by version alone (a bridge change once left the
+  cached V1 variant on the old bridge).
+- A test build made in a shell that still exports a release build's `CATALY_RELEASE_KEY` has that
+  key compiled in, trusts it alone, and holds every test-signed install with "SHA256SUMS.sig does
+  not match SHA256SUMS and the release key". On 2026-11-26 this failed every first install of
+  `tests/install.rs` and `update_resumes_the_lead_and_lanes_with_their_history` in a parallel run
+  (its binaries carried the release key and that shell's older `CATALY_COMMIT`); the variants that
+  run cached carried the key too, so later clean runs failed at their `cataly update`. Such a build
+  now stops at `trust_test_key` with the reason, and variant builds drop `CATALY_RELEASE_KEY` and
+  `CATALY_COMMIT`.
+- With those fixed, the contract update case passed under 16 busy loops in its update (13 s, the
+  new hub answering 133 ms after the old one closed, against 4 s and 89 ms alone), and once failed
+  after it: the test's `stop_hub` asked the hub to stop once, and a hub refuses an orderly stop
+  while a session is still finishing a turn (the lane had just been sent its next step), so the
+  hub never stopped [inference: the refusal is not logged; the new hub never logged its stop].
+  `stop_hub` now asks again until the hub accepts, at most 90 s, and prints the first refusal.
 
 ## Tern commands lost under load: the bridge dropped them (root cause)
 

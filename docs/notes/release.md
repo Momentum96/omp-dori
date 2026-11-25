@@ -69,7 +69,8 @@ at run time (tests use this with a throwaway key).
   look different from the app, and a member account is a human whose profile Cataly never changes
   (OPC-67). Setup guidance points the owner to the app settings.
 - Test versions above the crate's are real builds of a copy of the crate with the manifest version
-  raised (`target/install-variants`, debug info off to stay under the 128 MiB bound).
+  raised (`install-variants` in the run's `CARGO_TARGET_TMPDIR`, kept under a digest of the copied
+  sources, debug info off to stay under the 128 MiB bound).
 
 ## Not done (left)
 

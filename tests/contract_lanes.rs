@@ -337,6 +337,7 @@ fn update_resumes_the_lead_and_lanes_with_their_history() {
     );
     assert!(out.status.success(), "{}", text(&out));
     let said = String::from_utf8_lossy(&out.stdout).into_owned();
+    eprintln!("cataly update: {said}");
     assert!(
         said.contains("lead와 lane 2개를 이어서 열었습니다."),
         "{said}"
