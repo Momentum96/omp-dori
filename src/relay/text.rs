@@ -199,6 +199,36 @@ pub(crate) fn split(text: &str, limit: usize) -> Option<Vec<String>> {
     (!parts.is_empty()).then_some(parts)
 }
 
+/// Splits plain text into parts of at most `limit` UTF-16 units whose concatenation is the input
+/// exactly (TELE req. 30): each cut comes after the last newline in the back half of the window,
+/// else after the last space there, else at the limit, never inside a character.
+pub(crate) fn split_plain(text: &str, limit: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut rest = text;
+    while utf16_len(rest) > limit {
+        let window = byte_index_for(rest, limit).max(rest.chars().next().map_or(1, char::len_utf8));
+        let head = rest.get(..window).unwrap_or(rest);
+        let mut half = window / 2;
+        while !head.is_char_boundary(half) {
+            half -= 1;
+        }
+        let back = head.get(half..).unwrap_or_default();
+        let cut = back
+            .rfind('\n')
+            .or_else(|| back.rfind(' '))
+            .map_or(window, |i| half + i + 1);
+        let (Some(part), Some(tail)) = (rest.get(..cut), rest.get(cut..)) else {
+            break;
+        };
+        parts.push(part.to_string());
+        rest = tail;
+    }
+    if !rest.is_empty() || parts.is_empty() {
+        parts.push(rest.to_string());
+    }
+    parts
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Align {
     Left,

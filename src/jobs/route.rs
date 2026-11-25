@@ -194,6 +194,14 @@ async fn attempt(
     let result = match dest {
         Destination::Command { argv } => run_command(argv, event).await.map(|()| None),
         Destination::Discord { channel } => post_discord(ctx, name, channel, event).await.map(Some),
+        Destination::Telegram { chat, topic } => {
+            post_telegram(ctx, *chat, *topic, event).await.map(Some)
+        }
+        Destination::Slack { channel, thread } => {
+            post_slack(ctx, channel, thread.as_deref(), event)
+                .await
+                .map(Some)
+        }
     };
     match result {
         Ok(receipt) => (Delivery::Sent, receipt),
@@ -255,6 +263,82 @@ async fn post_discord(
         Sent::Uncertain(why) => Err(Undelivered {
             class: ErrorClass::InDoubt,
             detail: with_ids(why, &ids),
+        }),
+    }
+}
+
+/// One Telegram post within the delivery deadline, to the owner's DM or the configured group and
+/// topic only (TELE req. 31). Telegram enforces no nonce, so an uncertain part is never repeated.
+async fn post_telegram(
+    ctx: &Ctx,
+    chat: i64,
+    topic: Option<i64>,
+    event: &EventRecord,
+) -> Result<String, Undelivered> {
+    use crate::relay::telegram::{self, Api, Scope};
+    let config = ctx.config();
+    let refused = |detail: String| Undelivered {
+        class: ErrorClass::Rejected,
+        detail,
+    };
+    let api = Api::from_config(&config, &ctx.config_file).map_err(refused)?;
+    let scope = Scope::of(&config.telegram)
+        .ok_or_else(|| refused("set [telegram] owner before posting to Telegram".into()))?;
+    let text = post_text(event, &ctx.event_log);
+    crate::relay::text::check(&text, &config.outgoing)
+        .map_err(|e| refused(format!("refused by the outgoing text checks: {e}")))?;
+    let sent = timeout(
+        DISCORD_DEADLINE,
+        telegram::send(&api, &scope, chat, topic, None, &text, false),
+    )
+    .await
+    .map_err(|_| Undelivered {
+        class: ErrorClass::InDoubt,
+        detail: "no answer within the 30 s delivery deadline".into(),
+    })?;
+    let ids = |v: &[i64]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+    match sent {
+        telegram::Sent::Confirmed(v) => Ok(format!("message {}", ids(&v).join(" "))),
+        telegram::Sent::Rejected(v, why) => Err(refused(with_ids(why, &ids(&v)))),
+        telegram::Sent::Uncertain(v, why) => Err(Undelivered {
+            class: ErrorClass::InDoubt,
+            detail: with_ids(why, &ids(&v)),
+        }),
+    }
+}
+
+/// One Slack post within the delivery deadline; the thread it starts or joins is remembered.
+async fn post_slack(
+    ctx: &Ctx,
+    channel: &str,
+    thread: Option<&str>,
+    event: &EventRecord,
+) -> Result<String, Undelivered> {
+    use crate::relay::slack::{self, Api};
+    let config = ctx.config();
+    let api = Api::from_config(&config, &ctx.config_file).map_err(|detail| Undelivered {
+        class: ErrorClass::Rejected,
+        detail,
+    })?;
+    let text = post_text(event, &ctx.event_log);
+    let sent = timeout(
+        DISCORD_DEADLINE,
+        slack::send(&api, &ctx.store, channel, thread, &text, &config.outgoing),
+    )
+    .await
+    .map_err(|_| Undelivered {
+        class: ErrorClass::InDoubt,
+        detail: "no answer within the 30 s delivery deadline".into(),
+    })?;
+    match sent {
+        Ok(ts) => Ok(format!("message {}", ts.join(" "))),
+        Err((ts, e)) => Err(Undelivered {
+            class: if e.uncertain {
+                ErrorClass::InDoubt
+            } else {
+                ErrorClass::Rejected
+            },
+            detail: with_ids(e.to_string(), &ts),
         }),
     }
 }

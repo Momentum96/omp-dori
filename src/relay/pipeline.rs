@@ -13,7 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use tokio::sync::watch;
+
+use super::context::{self, Context};
 use super::{Inbound, PartOutcome, Relay};
+use crate::config::Config;
 use crate::host::inbox::{self, Message, ReceiptState};
 use crate::host::lead::{Events, Lead};
 use crate::host::{Runtime, SessionEvent, Status};
@@ -50,6 +54,9 @@ pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     lanes: Arc<crate::lanes::Lanes<T>>,
     spill_dir: PathBuf,
     events: Events,
+    /// `[context]` is read from here at each hand-off.
+    config: watch::Receiver<Arc<Config>>,
+    context: Context,
     /// Sources whose stuck delivery was logged (once per request, DISC-OUT req. 27).
     stuck: Mutex<HashSet<String>>,
     /// A failed seen mark is logged once per run (MSG-04).
@@ -60,28 +67,98 @@ pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     pub(crate) wake_latency: Latency,
 }
 
+/// What a relay's pipeline needs from the hub besides the relay itself.
+pub(crate) struct Parts<T: Runtime> {
+    pub(crate) store: Store,
+    pub(crate) lead: Arc<Lead<T>>,
+    pub(crate) lanes: Arc<crate::lanes::Lanes<T>>,
+    pub(crate) spill_dir: PathBuf,
+    pub(crate) events: Events,
+    pub(crate) config: watch::Receiver<Arc<Config>>,
+}
+
 impl<R: Relay, T: Runtime> Pipeline<R, T> {
-    pub(crate) fn new(
-        relay: Arc<R>,
-        store: Store,
-        lead: Arc<Lead<T>>,
-        lanes: Arc<crate::lanes::Lanes<T>>,
-        spill_dir: PathBuf,
-        events: Events,
-        wake_latency: Latency,
-    ) -> Self {
+    pub(crate) fn new(relay: Arc<R>, parts: Parts<T>, wake_latency: Latency) -> Self {
         Self {
             relay,
-            store,
-            lead,
-            lanes,
-            spill_dir,
-            events,
+            store: parts.store,
+            lead: parts.lead,
+            lanes: parts.lanes,
+            spill_dir: parts.spill_dir,
+            events: parts.events,
+            config: parts.config,
+            context: Context::default(),
             stuck: Mutex::default(),
             seen_failed: AtomicBool::new(false),
             wake: Mutex::new(None),
             wake_latency,
         }
+    }
+
+    /// Hands queued messages on, lowest first per room; a room with a held or failed message is
+    /// skipped for the rest of the round (DISC-IN req. 26-27, 43). `handle` takes one queue row.
+    pub(crate) async fn drain<F, Fut>(&self, mut handle: F) -> Result<(), String>
+    where
+        F: FnMut(QueueRow) -> Fut,
+        Fut: Future<Output = Result<Step, String>>,
+    {
+        let (queue, positions) = self
+            .store
+            .read(|r| Ok((r.queue(R::NAME)?, r.positions(R::NAME)?)))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut blocked: HashSet<String> = positions
+            .into_iter()
+            .filter(|p| p.held.is_some())
+            .map(|p| p.room)
+            .collect();
+        for row in queue {
+            if blocked.contains(&row.room) {
+                continue;
+            }
+            let room = row.room.clone();
+            match handle(row).await {
+                Ok(Step::Done | Step::Waiting) => {}
+                Ok(Step::Held(_)) => {
+                    blocked.insert(room);
+                }
+                Err(e) => {
+                    log::warn(
+                        "hand-off not made",
+                        &[("relay", &R::NAME), ("room", &room), ("error", &e)],
+                    );
+                    blocked.insert(room);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A queued message whose hand-off exists: its receipt is read again, it is finished, or it is
+    /// handed off again. `None` when it has no hand-off yet.
+    pub(crate) async fn resume(
+        self: &Arc<Self>,
+        row: &QueueRow,
+        inbound: &Inbound,
+        read_at: Option<Instant>,
+    ) -> Result<Option<Step>, String> {
+        let found = {
+            let (room, message) = (row.room.clone(), row.message.clone());
+            self.store
+                .read(move |r| r.handoff(R::NAME, &room, &message))
+                .await
+                .map_err(|e| e.to_string())?
+        };
+        Ok(Some(match found {
+            Some(h) if h.state == "handed" => self.recheck(row, &h, inbound).await?,
+            Some(h) if h.state == "delivered" => {
+                self.finish(&row.room, &row.message, Some("delivered"))
+                    .await?;
+                Step::Done
+            }
+            Some(_) => self.hand_off(row, inbound, read_at).await?,
+            None => return Ok(None),
+        }))
     }
 
     /// The tag that names a request in the envelope and the session file.
@@ -95,6 +172,74 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
 
     fn request_id(room: &str, message: &str) -> String {
         format!("{}:{room}:{message}", R::NAME)
+    }
+
+    /// The envelope with the optional context lines (DISC-IN req. 53-58).
+    async fn text_for(&self, inbound: &Inbound) -> String {
+        let settings = self.config.borrow().context.clone();
+        let mut text = Self::envelope(inbound);
+        let mut extra = Vec::new();
+        if settings.facts {
+            extra.push(
+                self.context
+                    .facts_line(&*self.relay, &settings, inbound)
+                    .await,
+            );
+        }
+        if settings.lookup && context::refers_back(&inbound.text) {
+            let (space, since) = (
+                context::space(inbound).to_string(),
+                now_ms() - settings.lookup_days * 86_400_000,
+            );
+            let rows = self
+                .store
+                .read(move |r| r.recall(R::NAME, &space, since, context::RANKED_ROWS))
+                .await;
+            match rows {
+                Ok(rows) => {
+                    let picked = context::rank(&inbound.text, &inbound.message, &rows);
+                    if let Some(line) = context::recall_line(&picked, &inbound.text) {
+                        extra.push(line);
+                    }
+                }
+                Err(e) => extra.push(format!("[earlier] error {e}")),
+            }
+        }
+        for line in extra {
+            text.push('\n');
+            text.push_str(&line);
+        }
+        text
+    }
+
+    /// Stores one owner message or lead reply for the earlier-conversation lookup when it is on
+    /// (DISC-IN req. 55-56); the space is the room's listed parent, else the room.
+    async fn remember(&self, room: &str, message: &str, who: &str, text: &str) {
+        let settings = self.config.borrow().context.clone();
+        if !settings.lookup {
+            return;
+        }
+        let space = {
+            let room = room.to_string();
+            self.store
+                .read(move |r| r.positions(R::NAME))
+                .await
+                .ok()
+                .and_then(|p| p.into_iter().find(|p| p.room == room)?.parent)
+                .unwrap_or_else(|| room.clone())
+        };
+        let write = RelayWrite::Recall {
+            relay: R::NAME.into(),
+            space,
+            who: who.into(),
+            conversation: room.into(),
+            message: message.into(),
+            text: context::stored(text),
+            keep_ms: settings.lookup_days * 86_400_000,
+        };
+        if let Err(e) = self.store.relay(write).await {
+            log::warn("earlier conversation not stored", &[("error", &e)]);
+        }
     }
 
     /// The text the lead receives (DISC-IN req. 35-38): the tag and the owner's authenticated
@@ -250,7 +395,9 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                 return Ok(Step::Held("an earlier hand-off is in doubt".into()));
             }
         }
-        let text = self.spill(inbound, Self::envelope(inbound));
+        let text = self.spill(inbound, self.text_for(inbound).await);
+        self.remember(&inbound.room, &inbound.message, "owner", &inbound.text)
+            .await;
         let request_id = Self::request_id(&row.room, &row.message);
         let owed: String = {
             let mut units = 0;
@@ -527,6 +674,8 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         match reply {
             Reply::Answer(text) => match self.relay.parts(&text) {
                 Ok(parts) => {
+                    self.remember(&h.room, &format!("{}:answer", h.message), "lead", &text)
+                        .await;
                     let parts = parts
                         .into_iter()
                         .enumerate()
@@ -611,6 +760,28 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                             room: h.room.clone(),
                             message: h.message.clone(),
                             answer: "dropped".into(),
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    return Ok(true);
+                }
+                PartOutcome::Uncertain(why) if !R::REPEATABLE => {
+                    // No enforced nonce: a repeat could post the part twice (MSG req. 8).
+                    log::warn(
+                        "answer part uncertain; not posted again",
+                        &[
+                            ("relay", &R::NAME),
+                            ("message", &h.message),
+                            ("part", &part.idx),
+                            ("reason", &why),
+                        ],
+                    );
+                    self.store
+                        .relay(RelayWrite::Answer {
+                            relay: R::NAME.into(),
+                            room: h.room.clone(),
+                            message: h.message.clone(),
+                            answer: "abandoned".into(),
                         })
                         .await
                         .map_err(|e| e.to_string())?;

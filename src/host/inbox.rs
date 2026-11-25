@@ -1061,6 +1061,68 @@ mod tests {
         );
     }
 
+    /// The carried fix of milestone 4: with no session reading, a recurring summary leaves one
+    /// undelivered entry however often it comes, and the cap retires the oldest non-owner entries
+    /// while every owner message stays.
+    #[tokio::test]
+    async fn inbox_is_bounded_and_keeps_owner_messages() {
+        use crate::store::host::{INBOX_CAP, LATEST_PREFIX};
+        let (store, _writer, _dir) = open_temp("inbox-bound");
+        let mailbox = Mailbox {
+            target: LEAD.into(),
+            store,
+        };
+        let summary = |n: usize| Message {
+            sender: HUB_SENDER.into(),
+            text: format!("planner pass {n}"),
+            urgent: false,
+            owner: false,
+            identity: Some(format!("{LATEST_PREFIX}planner.run:planner")),
+            request_id: None,
+        };
+        for n in 0..500 {
+            let (r, _) = mailbox.admit(&summary(n)).await.unwrap();
+            assert_eq!(r.state, ReceiptState::Waiting);
+        }
+        let open = mailbox.list().await.unwrap();
+        assert_eq!(open.len(), 1, "one undelivered summary");
+        assert_eq!(
+            open[0].1.text, "planner pass 499",
+            "the newest replaces the older"
+        );
+        for n in 0..5 {
+            mailbox
+                .admit(&owner(&format!("owner {n}"), None))
+                .await
+                .unwrap();
+        }
+        let cap = usize::try_from(INBOX_CAP).unwrap();
+        for n in 0..cap + 50 {
+            let note = Message {
+                text: format!("note {n}"),
+                ..summary(0).with_identity(&format!("note:{n}"))
+            };
+            mailbox.admit(&note).await.unwrap();
+        }
+        let open = mailbox.list().await.unwrap();
+        let owners = open.iter().filter(|(_, r)| r.owner).count();
+        assert_eq!(owners, 5, "owner messages are never retired");
+        assert_eq!(
+            open.len() - owners,
+            cap,
+            "non-owner entries stop at the cap"
+        );
+        assert!(
+            open.iter()
+                .any(|(_, r)| r.text == format!("note {}", cap + 49)),
+            "the newest is kept"
+        );
+        assert!(
+            !open.iter().any(|(_, r)| r.text == "note 0"),
+            "the oldest went first"
+        );
+    }
+
     impl Message {
         fn with_identity(mut self, identity: &str) -> Self {
             self.identity = Some(identity.into());

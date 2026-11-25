@@ -263,13 +263,21 @@ pub(super) fn parse(
     }
     if let Some(dest) = c.strings(errors, "board") {
         for (i, d) in dest.iter().enumerate() {
-            let ok = d.strip_prefix("discord:").is_some_and(|id| {
+            let discord = d.strip_prefix("discord:").is_some_and(|id| {
                 (17..=20).contains(&id.len()) && id.chars().all(|c| c.is_ascii_digit())
             });
-            if !ok {
+            let telegram = d
+                .strip_prefix("telegram:")
+                .and_then(crate::relay::telegram::board_target)
+                .is_some();
+            let slack = d
+                .strip_prefix("slack:")
+                .is_some_and(super::relays::slack_channel);
+            if !(discord || telegram || slack) {
                 errors.push(ConfigError {
                     path: format!("coord.board[{i}]"),
-                    message: "expected discord:<channel id>".into(),
+                    message: "expected discord:<channel id>, telegram:<chat>[/<topic>] or slack:<channel>"
+                        .into(),
                 });
             }
         }

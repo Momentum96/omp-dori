@@ -632,3 +632,97 @@ folder still prompts. `tests/contract_lanes.rs` no longer answers the dialog and
   passed alone in release with `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1,
   `contract_session` 5, `contract_discord` 3, `contract_lanes` 2, the lane tool running with no
   dialog); `bun test extension/` 6 passed.
+
+# Milestone 4: Telegram and Slack
+
+## Shape
+
+- **Shared intake** (`relay::intake`): one supervised start-serve-stop loop and one round that drains
+  the durable arrival queue through the pipeline, for all three relays; Discord moved onto it. Each
+  relay runs in its own task with its own queue, so a stalled one never delays another (MSG req. 2;
+  `a_hung_relay_never_delays_another` hangs each fake in turn).
+- **Telegram** (`relay::telegram`): long polling, at most 100 new or edited messages and a 25 s
+  wait; offset, batch time and replay guard in the store (migration 7, one JSON document per relay)
+  after each update; the identity and webhook checks, 409, 401 and 429 rules, the owner's DM or the
+  configured group and topic, General as topic 1. Telegram intake refuses to start on Windows
+  (owner decision 4).
+- **Slack** (`relay::slack`): DMs, group DMs, mentions and untagged replies in threads the account
+  posted in; each thread is its own room, `<channel>:<root ts>`; answers go into the request's
+  thread; `cataly slack upload` with the `files.slack.com` check before any byte; the `eyes` seen
+  mark, skipped for the run when the app lacks `reactions:write`.
+- **Channel facts and earlier conversation** (`relay::context`, DISC-IN-17, DISC-IN-18): for every
+  relay, off by default under `[context]`.
+- **Destinations**: jobs and the board post (`relay::boards`) reach Telegram and Slack; a board
+  create on either is one message with no nonce, so an uncertain create leaves the destination in
+  doubt, as the board rules want.
+- `cataly telegram|slack status|release|reset`; `cataly setup` has the Telegram and Slack settings
+  (tokens stay in owner-only files), and the lead's guidance explains the Slack app or member choice.
+
+## The Slack transport: Socket Mode for both roles
+
+Both roles, the app's bot user and a member through the app's user token, use one installed app in
+Socket Mode (`apps.connections.open` with the `xapp-` token, then the WebSocket; every envelope is
+acknowledged within 3 s, after the event was admitted or dropped). Slack's Events API documentation
+delivers an app's event subscriptions, including events on behalf of users, over Socket Mode or a
+request URL, with no bot-only limit; Socket Mode needs no public endpoint, which a request URL would
+(SLACK req. 34). After start and every reconnect, remembered threads and DMs are read from their
+positions, so an envelope missed while disconnected is caught up from history.
+
+## The bounded inbox (carried fix from slice 3b)
+
+- Recurring summaries (planner runs, lane recaps, notes refreshes, digests) carry a replacing
+  identity, `latest:<kind>:<subject>`: a new one retires the undelivered earlier one, so with no lead
+  they leave one entry, not one per pass.
+- **Cap:** 200 undelivered non-owner messages per target (`store::host::INBOX_CAP`). **Overflow
+  rule:** admitting one more retires the oldest undelivered non-owner message (state `failed`, its
+  receipt kept 7 days). Owner messages are never retired and do not count toward the cap.
+  `inbox_is_bounded_and_keeps_owner_messages` covers both.
+- The long planner run (`docs/measurements.md`, milestone 4) shows the inbox was not the cause of
+  slice 3b's late RSS rise: the rise is still there with the summaries replacing one another. The
+  cap stays, as a bound on a store table that had none.
+
+## Choices and deviations
+
+- **A Telegram edit reaches the lead, with no seen mark.** Reviewed against the spec: MSG-01 makes
+  "edit" an event kind, TELE req. 18 polls edited messages, TELE req. 26 keeps the original message
+  ID for an edit, and MSG req. 6 gives the seen mark to new messages only. The spec is not silent, so
+  it wins over consistency with Discord (whose edits are never delivered, DISC-IN req. 15). The edit
+  goes as its own request labelled "this edits the owner's earlier message N", and its answer
+  replies to that message. `tests/relays.rs` now asserts the label and that no seen mark is added.
+- An uncertain answer part on Telegram or Slack ends that answer instead of being sent again:
+  neither platform enforces a nonce (MSG req. 8).
+- Plain channel messages in Slack without a mention, outside a remembered thread, are dropped.
+- Not done in this milestone: the Slack bot name and avatar are not set (MSG req. 14), and Slack
+  destinations are not tagged with the workspace.
+- **A thread reply is not judged before its thread is recorded.** `slack_threads_allowlist_acks_and_uploads`
+  failed in both of the first two full runs at a wait for an answer in the thread (the panic named
+  the fake's 30 s wait; its message was not kept); it passed alone and in a third full run. The
+  account records a thread only after the post's response, so a reply the owner sends as soon as
+  the post is visible can be read before the record exists and dropped as untagged, and nothing
+  reads it again until a reconnect; that race fits the failure [inference, not reproduced
+  deterministically]. Every post now holds a shared lock (`slack::POSTING`) from the request until
+  its thread is recorded (`post_and_record`, used by answers and destinations alike); an untagged
+  reply in an unrecorded thread waits for the posts in flight, at most 1 s of its 2.5 s admission
+  budget, then looks again. 24 parallel runs of the test passed after the change.
+
+## Lint fixes
+
+- Optional JSON body fields are inserted through `as_object_mut` instead of indexing.
+- `slack::upload` lost its byte transfer to `slack::transfer`; `cli::setup::sources` lost the
+  per-setting values to `value_of` and the relay settings to `relay_value`.
+- `room`/`root` bindings became `room`/`thread_ts`; the two `typing` methods that cannot type
+  return a ready future; the fakes' helpers consume their values.
+
+## Tests
+
+- `tests/relays.rs`: checks 1-5 through the real hub, the fake Telegram and the fake Slack and the
+  fake OMP; check 5 also covers the edit decision above.
+- `tests/contract_relays.rs` (new): check 5 against stock OMP on the loopback fake model with
+  Discord, Telegram and Slack all connected to their fakes: a Telegram and a Slack request each reach
+  the lead and are answered in place with a seen mark, then 20 more per relay for the
+  measurements.
+- Closing runs: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` clean; the full
+  `cargo test --no-fail-fast` passed twice in a row after the last code change (280 tests passed, 5
+  ignored, over the unit tests and every integration binary); each contract binary passed alone in
+  release with `CATALY_CONTRACT_OMP=1` against stock OMP 19.1.1 (`contract` 1, `contract_session` 5,
+  `contract_discord` 3, `contract_lanes` 2, `contract_relays` 1); `bun test extension/` 6 passed.

@@ -102,6 +102,8 @@ pub(crate) struct Env<R: Runtime> {
     /// Whether the lead's session is live (it counts toward the session cap).
     pub(crate) lead_live: Arc<dyn Fn() -> bool + Send + Sync>,
     pub(crate) threads: Arc<dyn Threads>,
+    /// Board posts on Telegram and Slack (`telegram:…`, `slack:…` destinations).
+    pub(crate) boards: Arc<dyn board::Board>,
 }
 
 /// Who calls (DESIGN 9.1).

@@ -483,7 +483,7 @@ fn owner_verbs(p: &Parsed, hub: &mut Client, as_json: bool) -> Option<Result<(),
     if let Some(done) = lead::verbs(p, hub, as_json) {
         return Some(done);
     }
-    if let Some(done) = lead::discord_verbs(p, hub, as_json) {
+    if let Some(done) = lead::relay_verbs(p, hub, as_json) {
         return Some(done);
     }
     let target = p.args.first().cloned();

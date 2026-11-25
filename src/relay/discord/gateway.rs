@@ -13,9 +13,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
-use tokio_tungstenite::{WebSocketStream, client_async_with_config};
 
 use crate::relay::http::{self, Io};
 
@@ -269,14 +268,7 @@ impl Gateway {
     }
 
     async fn open(url: &WsUrl) -> Result<Socket, String> {
-        let io = http::connect(url.tls, &url.host, url.port).await?;
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(FRAME_MAX))
-            .max_frame_size(Some(FRAME_MAX));
-        let (ws, _) = client_async_with_config(url.text(), io, Some(config))
-            .await
-            .map_err(|e| format!("WebSocket handshake failed: {e}"))?;
-        Ok(ws)
+        http::websocket(url.tls, &url.host, url.port, &url.text(), FRAME_MAX).await
     }
 
     fn identify(&self) -> Value {

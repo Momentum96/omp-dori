@@ -76,6 +76,38 @@ pub(crate) fn mask(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// [`mask`], then Basic credentials and "password/secret/token/api key = value" pairs, whose name
+/// stays visible (DISC-IN req. 56).
+pub(crate) fn mask_all(text: &str) -> String {
+    static PAIRS: std::sync::LazyLock<Option<regex::Regex>> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?-u:\b)((?i-u:basic)[ \t]+|(?i-u:password|passwd|secret|token|api[ _-]?key)[ \t]*[:=][ \t]*)("[^"\n]*"|'[^'\n]*'|[^ \t\r\n,;]+)"#,
+        )
+        .ok()
+    });
+    let masked = mask(text);
+    match PAIRS.as_ref() {
+        Some(re) => re
+            .replace_all(&masked, |c: &regex::Captures<'_>| {
+                let name = c.get(1).map_or("", |m| m.as_str());
+                let value = c.get(2).map_or("", |m| m.as_str());
+                // "Basic" needs a credential-shaped word, so prose such as "basic idea" stays.
+                let credential = value.len() >= 12
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+                    && value.bytes().any(|b| b.is_ascii_digit() || b == b'=');
+                if name.trim().eq_ignore_ascii_case("basic") && !credential {
+                    format!("{name}{value}")
+                } else {
+                    format!("{name}{MASK}")
+                }
+            })
+            .into_owned(),
+        None => masked.into_owned(),
+    }
+}
+
 /// The name of the first built-in shape found in `bytes`, never the matched text.
 pub(crate) fn find_rule(bytes: &[u8]) -> Option<&'static str> {
     let (start, _) = next_secret(bytes, 0)?;

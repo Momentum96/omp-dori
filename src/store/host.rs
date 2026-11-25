@@ -12,6 +12,14 @@ pub(crate) const RECEIPT_CAP: i64 = 512;
 const ONCE_KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 /// Finished inbox rows, deliveries and their receipts are kept this long (DESIGN 7.2).
 const FINISHED_KEEP_MS: i64 = 7 * 24 * 3600 * 1000;
+/// An identity with this prefix names the latest note of a recurring kind (planner summaries,
+/// recaps, digests): a new one retires the undelivered earlier one with the same identity instead of
+/// being refused as a repeat, and it may come again after delivery.
+pub(crate) const LATEST_PREFIX: &str = "latest:";
+/// Undelivered messages per target that are not the owner's. Overflow rule: admitting one more
+/// retires the oldest undelivered non-owner message (state `failed`, kept 7 days for its receipt).
+/// Owner messages are never retired and do not count.
+pub(crate) const INBOX_CAP: i64 = 200;
 
 /// One session record (HOST req. 6, 69).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,16 +436,32 @@ fn admit(tx: &Transaction<'_>, a: &Admit, now: i64) -> rusqlite::Result<Admitted
         }
     }
     if let Some(identity) = &a.identity {
-        let seen: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM once_ids WHERE target = ?1 AND identity = ?2 AND at_ms >= ?3) \
-             OR EXISTS (SELECT 1 FROM inbox WHERE target = ?1 AND identity = ?2 \
-                        AND state IN ('pending', 'sent', 'in_doubt'))",
-            params![a.target, identity, now - ONCE_KEEP_MS],
-            |r| r.get(0),
-        )?;
-        if seen {
-            return Ok(Admitted::Seen);
+        if identity.starts_with(LATEST_PREFIX) {
+            tx.execute(
+                "UPDATE inbox SET state = 'failed', updated_ms = ?3 \
+                 WHERE target = ?1 AND identity = ?2 AND state = 'pending' AND owner = 0",
+                params![a.target, identity, now],
+            )?;
+        } else {
+            let seen: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM once_ids WHERE target = ?1 AND identity = ?2 AND at_ms >= ?3) \
+                 OR EXISTS (SELECT 1 FROM inbox WHERE target = ?1 AND identity = ?2 \
+                            AND state IN ('pending', 'sent', 'in_doubt'))",
+                params![a.target, identity, now - ONCE_KEEP_MS],
+                |r| r.get(0),
+            )?;
+            if seen {
+                return Ok(Admitted::Seen);
+            }
         }
+    }
+    if !a.owner {
+        tx.execute(
+            "UPDATE inbox SET state = 'failed', updated_ms = ?3 WHERE id IN ( \
+                 SELECT id FROM inbox WHERE target = ?1 AND state = 'pending' AND owner = 0 \
+                 ORDER BY id DESC LIMIT -1 OFFSET ?2)",
+            params![a.target, INBOX_CAP - 1, now],
+        )?;
     }
     tx.execute(
         "INSERT INTO inbox (target, sender, text, urgent, owner, identity, state, created_ms, updated_ms) \

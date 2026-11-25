@@ -6,6 +6,7 @@
 pub(crate) mod coord;
 pub(crate) mod lanes;
 pub(crate) mod owner;
+pub(crate) mod relays;
 pub(crate) mod session;
 
 use std::collections::BTreeMap;
@@ -43,6 +44,9 @@ pub(crate) struct Config {
     pub(crate) hub: HubSettings,
     pub(crate) omp: OmpSettings,
     pub(crate) discord: DiscordSettings,
+    pub(crate) telegram: relays::TelegramSettings,
+    pub(crate) slack: relays::SlackSettings,
+    pub(crate) context: relays::ContextSettings,
     pub(crate) outgoing: Checks,
     pub(crate) limits: LimitsSettings,
     pub(crate) health: HealthSettings,
@@ -63,6 +67,9 @@ impl Default for Config {
             },
             omp: OmpSettings { path: "omp".into() },
             discord: DiscordSettings::default(),
+            telegram: relays::TelegramSettings::default(),
+            slack: relays::SlackSettings::default(),
+            context: relays::ContextSettings::default(),
             outgoing: Checks::default(),
             limits: LimitsSettings {
                 enabled: false,
@@ -185,6 +192,13 @@ pub(crate) enum Destination {
     Command { argv: Vec<String> },
     /// A Discord channel or thread.
     Discord { channel: ChannelRef },
+    /// A Telegram chat, optionally one forum topic of it.
+    Telegram { chat: i64, topic: Option<i64> },
+    /// A Slack conversation, optionally one thread of it.
+    Slack {
+        channel: String,
+        thread: Option<String>,
+    },
 }
 
 /// One configured job.
@@ -435,10 +449,43 @@ fn destination(
             }
             None => None,
         },
+        Some("telegram") => {
+            let chat = s.required_string(errors, "chat").and_then(|c| {
+                let id = c.parse::<i64>().ok().filter(|n| *n != 0);
+                if id.is_none() {
+                    errors.push(s.error("chat", "expected a Telegram chat ID"));
+                }
+                id
+            });
+            let topic = s.integer(errors, "topic", 1, i64::from(i32::MAX));
+            chat.map(|chat| Destination::Telegram { chat, topic })
+        }
+        Some("slack") => {
+            let channel = s.required_string(errors, "channel").and_then(|c| {
+                let ok = relays::slack_channel(c);
+                if !ok {
+                    errors.push(s.error("channel", "expected a Slack conversation ID (C, G or D)"));
+                }
+                ok.then(|| c.to_string())
+            });
+            let thread = s.string(errors, "thread").and_then(|t| {
+                let ok = crate::relay::slack::valid_ts(t);
+                if !ok {
+                    errors.push(s.error(
+                        "thread",
+                        "expected a message timestamp such as 1700000000.000100",
+                    ));
+                }
+                ok.then(|| t.to_string())
+            });
+            channel.map(|channel| Destination::Slack { channel, thread })
+        }
         Some(other) => {
             errors.push(s.error(
                 "kind",
-                &format!("unknown destination kind '{other}' (this build knows: command, discord)"),
+                &format!(
+                    "unknown destination kind '{other}' (this build knows: command, discord, telegram, slack)"
+                ),
             ));
             None
         }
@@ -528,6 +575,13 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
     );
     lanes::parse(errors, root, &mut config.lanes);
     coord::parse(errors, root, &mut config.coord);
+    relays::parse(
+        errors,
+        root,
+        &mut config.telegram,
+        &mut config.slack,
+        &mut config.context,
+    );
 }
 
 fn job(
@@ -1160,7 +1214,7 @@ dry_run = true
             ["destinations.d.channel: required"]
         );
         assert!(
-            errors("[destinations.d]\nkind = \"slack\"\n")[0].contains("unknown destination kind")
+            errors("[destinations.d]\nkind = \"matrix\"\n")[0].contains("unknown destination kind")
         );
         assert!(errors("[jobs.\"bad name\"]\nkind = \"once\"\n")[0].starts_with("jobs.bad name"));
         assert!(errors("not toml =")[0].starts_with("(file)"));

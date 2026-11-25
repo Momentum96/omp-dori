@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 
 pub mod discord;
 pub mod model;
+pub mod slack;
+pub mod telegram;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 

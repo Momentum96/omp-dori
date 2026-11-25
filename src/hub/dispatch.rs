@@ -29,7 +29,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 32] = [
+const METHODS: [Method; 39] = [
     Method {
         name: method::STATUS,
         needs: Authority::Owner,
@@ -185,6 +185,41 @@ const METHODS: [Method; 32] = [
     },
     Method {
         name: method::DISCORD_RESET,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::TELEGRAM_STATUS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::TELEGRAM_RELEASE,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::TELEGRAM_RESET,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::SLACK_STATUS,
+        needs: Authority::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::SLACK_RELEASE,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::SLACK_RESET,
+        needs: Authority::Owner,
+        mutating: true,
+    },
+    Method {
+        name: method::SLACK_UPLOAD,
         needs: Authority::Owner,
         mutating: true,
     },
@@ -398,7 +433,13 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
             prs: hub.jobs.pr_list().await?,
         }),
         lead if lead.starts_with("lead.") => lead_method(hub, lead, raw).await,
-        discord if discord.starts_with("discord.") => discord_method(hub, discord, raw).await,
+        relay
+            if relay.starts_with("discord.")
+                || relay.starts_with("telegram.")
+                || relay.starts_with("slack.") =>
+        {
+            relay_method(hub, relay, raw).await
+        }
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),
@@ -491,26 +532,33 @@ async fn lead_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure
     }
 }
 
-/// The `discord.*` methods: intake status (DISC-IN req. 60), releasing a held room, and the reset of
-/// intake state bound to another bot or owner (DISC-IN req. 3).
-async fn discord_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
+/// The `<relay>.*` methods: intake status (DISC-IN req. 60, MSG req. 15), releasing a held room, the
+/// reset of intake state bound to another account or owner (DISC-IN req. 3), and `slack.upload`.
+async fn relay_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
     use crate::store::relay::{OWED_WINDOW_MS, RelayWrite};
     let p: proto::DiscordParams = params(raw)?;
-    let relay = crate::relay::discord::intake::NAME;
+    let (relay, verb) = name.split_once('.').unwrap_or((name, ""));
+    let shared = match relay {
+        "discord" => &hub.discord,
+        "telegram" => &hub.telegram,
+        _ => &hub.slack,
+    };
     let store_failure = |e: crate::store::StoreError| Failure {
         code: code::INTERNAL,
         message: e.to_string(),
     };
-    match name {
-        method::DISCORD_STATUS => {
+    let relay_name = relay.to_string();
+    match verb {
+        "status" => {
             let since = crate::sys::now_ms() - OWED_WINDOW_MS;
+            let r = relay_name.clone();
             let (counts, positions, owed) = hub
                 .store
-                .read(move |r| {
+                .read(move |s| {
                     Ok((
-                        r.relay_counts(relay, since)?,
-                        r.positions(relay)?,
-                        r.owed(relay, since)?,
+                        s.relay_counts(&r, since)?,
+                        s.positions(&r)?,
+                        s.owed(&r, since)?,
                     ))
                 })
                 .await
@@ -531,8 +579,12 @@ async fn discord_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Fail
                 .into_iter()
                 .filter(|o| o.settled_ms.is_none())
                 .collect();
-            let health = hub.discord.health();
+            let health = shared.health();
             let healthy = health.state == "connected" && health.caught_up && counts.queued == 0;
+            let lag = shared
+                .receive_lag
+                .summary()
+                .map(proto::LatencySummary::from);
             ok(&serde_json::json!({
                 "health": health,
                 "healthy": healthy,
@@ -540,42 +592,86 @@ async fn discord_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Fail
                 "held": held,
                 "rooms": rooms,
                 "owed": open,
+                "receive_lag": lag,
             }))
         }
-        method::DISCORD_RELEASE => {
+        "release" => {
             let room = p
                 .room
-                .filter(|r| crate::relay::discord::Snowflake::parse(r).is_some())
+                .filter(|r| !r.is_empty() && r.len() <= 128)
                 .ok_or(Failure {
                     code: code::BAD_REQUEST,
-                    message: "name the room (a Discord channel or thread ID)".into(),
+                    message: "name the room".into(),
                 })?;
             hub.store
                 .relay(RelayWrite::Hold {
-                    relay: relay.into(),
+                    relay: relay_name,
                     room,
                     reason: None,
                 })
                 .await
                 .map_err(store_failure)?;
-            hub.discord.kick.notify_one();
+            shared.kick.notify_one();
             Ok(Value::Object(serde_json::Map::new()))
         }
-        method::DISCORD_RESET => {
+        "reset" => {
             hub.store
-                .relay(RelayWrite::Reset {
-                    relay: relay.into(),
-                })
+                .relay(RelayWrite::Reset { relay: relay_name })
                 .await
                 .map_err(store_failure)?;
-            hub.discord.kick.notify_one();
+            shared.kick.notify_one();
             Ok(Value::Object(serde_json::Map::new()))
         }
+        "upload" if relay == "slack" => slack_upload(hub, p).await,
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),
         }),
     }
+}
+
+/// `slack.upload`: one file into a conversation (SLACK req. 47); its file ID.
+async fn slack_upload(hub: &Hub, p: proto::DiscordParams) -> Result<Value, Failure> {
+    let bad = |message: String| Failure {
+        code: code::BAD_REQUEST,
+        message,
+    };
+    let channel = p
+        .channel
+        .ok_or_else(|| bad("name the conversation".into()))?;
+    let file = std::path::PathBuf::from(p.file.ok_or_else(|| bad("name the file".into()))?);
+    if !file.is_absolute() {
+        return Err(bad("the file path must be absolute".into()));
+    }
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| bad("the path names no file".into()))?;
+    let read = file.clone();
+    let bytes = tokio::task::spawn_blocking(move || {
+        let size = std::fs::metadata(&read)?.len();
+        if size > crate::relay::slack::UPLOAD_MAX {
+            return Err(std::io::Error::from(std::io::ErrorKind::FileTooLarge));
+        }
+        std::fs::read(&read)
+    })
+    .await
+    .map_err(|e| bad(e.to_string()))?
+    .map_err(|e| bad(format!("{}: {}", file.display(), e.kind())))?;
+    let config = hub.config();
+    let api =
+        crate::relay::slack::Api::from_config(&config, &hub.paths.config_file).map_err(bad)?;
+    let id = crate::relay::slack::upload(&api, &channel, p.thread.as_deref(), &name, bytes)
+        .await
+        .map_err(|e| Failure {
+            code: code::INTERNAL,
+            message: if e.uncertain {
+                format!("the upload may or may not have been posted: {e}")
+            } else {
+                format!("not uploaded: {e}")
+            },
+        })?;
+    ok(&serde_json::json!({ "file": id }))
 }
 
 /// The account-limits view (WS req. 37-39): off unless enabled; never retries or changes anything.

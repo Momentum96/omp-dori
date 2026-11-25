@@ -204,9 +204,16 @@ impl<R: Runtime> Lanes<R> {
         };
         let mut next: Option<i64> = None;
         for dest in destinations {
-            let Some(channel) = dest.strip_prefix("discord:") else {
-                continue;
-            };
+            // Discord channels go through the thread client; Telegram and Slack through the chat
+            // boards, which take the whole destination.
+            let (board, channel): (&dyn Board, &str) =
+                if let Some(c) = dest.strip_prefix("discord:") {
+                    (self.env.threads.as_ref(), c)
+                } else if dest.starts_with("telegram:") || dest.starts_with("slack:") {
+                    (self.env.boards.as_ref(), dest.as_str())
+                } else {
+                    continue;
+                };
             let (post, version) = match docs::get::<Post>(&self.env.store, BOARD, &dest).await {
                 Ok(Some(p)) => p,
                 Ok(None) => (Post::default(), 0),
@@ -234,7 +241,7 @@ impl<R: Runtime> Lanes<R> {
             if post.message.is_none() {
                 stored += 1;
             }
-            let posted = step(self.env.threads.as_ref(), channel, &post, &body, now, write).await;
+            let posted = step(board, channel, &post, &body, now, write).await;
             if let Some(p) = posted
                 && let Err(e) = docs::put(&self.env.store, BOARD, &dest, &p, Some(stored)).await
             {
@@ -248,8 +255,15 @@ impl<R: Runtime> Lanes<R> {
     pub(super) async fn board_found(&self, input: &Value) -> Result<Value, String> {
         let dest = need(input, "destination")?;
         let message = need(input, "message")?;
-        if !message.chars().all(|c| c.is_ascii_digit()) || !(17..=20).contains(&message.len()) {
-            return Err("message must be a Discord message ID".into());
+        let valid = if dest.starts_with("telegram:") {
+            message.parse::<i64>().is_ok_and(|m| m > 0)
+        } else if dest.starts_with("slack:") {
+            crate::relay::slack::valid_ts(message)
+        } else {
+            message.chars().all(|c| c.is_ascii_digit()) && (17..=20).contains(&message.len())
+        };
+        if !valid {
+            return Err("message must be the found message's ID (Slack: its timestamp)".into());
         }
         let (mut post, v) = docs::get::<Post>(&self.env.store, BOARD, dest)
             .await?

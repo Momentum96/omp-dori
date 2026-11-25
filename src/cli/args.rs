@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 37] = [
+pub(crate) const COMMANDS: [Spec; 44] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -125,6 +125,13 @@ pub(crate) const COMMANDS: [Spec; 37] = [
             "--discord-token-file",
             "--discord-owner",
             "--discord-channels",
+            "--telegram-token-file",
+            "--telegram-owner",
+            "--telegram-group",
+            "--telegram-topic",
+            "--slack-token-file",
+            "--slack-role",
+            "--slack-owner",
             "--log-level",
         ],
         summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview)",
@@ -282,6 +289,55 @@ pub(crate) const COMMANDS: [Spec; 37] = [
         flags: &["--json"],
         values: &[],
         summary: "forget Discord intake state (needed after changing the bot or the owner)",
+    },
+    Spec {
+        path: &["telegram", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show Telegram intake: polling, queue, held rooms, owed replies and receive lag",
+    },
+    Spec {
+        path: &["telegram", "release"],
+        args: &["room"],
+        flags: &["--json"],
+        values: &[],
+        summary: "release a held Telegram room; its in-doubt message counts as handled",
+    },
+    Spec {
+        path: &["telegram", "reset"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "forget Telegram intake state (needed after changing the bot or the owner)",
+    },
+    Spec {
+        path: &["slack", "status"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "show Slack intake: socket, catch-up, queue, held rooms, remembered threads",
+    },
+    Spec {
+        path: &["slack", "release"],
+        args: &["room"],
+        flags: &["--json"],
+        values: &[],
+        summary: "release a held Slack room; its in-doubt message counts as handled",
+    },
+    Spec {
+        path: &["slack", "reset"],
+        args: &[],
+        flags: &["--json"],
+        values: &[],
+        summary: "forget Slack intake state (needed after changing the account or the owner)",
+    },
+    Spec {
+        path: &["slack", "upload"],
+        args: &["channel", "file"],
+        flags: &["--json"],
+        values: &["--thread"],
+        summary: "upload a file into a Slack conversation (optionally a thread)",
     },
 ];
 

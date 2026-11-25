@@ -11,6 +11,8 @@ use crate::proto::method;
 
 /// A start binds within 30 s and a stop ends within 22 s (DESIGN 9.4); both with margin.
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(75);
+/// A Slack upload: ticket and completion calls plus the 60 s transfer.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(150);
 
 fn text(v: &Value, key: &str) -> String {
     match v.get(key) {
@@ -63,14 +65,14 @@ fn simple(hub: &mut Client, name: &str, params: Value, as_json: bool) -> Result<
     })
 }
 
-fn print_discord(v: &Value) {
+fn print_relay(relay: &str, v: &Value) {
     let h = v.get("health").cloned().unwrap_or(Value::Null);
     let reason = h
         .get("reason")
         .and_then(Value::as_str)
         .map_or_else(String::new, |r| format!(" ({r})"));
     out::line(&format!(
-        "discord  {}{reason}, {}",
+        "{relay:<8} {}{reason}, {}",
         text(&h, "state"),
         if v.get("healthy") == Some(&Value::Bool(true)) {
             "healthy"
@@ -113,29 +115,77 @@ fn print_discord(v: &Value) {
             text(held, "reason")
         ));
     }
+    if let Some(lag) = v.get("receive_lag").filter(|l| !l.is_null()) {
+        let ms = |k: &str| lag.get(k).and_then(Value::as_u64).unwrap_or(0) / 1000;
+        out::line(&format!(
+            "lag      p50 {} ms, p90 {} ms, p99 {} ms, max {} ms ({} readings)",
+            ms("p50_us"),
+            ms("p90_us"),
+            ms("p99_us"),
+            ms("max_us"),
+            text(lag, "count")
+        ));
+    }
     if let Some(e) = h.get("last_error").and_then(Value::as_str) {
         out::line(&format!("last     {e}"));
     }
 }
 
-/// `discord` verbs; `None` for anything else.
-pub(super) fn discord_verbs(
+/// `discord`, `telegram` and `slack` verbs; `None` for anything else.
+pub(super) fn relay_verbs(
     p: &Parsed,
     hub: &mut Client,
     as_json: bool,
 ) -> Option<Result<(), Failure>> {
-    let result = match p.spec.path {
-        ["discord", "status"] => hub
-            .call(method::DISCORD_STATUS, json!({}), CALL_TIMEOUT)
-            .map_err(Failure::from)
-            .and_then(|v| show(v, as_json, |v: Value| print_discord(&v))),
-        ["discord", "release"] => simple(
-            hub,
+    let [relay, verb] = p.spec.path else {
+        return None;
+    };
+    let (status, release, reset) = match *relay {
+        "discord" => (
+            method::DISCORD_STATUS,
             method::DISCORD_RELEASE,
-            json!({ "room": p.args.first() }),
-            as_json,
+            method::DISCORD_RESET,
         ),
-        ["discord", "reset"] => simple(hub, method::DISCORD_RESET, json!({}), as_json),
+        "telegram" => (
+            method::TELEGRAM_STATUS,
+            method::TELEGRAM_RELEASE,
+            method::TELEGRAM_RESET,
+        ),
+        "slack" => (
+            method::SLACK_STATUS,
+            method::SLACK_RELEASE,
+            method::SLACK_RESET,
+        ),
+        _ => return None,
+    };
+    let result = match *verb {
+        "status" => hub
+            .call(status, json!({}), CALL_TIMEOUT)
+            .map_err(Failure::from)
+            .and_then(|v| show(v, as_json, |v: Value| print_relay(relay, &v))),
+        "release" => simple(hub, release, json!({ "room": p.args.first() }), as_json),
+        "reset" => simple(hub, reset, json!({}), as_json),
+        "upload" if *relay == "slack" => {
+            let file = p.args.get(1).map(|f| {
+                let path = std::path::Path::new(f);
+                std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+            });
+            hub.call(
+                method::SLACK_UPLOAD,
+                json!({
+                    "channel": p.args.first(),
+                    "file": file.map(|f| f.display().to_string()),
+                    "thread": p.value("--thread"),
+                }),
+                UPLOAD_TIMEOUT,
+            )
+            .map_err(Failure::from)
+            .and_then(|v| {
+                show(v, as_json, |v: Value| {
+                    out::line(&format!("uploaded {}", text(&v, "file")));
+                })
+            })
+        }
         _ => return None,
     };
     Some(result)

@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{Notify, broadcast, watch};
 
@@ -22,12 +21,13 @@ use crate::host::lead::{Events, Lead};
 use crate::host::{Runtime, SessionEvent};
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
+pub(crate) use crate::relay::intake::Shared;
+use crate::relay::intake::{Stop, supervise};
 use crate::relay::pipeline::{Pipeline, Step};
 use crate::relay::text::{self, Checks, DISCORD_LIMIT};
-use crate::relay::{PartOutcome, Relay};
+use crate::relay::{Facts, Inbound, PartOutcome, Relay};
 use crate::store::Store;
 use crate::store::relay::{Arrived, QueueRow, RelayDone, RelayWrite};
-use crate::sys::latency::Latency;
 use crate::sys::now_ms;
 
 /// The relay's store key.
@@ -44,58 +44,12 @@ const TICK: Duration = Duration::from_secs(3);
 const IDLE_TICK: Duration = Duration::from_secs(30);
 /// Typing lasts about 10 s on Discord; it is renewed while a turn runs.
 const TYPING_EVERY: Duration = Duration::from_secs(8);
-/// A failed start that may pass is tried again after this long.
-const RETRY_START: Duration = Duration::from_secs(30);
 /// Catch-up retry backoff (DISC-IN req. 34).
 const CATCH_UP_FIRST: Duration = Duration::from_secs(2);
 const CATCH_UP_MAX: Duration = Duration::from_secs(30);
 /// The bundled avatar (DISC-OUT req. 85).
 const AVATAR: &[u8] = include_bytes!("../../../assets/avatar.jpg");
 const AVATAR_MAX: usize = 512 * 1024;
-
-/// Intake health (DISC-IN req. 60) for `cataly discord status`.
-#[derive(Debug, Clone, Default, Serialize)]
-pub(crate) struct Health {
-    /// `off`, `starting`, `connecting`, `connected`, `stopped`.
-    pub(crate) state: String,
-    pub(crate) reason: Option<String>,
-    pub(crate) bot: Option<String>,
-    pub(crate) owner: Option<String>,
-    pub(crate) connected_ms: Option<i64>,
-    /// The catch-up read owed for this connection finished.
-    pub(crate) caught_up: bool,
-    pub(crate) buttons: bool,
-    pub(crate) followed_threads: usize,
-    pub(crate) last_event_ms: Option<i64>,
-    pub(crate) last_error: Option<String>,
-}
-
-/// What the hub keeps of intake: health, the restart signal and the measurements.
-#[derive(Default)]
-pub(crate) struct Shared {
-    health: Mutex<Health>,
-    /// Restarts intake (after a reset or a release).
-    pub(crate) kick: Notify,
-    /// Frame read to OMP `agent_start` (DESIGN 2.3).
-    pub(crate) wake_latency: Latency,
-    /// Connection established to its catch-up read finished.
-    pub(crate) catch_up_latency: Latency,
-}
-
-impl Shared {
-    pub(crate) fn health(&self) -> Health {
-        self.lock().clone()
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Health> {
-        self.health.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn set(&self, f: impl FnOnce(&mut Health)) {
-        f(&mut self.lock());
-    }
-}
-
 /// The REST client for a config.
 pub(crate) type RestFor = Arc<dyn Fn(&Config) -> Result<Arc<Rest>, String> + Send + Sync>;
 
@@ -124,6 +78,7 @@ fn id(text: &str) -> Result<Snowflake, String> {
 
 impl Relay for DiscordRelay {
     const NAME: &'static str = NAME;
+    const REPEATABLE: bool = true;
 
     fn parts(&self, answer: &str) -> Result<Vec<String>, String> {
         let answer = answer.trim();
@@ -135,6 +90,12 @@ impl Relay for DiscordRelay {
 
     fn nonce(&self, room: &str, source: &str, index: usize) -> String {
         nonce(&format!("reply:{}:{room}:{source}", self.bot), index)
+    }
+
+    fn normalise(&self, row: &QueueRow) -> Result<Inbound, String> {
+        let raw: Value = serde_json::from_str(&row.raw).map_err(|e| e.to_string())?;
+        let parent = row.parent.as_deref().and_then(Snowflake::parse);
+        types::normalise(&raw, parent)
     }
 
     async fn post(
@@ -160,6 +121,22 @@ impl Relay for DiscordRelay {
 
     async fn typing(&self, room: &str) -> Result<(), String> {
         self.rest.typing(id(room)?).await.map_err(|e| e.to_string())
+    }
+
+    async fn facts(&self, room: &str) -> Result<Facts, String> {
+        let info = self
+            .rest
+            .channel(id(room)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        let kind = info.get("type").and_then(Value::as_u64);
+        Ok(Facts {
+            name: str_field(&info, "name").map(str::to_string),
+            topic: str_field(&info, "topic")
+                .filter(|t| !t.trim().is_empty())
+                .map(str::to_string),
+            dm: matches!(kind, Some(1 | 3)),
+        })
     }
 }
 
@@ -208,17 +185,7 @@ enum InScope {
     No,
 }
 
-/// Why a start or a run ended.
-enum Stop {
-    /// Waits for a config change or the owner (bad token, binding, permission, intents).
-    Fatal(String),
-    /// May pass by itself (network); tried again after 30 s.
-    Retry(String),
-    /// The config changed or the owner asked: start again now.
-    Again,
-    Shutdown,
-}
-
+/// Maps a REST failure at start to how intake stops.
 fn rest_stop(what: &str, e: &RestError) -> Stop {
     if e.status == Some(401) {
         Stop::Fatal(format!("{what}: the bot token was refused (401)"))
@@ -237,80 +204,36 @@ fn rest_stop(what: &str, e: &RestError) -> Stop {
 pub(crate) async fn run<T: Runtime>(
     shared: Arc<Shared>,
     env: Arc<Env<T>>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let mut config_rx = env.config.clone();
-    let mut reported: Option<String> = None;
-    loop {
-        if *shutdown.borrow() {
-            return Ok(());
-        }
-        let config = Arc::clone(&config_rx.borrow_and_update());
-        let wait = if config.discord.intake() {
-            shared.set(|h| {
-                h.state = "starting".into();
-                h.owner = config.discord.owner.map(|o| o.to_string());
-            });
-            let stop = match Intake::start(&shared, &env, &config).await {
-                Ok(intake) => intake.serve(shutdown.clone(), config_rx.clone()).await,
-                Err(stop) => stop,
-            };
-            match stop {
-                Stop::Shutdown => return Ok(()),
-                Stop::Again => continue,
-                Stop::Fatal(reason) | Stop::Retry(reason)
-                    if reported.as_deref() == Some(reason.as_str()) =>
-                {
-                    shared.set(|h| h.state = "stopped".into());
-                    Some(RETRY_START)
-                }
-                Stop::Fatal(reason) => {
-                    stopped(&shared, &env, &reason);
-                    reported = Some(reason);
-                    None
-                }
-                Stop::Retry(reason) => {
-                    stopped(&shared, &env, &reason);
-                    reported = Some(reason);
-                    Some(RETRY_START)
+    let off = |c: &Config| {
+        (!c.discord.intake()).then(|| "set [discord] owner and channels to start intake".into())
+    };
+    let (task, stop, rx) = (Arc::clone(&shared), shutdown.clone(), env.config.clone());
+    supervise(
+        NAME,
+        shared,
+        env.config.clone(),
+        shutdown,
+        Arc::clone(&env.events),
+        off,
+        move |config: Arc<Config>| {
+            let (shared, env, stop, rx) = (
+                Arc::clone(&task),
+                Arc::clone(&env),
+                stop.clone(),
+                rx.clone(),
+            );
+            async move {
+                shared.set(|h| h.owner = config.discord.owner.map(|o| o.to_string()));
+                match Intake::start(&shared, &env, &config).await {
+                    Ok(intake) => intake.serve(stop, rx).await,
+                    Err(stop) => stop,
                 }
             }
-        } else {
-            shared.set(|h| {
-                *h = Health {
-                    state: "off".into(),
-                    reason: Some("set [discord] owner and channels to start intake".into()),
-                    ..Health::default()
-                };
-            });
-            None
-        };
-        tokio::select! {
-            _ = config_rx.changed() => {}
-            () = shared.kick.notified() => {}
-            () = async {
-                match wait {
-                    Some(w) => tokio::time::sleep(w).await,
-                    None => std::future::pending().await,
-                }
-            } => {}
-            _ = shutdown.changed() => {}
-        }
-    }
-}
-
-fn stopped<T: Runtime>(shared: &Shared, env: &Env<T>, reason: &str) {
-    log::warn("Discord intake stopped", &[("reason", &reason)]);
-    shared.set(|h| {
-        h.state = "stopped".into();
-        h.reason = Some(reason.to_string());
-        h.caught_up = false;
-    });
-    (env.events)(
-        Emit::new(EventKind::RelayStopped, Severity::Warning, true, NAME)
-            .with("relay", NAME)
-            .with("reason", reason),
-    );
+        },
+    )
+    .await
 }
 
 /// One running intake.
@@ -396,11 +319,14 @@ impl<T: Runtime> Intake<T> {
         });
         let pipeline = Arc::new(Pipeline::new(
             relay,
-            env.store.clone(),
-            Arc::clone(&env.lead),
-            Arc::clone(&env.lanes),
-            env.spill_dir.clone(),
-            Arc::clone(&env.events),
+            crate::relay::pipeline::Parts {
+                store: env.store.clone(),
+                lead: Arc::clone(&env.lead),
+                lanes: Arc::clone(&env.lanes),
+                spill_dir: env.spill_dir.clone(),
+                events: Arc::clone(&env.events),
+                config: env.config.clone(),
+            },
             shared.wake_latency.clone(),
         ));
         shared.set(|h| {
@@ -1064,38 +990,20 @@ impl<T: Runtime> Intake<T> {
 
     /// Hands queued messages on, lowest first per room (DISC-IN req. 26-27, 40, 43, 49).
     async fn drain(self: &Arc<Self>) -> Result<(), String> {
-        let (queue, positions) = self
-            .store
-            .read(|r| Ok((r.queue(NAME)?, r.positions(NAME)?)))
+        let me = Arc::clone(self);
+        self.pipeline
+            .drain(move |row| {
+                let me = Arc::clone(&me);
+                async move {
+                    if !me.in_scope(&row) {
+                        log::info("queued message left scope; dropped", &[("room", &row.room)]);
+                        me.pipeline.finish(&row.room, &row.message, None).await?;
+                        return Ok(Step::Done);
+                    }
+                    me.handle(&row).await
+                }
+            })
             .await
-            .map_err(|e| e.to_string())?;
-        let held: HashSet<String> = positions
-            .iter()
-            .filter(|p| p.held.is_some())
-            .map(|p| p.room.clone())
-            .collect();
-        let mut blocked: HashSet<String> = held;
-        for row in queue {
-            if blocked.contains(&row.room) {
-                continue;
-            }
-            if !self.in_scope(&row) {
-                log::info("queued message left scope; dropped", &[("room", &row.room)]);
-                self.pipeline.finish(&row.room, &row.message, None).await?;
-                continue;
-            }
-            match self.handle(&row).await {
-                Ok(Step::Done | Step::Waiting) => {}
-                Ok(Step::Held(_)) => {
-                    blocked.insert(row.room.clone());
-                }
-                Err(e) => {
-                    log::warn("hand-off not made", &[("room", &row.room), ("error", &e)]);
-                    blocked.insert(row.room.clone());
-                }
-            }
-        }
-        Ok(())
     }
 
     fn in_scope(&self, row: &QueueRow) -> bool {
@@ -1105,9 +1013,7 @@ impl<T: Runtime> Intake<T> {
     }
 
     async fn handle(self: &Arc<Self>, row: &QueueRow) -> Result<Step, String> {
-        let raw: Value = serde_json::from_str(&row.raw).map_err(|e| e.to_string())?;
-        let parent = row.parent.as_deref().and_then(Snowflake::parse);
-        let inbound = match types::normalise(&raw, parent) {
+        let inbound = match self.pipeline.relay.normalise(row) {
             Ok(i) => i,
             Err(fault) => {
                 log::warn(
@@ -1118,50 +1024,34 @@ impl<T: Runtime> Intake<T> {
                 return Ok(Step::Done);
             }
         };
-        let found = {
-            let (room, message) = (row.room.clone(), row.message.clone());
-            self.store
-                .read(move |r| r.handoff(NAME, &room, &message))
-                .await
-                .map_err(|e| e.to_string())?
-        };
         let read_at = self
             .reads
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&row.message);
-        match found {
-            Some(h) if h.state == "handed" => self.pipeline.recheck(row, &h, &inbound).await,
-            Some(h) if h.state == "delivered" => {
-                self.pipeline
-                    .finish(&row.room, &row.message, Some("delivered"))
-                    .await?;
-                Ok(Step::Done)
-            }
-            Some(_) => self.pipeline.hand_off(row, &inbound, read_at).await,
-            None => {
-                // An answer to an open question goes there first (DISC-IN req. 40; DISC-OUT req. 71).
-                if self.answer_by_text(row, &inbound).await {
-                    self.pipeline.taken(row).await?;
-                    return Ok(Step::Done);
-                }
-                let inbound = self.ledger_answer(row, inbound).await;
-                let previous = self
-                    .store
-                    .read(|r| r.meta("owner_last_ms"))
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|v| v.parse::<i64>().ok());
-                let step = self.pipeline.hand_off(row, &inbound, read_at).await;
-                if let Some(previous) = previous
-                    && now_ms() - previous >= crate::jobs::duration_ms(self.settings.away)
-                {
-                    self.digest(previous);
-                }
-                step
-            }
+        if let Some(step) = self.pipeline.resume(row, &inbound, read_at).await? {
+            return Ok(step);
         }
+        // An answer to an open question goes there first (DISC-IN req. 40; DISC-OUT req. 71).
+        if self.answer_by_text(row, &inbound).await {
+            self.pipeline.taken(row).await?;
+            return Ok(Step::Done);
+        }
+        let inbound = self.ledger_answer(row, inbound).await;
+        let previous = self
+            .store
+            .read(|r| r.meta("owner_last_ms"))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+        let step = self.pipeline.hand_off(row, &inbound, read_at).await;
+        if let Some(previous) = previous
+            && now_ms() - previous >= crate::jobs::duration_ms(self.settings.away)
+        {
+            self.digest(previous);
+        }
+        step
     }
 }
 

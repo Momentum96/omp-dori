@@ -201,6 +201,19 @@ pub(crate) enum RelayWrite {
         message: String,
         open: bool,
     },
+    /// Replaces the relay's state document (Telegram's offset, batch time and guard).
+    State { relay: String, doc: String },
+    /// Stores one earlier-conversation row and deletes the space's rows older than `keep_ms`
+    /// (DISC-IN req. 55-56); the text is already masked and cut.
+    Recall {
+        relay: String,
+        space: String,
+        who: String,
+        conversation: String,
+        message: String,
+        text: String,
+        keep_ms: i64,
+    },
 }
 
 /// What a relay write returns.
@@ -210,6 +223,49 @@ pub(crate) enum RelayDone {
     Arrived(Arrived),
     /// The binding already recorded, when it differs from the one asked for.
     Bound(Option<(String, String)>),
+}
+
+/// One stored earlier-conversation row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecallRow {
+    pub(crate) at_ms: i64,
+    pub(crate) who: String,
+    pub(crate) conversation: String,
+    pub(crate) message: String,
+    pub(crate) text: String,
+}
+
+fn write_state(tx: &Transaction<'_>, change: &RelayWrite, now: i64) -> rusqlite::Result<RelayDone> {
+    match change {
+        RelayWrite::State { relay, doc } => {
+            tx.execute(
+                "INSERT INTO relay_state (relay, doc, updated_ms) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT (relay) DO UPDATE SET doc = excluded.doc, updated_ms = excluded.updated_ms",
+                params![relay, doc, now],
+            )?;
+        }
+        RelayWrite::Recall {
+            relay,
+            space,
+            who,
+            conversation,
+            message,
+            text,
+            keep_ms,
+        } => {
+            tx.execute(
+                "DELETE FROM recall WHERE relay = ?1 AND space = ?2 AND at_ms < ?3",
+                params![relay, space, now - keep_ms],
+            )?;
+            tx.execute(
+                "INSERT INTO recall (relay, space, at_ms, who, conversation, message, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![relay, space, now, who, conversation, message, text],
+            )?;
+        }
+        _ => {}
+    }
+    Ok(RelayDone::Done)
 }
 
 const POSITION_COLUMNS: &str = "room, position, parent, held";
@@ -328,6 +384,7 @@ fn reset(tx: &Transaction<'_>, relay: &str) -> rusqlite::Result<()> {
         "owed_replies",
         "outbox_parts",
         "open_questions",
+        "relay_state",
     ] {
         tx.execute(&format!("DELETE FROM {table} WHERE relay = ?1"), [relay])?;
     }
@@ -413,6 +470,7 @@ pub(super) fn write(
             write_replies(tx, change, now)
         }
         RelayWrite::Answer { .. } | RelayWrite::Question { .. } => write_marks(tx, change, now),
+        RelayWrite::State { .. } | RelayWrite::Recall { .. } => write_state(tx, change, now),
     }
 }
 
@@ -753,6 +811,41 @@ impl Reads {
             "SELECT {QUEUE_COLUMNS} FROM arrival_queue WHERE relay = ?1 ORDER BY seq, id"
         ))?;
         stmt.query_map([relay], queue_from_row)?.collect()
+    }
+
+    /// The relay's state document.
+    pub(crate) fn relay_state(&self, relay: &str) -> rusqlite::Result<Option<String>> {
+        self.0
+            .query_row(
+                "SELECT doc FROM relay_state WHERE relay = ?1",
+                [relay],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// The newest `limit` earlier-conversation rows of a space since `since_ms`, newest first.
+    pub(crate) fn recall(
+        &self,
+        relay: &str,
+        space: &str,
+        since_ms: i64,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<RecallRow>> {
+        let mut stmt = self.0.prepare(
+            "SELECT at_ms, who, conversation, message, text FROM recall \
+             WHERE relay = ?1 AND space = ?2 AND at_ms >= ?3 ORDER BY at_ms DESC, id DESC LIMIT ?4",
+        )?;
+        stmt.query_map(params![relay, space, since_ms, limit], |r| {
+            Ok(RecallRow {
+                at_ms: r.get(0)?,
+                who: r.get(1)?,
+                conversation: r.get(2)?,
+                message: r.get(3)?,
+                text: r.get(4)?,
+            })
+        })?
+        .collect()
     }
 
     pub(crate) fn flag(&self, relay: &str, flag: &str) -> rusqlite::Result<bool> {

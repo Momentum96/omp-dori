@@ -63,7 +63,9 @@ pub(crate) struct Hub {
     lead: Arc<Lead<Headless>>,
     lanes: Arc<crate::lanes::Lanes<Headless>>,
     agent_start: Latency,
-    pub(crate) discord: Arc<crate::relay::discord::intake::Shared>,
+    pub(crate) discord: Arc<crate::relay::intake::Shared>,
+    pub(crate) telegram: Arc<crate::relay::intake::Shared>,
+    pub(crate) slack: Arc<crate::relay::intake::Shared>,
     links: Arc<crate::host::bridge::Links>,
     streams: Arc<streams::Streams>,
 }
@@ -116,6 +118,10 @@ impl Hub {
             agent_start_latency: self.agent_start.summary().map(Into::into),
             discord_wake_latency: self.discord.wake_latency.summary().map(Into::into),
             discord_catch_up_latency: self.discord.catch_up_latency.summary().map(Into::into),
+            telegram_wake_latency: self.telegram.wake_latency.summary().map(Into::into),
+            telegram_receive_lag: self.telegram.receive_lag.summary().map(Into::into),
+            slack_wake_latency: self.slack.wake_latency.summary().map(Into::into),
+            slack_catch_up_latency: self.slack.catch_up_latency.summary().map(Into::into),
             lane_start_latency: self.lanes.start_latency.summary().map(Into::into),
         }
     }
@@ -331,7 +337,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         lead_cwd,
         paths.files_dir.clone(),
     );
-    let (lead, lanes, agent_start, discord) = sessions(
+    let (lead, lanes, agent_start, relays) = sessions(
         paths,
         &jobs,
         &omp,
@@ -355,7 +361,9 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         lead: Arc::clone(&lead),
         lanes: Arc::clone(&lanes),
         agent_start,
-        discord,
+        discord: relays.discord,
+        telegram: relays.telegram,
+        slack: relays.slack,
         links,
         streams: Arc::clone(&streams),
     });
@@ -394,12 +402,19 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     code
 }
 
-/// What `sessions` starts: the lead, the lanes, the `agent_start` ring and intake's shared state.
+/// The intake state of each relay.
+pub(crate) struct RelayShares {
+    discord: Arc<crate::relay::intake::Shared>,
+    telegram: Arc<crate::relay::intake::Shared>,
+    slack: Arc<crate::relay::intake::Shared>,
+}
+
+/// What `sessions` starts: the lead, the lanes, the `agent_start` ring and the relays' shared state.
 type Sessions = (
     Arc<Lead<Headless>>,
     Arc<crate::lanes::Lanes<Headless>>,
     Latency,
-    Arc<crate::relay::discord::intake::Shared>,
+    RelayShares,
 );
 
 /// The lead, the lanes and Discord intake, each under its supervised task; returns the lead, the
@@ -465,7 +480,39 @@ fn sessions(
         supervisor,
         shutdown,
     );
-    (lead, lanes, agent_start, discord)
+    let env = Arc::new(crate::relay::intake::Env {
+        config: config.clone(),
+        store: store.clone(),
+        lead: Arc::clone(&lead),
+        lanes: Arc::clone(&lanes),
+        events: Arc::clone(&events),
+        spill_dir: paths.files_dir.join("relay"),
+        config_file: paths.config_file.clone(),
+    });
+    let telegram = Arc::new(crate::relay::intake::Shared::default());
+    {
+        let (task, env, stop) = (Arc::clone(&telegram), Arc::clone(&env), shutdown.clone());
+        supervisor.spawn("telegram", move || {
+            crate::relay::telegram::run(Arc::clone(&task), Arc::clone(&env), stop.clone())
+        });
+    }
+    let slack = Arc::new(crate::relay::intake::Shared::default());
+    {
+        let (task, stop) = (Arc::clone(&slack), shutdown.clone());
+        supervisor.spawn("slack", move || {
+            crate::relay::slack::run(Arc::clone(&task), Arc::clone(&env), stop.clone())
+        });
+    }
+    (
+        lead,
+        lanes,
+        agent_start,
+        RelayShares {
+            discord,
+            telegram,
+            slack,
+        },
+    )
 }
 
 /// How the hub starts a headless session (DESIGN 4.2); the lead and every lane use it.
@@ -522,6 +569,11 @@ fn lanes(
             config: config.clone(),
             rest: Arc::new(move |config: &Config| rest.ctx().discord(config)),
         }),
+        boards: Arc::new(crate::relay::boards::ChatBoards {
+            config: config.clone(),
+            config_file: paths.config_file.clone(),
+            store: store.clone(),
+        }),
     })
 }
 
@@ -577,7 +629,7 @@ fn discord(
     store: &Store,
     supervisor: &Supervisor,
     shutdown: &watch::Receiver<bool>,
-) -> Arc<crate::relay::discord::intake::Shared> {
+) -> Arc<crate::relay::intake::Shared> {
     use crate::relay::discord::intake::{Env, Shared, run};
     let shared = Arc::new(Shared::default());
     let rest = jobs.clone();

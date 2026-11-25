@@ -12,6 +12,7 @@ const SAMPLES: usize = 1000;
 pub(crate) struct Summary {
     pub(crate) count: usize,
     pub(crate) p50_us: u64,
+    pub(crate) p90_us: u64,
     pub(crate) p95_us: u64,
     pub(crate) p99_us: u64,
     pub(crate) max_us: u64,
@@ -61,6 +62,7 @@ impl Latency {
         Some(Summary {
             count: sorted.len(),
             p50_us: at(50),
+            p90_us: at(90),
             p95_us: at(95),
             p99_us: at(99),
             max_us: at(100),

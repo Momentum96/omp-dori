@@ -66,6 +66,28 @@ fn wakes_lead(e: &EventRecord) -> bool {
     e.urgent && e.kind != EventKind::RelayHeld.name()
 }
 
+/// The inbox identity of an event. Recurring summaries carry one replacing identity per kind and
+/// subject, so an undelivered earlier one is retired instead of piling up while no lead runs; every
+/// other event is once-only by its ID.
+fn identity_of(e: &EventRecord) -> String {
+    const LATEST: [EventKind; 4] = [
+        EventKind::PlannerRun,
+        EventKind::LaneRecap,
+        EventKind::NotesRefresh,
+        EventKind::Digest,
+    ];
+    if LATEST.iter().any(|k| k.name() == e.kind) {
+        format!(
+            "{}{}:{}",
+            crate::store::host::LATEST_PREFIX,
+            e.kind,
+            e.subject
+        )
+    } else {
+        format!("event:{}", e.id)
+    }
+}
+
 async fn cursor(hub: &Hub) -> Result<i64, String> {
     let stored = hub
         .store
@@ -132,7 +154,7 @@ pub(crate) async fn route(hub: Arc<Hub>, mut stop: watch::Receiver<bool>) -> Res
                 text: text_of(&hub, e),
                 urgent: wakes_lead(e),
                 owner: false,
-                identity: Some(format!("event:{}", e.id)),
+                identity: Some(identity_of(e)),
                 request_id: None,
             };
             if let Err(why) = hub.lead.deliver(message).await {

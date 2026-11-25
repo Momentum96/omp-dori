@@ -260,3 +260,45 @@ the last 1,500 passes is not explained; with no lead, every pass leaves one unde
 event in the lead's inbox (6,000 at the end, 250 days of hourly passes), and reading that backlog
 is the likely cause [inference, not measured]. Slots added nothing measurable. macOS figures are
 not measured.
+
+## Milestone 4: Telegram and Slack (2026-11-25, Linux x64, release build, stock OMP 19.1.1)
+
+Commands: `cargo build --release`; `CATALY_CONTRACT_OMP=1 cargo test --release --test contract_relays
+-- --nocapture --test-threads=1` (the lead on stock OMP with the bridge, on the loopback fake model;
+Discord, Telegram and Slack all connected to their fakes; one Telegram and one Slack request, then 20
+more of each, each answered before the next; `cataly stats` after 10 s idle); the other contract
+binaries the same way; `cargo test --release --test coord -- --ignored --nocapture planner_pass`
+(one run, 6,005 passes, the carried inbox fix in place).
+
+| Measure | Result | Target |
+| --- | --- | --- |
+| Telegram intake: poll response read to OMP `agent_start` (`telegram_wake_latency`, 21 wakes) | p50 42.2 ms, p90 46.2 ms, p95 47.3 ms, max 63.6 ms | as Discord: p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Slack intake: Socket Mode frame read to OMP `agent_start` (`slack_wake_latency`, 21 wakes) | p50 32.9 ms, p90 39.7 ms, p95 40.6 ms, max 46.7 ms | as Discord |
+| Discord intake in the same build (`contract_discord`, 41 wakes) | p50 35.7 ms, p95 46.2 ms, p99 88.6 ms, max 127 ms (slice 2c: 38.1, 52.3) | p50 ≤ 150 ms, p95 ≤ 300 ms |
+| Telegram receive lag (`telegram_receive_lag`, 21 readings, nearest rank) | p50 474 ms, p90 887 ms, p99 954 ms, max 988 ms | none set |
+| Hub RSS, Discord, Telegram and Slack connected, the lead attached with its bridge, idle after 42 requests (OMP excluded) | 17.85 MiB (18,714,624 bytes) | ≤ 30 MiB idle |
+| Hub RSS, Discord only and the lead, after 40 wakes, a follow-up and 5 reconnects, same build | 15.83 MiB (16,601,088 bytes; slice 2c: 13.4 MiB) | ≤ 30 MiB idle |
+| Release binary (`cargo build --release`) | 13,080,312 bytes (12.47 MiB; slice 3b: 12,226,456) | none set |
+| Planner, 100 items, hub pass time (168 kept runs) | p50 1 ms, max 3 ms (slice 3b: the same) | none set |
+| Hub RSS over 6,005 planner passes with no lead, sampled every 500 | idle 13.40 MiB, 100 items 13.79, 5 passes 14.66; then 15.75, 16.21, 16.66, 17.07, 17.10, 17.10, 17.10, 17.13, 17.13, 17.21, 17.47, 17.66 MiB; slots active 17.69, ended 17.77 | none set |
+
+The receive lag is a floor of the fake, not of the hub: Telegram dates are whole seconds and the fake
+stamps each message with the current second, so a reading is the time since the start of that second
+plus the hub's lag, spread evenly over 0-1 s. On the real service it adds Telegram's own delivery.
+
+Three relays read 2.0 MiB above Discord alone in the same build; the two runs differ in traffic, so
+this is not a controlled share (the Telegram poller and Slack socket tasks, their HTTP clients and
+two more queues are the likely parts [inference, not broken down]). Discord alone rose 2.4 MiB since
+slice 2c (13.4 to 15.8 MiB) over milestones 3 and 4; the lead attached alone reads 14.5 MiB
+(`contract_session`, 15,224,832 bytes) and the lane base 13.7 MiB, which points at the hub's base
+rather than the relays [inference, not broken down]. The binary grew by 0.81 MiB with Telegram,
+Slack, the shared context lookup and the destinations.
+
+**The bounded inbox did not remove the late planner growth.** With no lead, each pass now replaces
+the one undelivered planner summary instead of adding one (`inbox_is_bounded_and_keeps_owner_messages`),
+yet the run rose 0.53 MiB over the last 1,500 passes (17.13 to 17.66 MiB), as in slice 3b (0.6 MiB),
+after the same plateau from pass 2,005 to pass 4,505. So the slice-3b inference that the inbox
+backlog caused it is refuted. The store still grows with every pass (the event log takes each
+planner event); the SQLite page caches filling with it remain the likely cause [inference, not
+measured]. The whole curve sits about 0.5 MiB above slice 3b's, the same step as the hub's base.
+macOS figures are not measured.

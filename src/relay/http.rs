@@ -65,6 +65,26 @@ impl Policy {
         attempts: 4,
         budget: Duration::from_secs(60),
     };
+    /// Telegram and Slack: 15 s per call, reads 5 attempts waiting 1 s doubling (MSG req. 9-10).
+    pub(crate) const CHAT: Self = Self {
+        attempt: Duration::from_secs(15),
+        attempts: 5,
+        budget: Duration::from_secs(120),
+    };
+    /// One attempt of a long poll: its wait plus 10 s (MSG req. 9); the poll loop retries.
+    pub(crate) const fn poll(wait: Duration) -> Self {
+        Self {
+            attempt: Duration::from_secs(wait.as_secs() + 10),
+            attempts: 1,
+            budget: Duration::ZERO,
+        }
+    }
+    /// File transfers: 60 s, one attempt (MSG req. 9).
+    pub(crate) const TRANSFER: Self = Self {
+        attempt: Duration::from_secs(60),
+        attempts: 1,
+        budget: Duration::ZERO,
+    };
 }
 
 /// A request. `path` starts with `/` and is joined to the base URL's path.
@@ -90,14 +110,15 @@ impl Response {
         self.headers.get(name).and_then(|v| v.to_str().ok())
     }
 
-    /// The server's requested delay: `Retry-After` in seconds, else a JSON `retry_after`.
-    fn retry_after(&self) -> Option<Duration> {
+    /// The server's requested delay: `Retry-After` in seconds, else a JSON `retry_after` at the top
+    /// or under `parameters` (Telegram).
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
         self.header("retry-after")
             .and_then(|v| v.trim().parse::<f64>().ok())
             .or_else(|| {
-                serde_json::from_slice::<serde_json::Value>(&self.body)
-                    .ok()?
-                    .get("retry_after")?
+                let v = serde_json::from_slice::<serde_json::Value>(&self.body).ok()?;
+                v.get("retry_after")
+                    .or_else(|| v.get("parameters")?.get("retry_after"))?
                     .as_f64()
             })
             .filter(|s| s.is_finite() && *s >= 0.0)
@@ -250,6 +271,33 @@ pub(crate) async fn connect(tls: bool, host: &str, port: u16) -> Result<Box<dyn 
     Ok(Box::new(stream))
 }
 
+/// A WebSocket client stream over [`connect`].
+pub(crate) type WebSocket = tokio_tungstenite::WebSocketStream<Box<dyn Io>>;
+
+/// Opens a WebSocket to `url` (`wss://`, or `ws://` for loopback) on `host:port`, frames capped at
+/// `frame_max` bytes; connect and handshake are each bounded.
+pub(crate) async fn websocket(
+    tls: bool,
+    host: &str,
+    port: u16,
+    url: &str,
+    frame_max: usize,
+) -> Result<WebSocket, String> {
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+    let io = connect(tls, host, port).await?;
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(frame_max))
+        .max_frame_size(Some(frame_max));
+    let (ws, _) = timeout(
+        Duration::from_secs(10),
+        tokio_tungstenite::client_async_with_config(url, io, Some(config)),
+    )
+    .await
+    .map_err(|_| "WebSocket handshake timed out".to_string())?
+    .map_err(|e| format!("WebSocket handshake failed: {e}"))?;
+    Ok(ws)
+}
+
 /// Sends `req` to `base` under `policy`, calling `observe` with every response (rate-limit headers).
 pub(crate) async fn call(
     base: &Base,
@@ -370,7 +418,7 @@ where
         .header(HOST, base.authority())
         .header(USER_AGENT, AGENT)
         .header(CONTENT_LENGTH, body.len());
-    if req.json.is_some() {
+    if req.json.is_some() && !req.headers.iter().any(|(name, _)| *name == CONTENT_TYPE) {
         builder = builder.header(CONTENT_TYPE, "application/json");
     }
     for (name, value) in &req.headers {

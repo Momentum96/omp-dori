@@ -54,6 +54,13 @@ pub(crate) mod method {
     pub(crate) const DISCORD_STATUS: &str = "discord.status";
     pub(crate) const DISCORD_RELEASE: &str = "discord.release";
     pub(crate) const DISCORD_RESET: &str = "discord.reset";
+    pub(crate) const TELEGRAM_STATUS: &str = "telegram.status";
+    pub(crate) const TELEGRAM_RELEASE: &str = "telegram.release";
+    pub(crate) const TELEGRAM_RESET: &str = "telegram.reset";
+    pub(crate) const SLACK_STATUS: &str = "slack.status";
+    pub(crate) const SLACK_RELEASE: &str = "slack.release";
+    pub(crate) const SLACK_RESET: &str = "slack.reset";
+    pub(crate) const SLACK_UPLOAD: &str = "slack.upload";
     /// A held slot request (a stream for the life of the connection).
     pub(crate) const SLOT: &str = "slot";
 }
@@ -234,16 +241,32 @@ pub(crate) struct Stats {
     /// Discord Gateway connection established to its catch-up read finished.
     #[serde(default)]
     pub(crate) discord_catch_up_latency: Option<LatencySummary>,
+    /// Telegram poll response read to OMP's `agent_start`.
+    #[serde(default)]
+    pub(crate) telegram_wake_latency: Option<LatencySummary>,
+    /// Telegram receive lag: receive time minus the message's date (TELE-07).
+    #[serde(default)]
+    pub(crate) telegram_receive_lag: Option<LatencySummary>,
+    /// Slack Socket Mode frame read to OMP's `agent_start`.
+    #[serde(default)]
+    pub(crate) slack_wake_latency: Option<LatencySummary>,
+    /// Slack socket established to its catch-up read finished.
+    #[serde(default)]
+    pub(crate) slack_catch_up_latency: Option<LatencySummary>,
     /// Lane spawn to its kickoff confirmed in the session file.
     #[serde(default)]
     pub(crate) lane_start_latency: Option<LatencySummary>,
 }
 
-/// Parameters of the `discord.*` methods.
+/// Parameters of the `<relay>.*` methods.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct DiscordParams {
     pub(crate) room: Option<String>,
+    /// `slack.upload`: the conversation, an optional thread, and the file.
+    pub(crate) channel: Option<String>,
+    pub(crate) thread: Option<String>,
+    pub(crate) file: Option<String>,
 }
 
 /// Parameters of the `lead.*` methods; each method reads the fields it needs.
@@ -293,6 +316,8 @@ pub(crate) struct LatencySummary {
     pub(crate) count: usize,
     pub(crate) p50_us: u64,
     #[serde(default)]
+    pub(crate) p90_us: u64,
+    #[serde(default)]
     pub(crate) p95_us: u64,
     pub(crate) p99_us: u64,
     pub(crate) max_us: u64,
@@ -335,6 +360,7 @@ impl From<Summary> for LatencySummary {
         Self {
             count: s.count,
             p50_us: s.p50_us,
+            p90_us: s.p90_us,
             p95_us: s.p95_us,
             p99_us: s.p99_us,
             max_us: s.max_us,

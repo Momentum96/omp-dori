@@ -18,12 +18,19 @@ use crate::sys::fs::{create_atomic, read_private, write_atomic};
 use crate::sys::paths::Paths;
 
 /// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 5] = [
+const MANAGED: [(&str, &str, &str); 12] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
     ("discord", "owner", "--discord-owner"),
     ("discord", "channels", "--discord-channels"),
+    ("telegram", "token_file", "--telegram-token-file"),
+    ("telegram", "owner", "--telegram-owner"),
+    ("telegram", "group", "--telegram-group"),
+    ("telegram", "topic", "--telegram-topic"),
+    ("slack", "token_file", "--slack-token-file"),
+    ("slack", "role", "--slack-role"),
+    ("slack", "owner", "--slack-owner"),
 ];
 const CONFIG_MAX: u64 = 1024 * 1024;
 
@@ -92,6 +99,28 @@ fn snapshot(path: &Path) -> Result<Snapshot, String> {
             meta.ctime_nsec(),
         )),
         bytes: Some(bytes),
+    })
+}
+
+/// Why a managed owner or room value is not valid, if it is not.
+fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
+    let int = v.parse::<i64>().ok();
+    let ok = match (section, key) {
+        ("discord", "owner") => crate::relay::discord::Snowflake::parse(v).is_some(),
+        ("telegram", "owner") => int.is_some_and(|n| n > 0),
+        ("telegram", "group") => int.is_some_and(|n| n < 0),
+        ("telegram", "topic") => int.is_some_and(|n| n > 0),
+        ("slack", "owner") => v.starts_with(['U', 'W']) && crate::config::relays::slack_id(v),
+        ("slack", "role") => matches!(v, "app" | "member"),
+        _ => true,
+    };
+    (!ok).then_some(match (section, key) {
+        ("discord", _) => "expected the owner's Discord user ID",
+        ("telegram", "owner") => "expected the owner's Telegram user ID (a positive number)",
+        ("telegram", "group") => "expected the group's Telegram chat ID (a negative number)",
+        ("telegram", _) => "expected the forum topic's ID (a positive number)",
+        ("slack", "owner") => "expected the owner's Slack member ID, such as U0123ABCD",
+        _ => "expected app or member",
     })
 }
 
@@ -185,52 +214,7 @@ fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec
     let config = parsed.unwrap_or(defaults);
     for (section, key, _) in MANAGED {
         let from_file = in_file(section, key);
-        let (value, note) = match (section, key) {
-            ("hub", _) => (config.hub.log_level.as_str().to_string(), None),
-            ("omp", _) => {
-                let resolved = crate::omp::resolve(&config.omp.path);
-                let note = resolved.map_or_else(
-                    || {
-                        format!(
-                            "unavailable: '{}' is not an executable file or on PATH",
-                            config.omp.path
-                        )
-                    },
-                    |p| format!("resolves to {}", p.display()),
-                );
-                (config.omp.path.clone(), Some(note))
-            }
-            ("discord", "owner") => (
-                config
-                    .discord
-                    .owner
-                    .map_or_else(|| "-".to_string(), |o| o.to_string()),
-                Some(if config.discord.intake() {
-                    "intake runs".to_string()
-                } else {
-                    "intake is off until the owner and channels are set".to_string()
-                }),
-            ),
-            ("discord", "channels") => (
-                config
-                    .discord
-                    .channels
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                None,
-            ),
-            _ => {
-                let path = crate::jobs::owner::health::token_path(&config, &paths.config_file);
-                let note = match read_private(&path, 4096) {
-                    Ok(Some(_)) => "token present".to_string(),
-                    Ok(None) => "unavailable: no token in that file yet".to_string(),
-                    Err(e) => format!("unavailable: {e}"),
-                };
-                (path.display().to_string(), Some(note))
-            }
-        };
+        let (value, note) = value_of(paths, &config, section, key);
         out.push(json!({
             "setting": format!("{section}.{key}"),
             "value": value,
@@ -260,6 +244,128 @@ fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec
     out
 }
 
+/// The effective value of one managed setting and a note on it.
+fn value_of(
+    paths: &Paths,
+    config: &config::Config,
+    section: &str,
+    key: &str,
+) -> (String, Option<String>) {
+    match (section, key) {
+        ("hub", _) => (config.hub.log_level.as_str().to_string(), None),
+        ("omp", _) => {
+            let resolved = crate::omp::resolve(&config.omp.path);
+            let note = resolved.map_or_else(
+                || {
+                    format!(
+                        "unavailable: '{}' is not an executable file or on PATH",
+                        config.omp.path
+                    )
+                },
+                |p| format!("resolves to {}", p.display()),
+            );
+            (config.omp.path.clone(), Some(note))
+        }
+        ("discord", "owner") => (
+            config
+                .discord
+                .owner
+                .map_or_else(|| "-".to_string(), |o| o.to_string()),
+            Some(if config.discord.intake() {
+                "intake runs".to_string()
+            } else {
+                "intake is off until the owner and channels are set".to_string()
+            }),
+        ),
+        ("discord", "channels") => (
+            config
+                .discord
+                .channels
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            None,
+        ),
+        ("telegram" | "slack", _) => relay_value(paths, config, section, key),
+        _ => {
+            let path = crate::jobs::owner::health::token_path(config, &paths.config_file);
+            let note = match read_private(&path, 4096) {
+                Ok(Some(_)) => "token present".to_string(),
+                Ok(None) => "unavailable: no token in that file yet".to_string(),
+                Err(e) => format!("unavailable: {e}"),
+            };
+            (path.display().to_string(), Some(note))
+        }
+    }
+}
+
+/// [`value_of`] for the Telegram and Slack settings.
+fn relay_value(
+    paths: &Paths,
+    config: &config::Config,
+    section: &str,
+    key: &str,
+) -> (String, Option<String>) {
+    match (section, key) {
+        (_, "token_file") => {
+            let (configured, name) = if section == "telegram" {
+                (config.telegram.token_file.as_ref(), "telegram-token")
+            } else {
+                (config.slack.token_file.as_ref(), "slack-tokens")
+            };
+            let path = crate::relay::intake::secret_path(configured, &paths.config_file, name);
+            let note = match crate::relay::intake::read_secret(&path) {
+                Ok(_) => "token present".to_string(),
+                Err(e) => format!("unavailable: {e}"),
+            };
+            (path.display().to_string(), Some(note))
+        }
+        ("telegram", key) => {
+            let value = match key {
+                "owner" => config.telegram.owner,
+                "group" => config.telegram.group,
+                _ => config.telegram.topic,
+            };
+            let note = (key == "owner").then(|| {
+                if config.telegram.intake() {
+                    "intake runs".to_string()
+                } else {
+                    "intake is off until the owner is set".to_string()
+                }
+            });
+            (
+                value.map_or_else(|| "-".to_string(), |v| v.to_string()),
+                note,
+            )
+        }
+        ("slack", "role") => (
+            match config.slack.role {
+                crate::config::relays::SlackRole::App => "app".to_string(),
+                crate::config::relays::SlackRole::Member => "member".to_string(),
+            },
+            Some(
+                "app: the bot user sees only conversations it is in; member: the app's user \
+                     token sees what that member sees and needs a paid seat"
+                    .to_string(),
+            ),
+        ),
+        _ => (
+            config
+                .slack
+                .owner
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            Some(if config.slack.intake() {
+                "intake runs; only the owner's messages are admitted unless [slack] allow lists others"
+                        .to_string()
+            } else {
+                "intake is off until the owner is set".to_string()
+            }),
+        ),
+    }
+}
+
 pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
     let path = &paths.config_file;
     let before = snapshot(path).map_err(Failure::Refused)?;
@@ -286,12 +392,10 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
             if key == "token_file" && !Path::new(&v).is_absolute() {
                 return Err(Failure::Usage(format!("{flag}: expected an absolute path")));
             }
-            let id = |s: &str| crate::relay::discord::Snowflake::parse(s.trim()).is_some();
-            if key == "owner" && !id(&v) {
-                return Err(Failure::Usage(format!(
-                    "{flag}: expected the owner's Discord user ID"
-                )));
+            if let Some(why) = invalid(section, key, v.trim()) {
+                return Err(Failure::Usage(format!("{flag}: {why}")));
             }
+            let id = |s: &str| crate::relay::discord::Snowflake::parse(s.trim()).is_some();
             if key == "channels" {
                 let ids: Vec<&str> = v
                     .split(',')
@@ -381,7 +485,8 @@ fn print_report(
     out::line(&format!("  before {before}"));
     out::line(&format!("  after  {after}"));
     out::line(
-        "  managed: hub.log_level, omp.path, discord.token_file, discord.owner, discord.channels; other keys and comments are kept",
+        "  managed: hub.log_level, omp.path, discord.token_file/owner/channels, telegram.token_file/owner/group/topic, \
+         slack.token_file/role/owner; tokens stay in their owner-only files; other keys and comments are kept",
     );
     if let Some(e) = invalid {
         out::line(&format!("  the result is not a valid config: {e}"));
