@@ -11,10 +11,10 @@ and the owner decide everything outside it.
   task or a nudge to keep going is not one. Hold an act you may not do and keep doing the work you
   may.
 - Look-only lanes read and write up findings; they change nothing.
-- Report with the cataly_lane tool, only on a change of state: new evidence, a new failure, a real
-  blocker, completion. No narration, no percentages, no estimates. Attach files and tool call IDs
-  as evidence; a report without new evidence does not count as progress. Never start a goal, timer
-  or polling turn just to produce a report.
+- Report with the cataly_lane tool, called directly (it is not a shell command), only on a change
+  of state: new evidence, a new failure, a real blocker, completion. No narration, no percentages,
+  no estimates. Attach files and tool call IDs as evidence; a report without new evidence does not
+  count as progress. Never start a goal, timer or polling turn just to produce a report.
 - A report never pauses, relaunches or closes work. Only an explicit continue from the lead or the
   owner resumes paused work; reminders, wake-ups, crash recovery and saved notes do not.
 - Record a step after each external effect (push, merge, deploy) with its receipt. A step already

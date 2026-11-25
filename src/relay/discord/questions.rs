@@ -18,6 +18,7 @@ use super::form::{Field, FieldKind, Form};
 use super::intake::{Intake, NAME};
 use super::types::Press;
 use super::{Snowflake, nonce};
+use crate::config::Language;
 use crate::host::dialogs::DialogKind;
 use crate::host::dialogs::Question;
 use crate::host::{Dialog, Runtime};
@@ -26,6 +27,7 @@ use crate::relay::Inbound;
 use crate::relay::text::DISCORD_LIMIT;
 use crate::store::relay::{QueueRow, RelayWrite};
 
+mod approval;
 mod panel;
 /// The longest excerpt of a waiting dialog in its local notice.
 const NOTICE_DETAIL: usize = 300;
@@ -155,10 +157,11 @@ pub(crate) fn neutral(text: &str) -> String {
     out
 }
 
-/// The card for a dialog, or `None` when it stays local (DISC-OUT req. 59-64).
+/// The card for a dialog, or `None` when it stays local (DISC-OUT req. 59-64). `approvals` is the
+/// owner's language when remote approvals are on; an approval card is written in it.
 fn card_of(
     dialog: &Dialog,
-    remote_approvals: bool,
+    approvals: Option<Language>,
 ) -> Option<(Kind, String, Vec<String>, Option<usize>)> {
     let lines = |head: &str| {
         let mut text = format!("**{head}**");
@@ -246,12 +249,10 @@ fn card_of(
             vec!["Yes".into(), "No".into()],
             None,
         )),
-        DialogKind::Approval if remote_approvals && !dialog.secret => Some((
-            Kind::Approval,
-            lines("Permission asked"),
-            vec!["Approve once".into(), "Deny".into()],
-            None,
-        )),
+        DialogKind::Approval if !dialog.secret => {
+            let (text, buttons) = approval::card(dialog, approvals?);
+            Some((Kind::Approval, text, buttons, None))
+        }
         _ => None,
     }
 }
@@ -650,7 +651,7 @@ impl<T: Runtime> Intake<T> {
             }
             self.cards.remove(&card.dialog);
             let status = if card.kind == Kind::Approval {
-                "Denied: the run ended before an answer."
+                approval::words(self.language).run_ended
             } else {
                 "Closed: answered elsewhere."
             };
@@ -692,7 +693,8 @@ impl<T: Runtime> Intake<T> {
         recommended: Option<usize>,
         kind: &Kind,
     ) -> String {
-        let mut body = if choices.is_empty() {
+        let mut body = if choices.is_empty() || *kind == Kind::Approval {
+            // An approval is answered with its buttons only.
             head.to_string()
         } else {
             format!("{head}\n{}", choice_lines(choices, recommended))
@@ -842,9 +844,10 @@ impl<T: Runtime> Intake<T> {
         let skip = |me: &Self| {
             me.cards.lock().skipped.insert(dialog.id.clone());
         };
-        let Some((kind, head, choices, recommended)) =
-            card_of(dialog, self.settings.remote_approvals)
-        else {
+        let Some((kind, head, choices, recommended)) = card_of(
+            dialog,
+            self.settings.remote_approvals.then_some(self.language),
+        ) else {
             return self.stay_local(dialog).await;
         };
         let approval = kind == Kind::Approval;
@@ -1061,11 +1064,20 @@ impl<T: Runtime> Intake<T> {
             return;
         };
         let label = card.choices.get(index).cloned().unwrap_or_default();
-        let done = format!(
-            "{}\n\nAnswered by the owner: {}",
-            card.body,
-            neutral(&label)
-        );
+        let done = if card.kind == Kind::Approval {
+            let [approved, denied] = approval::words(self.language).answered;
+            format!(
+                "{}\n\n{}",
+                card.body,
+                if index == 0 { approved } else { denied }
+            )
+        } else {
+            format!(
+                "{}\n\nAnswered by the owner: {}",
+                card.body,
+                neutral(&label)
+            )
+        };
         let ack = if card.kind == Kind::Approval {
             json!({"type": 7, "data": {"content": done, "components": []}})
         } else {
@@ -1216,7 +1228,7 @@ mod tests {
     }
 
     fn card(dialog: &Dialog) -> Card {
-        let (kind, body, choices, _) = card_of(dialog, false).unwrap();
+        let (kind, body, choices, _) = card_of(dialog, None).unwrap();
         let items = match &kind {
             Kind::Fields { fields, .. } => panel::of_fields(fields),
             Kind::Asks { questions } => panel::of_questions(questions),
@@ -1243,7 +1255,7 @@ mod tests {
         let d = dialog_of(&json!({"id": "f", "method": "form", "html": html})).unwrap();
         let c = card(&d);
         assert_eq!(c.choices, vec!["Red", "Blue"]);
-        assert_eq!(card_of(&d, false).unwrap().3, Some(1));
+        assert_eq!(card_of(&d, None).unwrap().3, Some(1));
         assert_eq!(
             answer_of(&c, &d, 1).unwrap(),
             json!({"data": {"color": "b", "k": "v"}})
@@ -1333,7 +1345,7 @@ mod tests {
     fn questions_convert_and_answers_validate() {
         let d = ask(Some(1), false);
         let c = card(&d);
-        assert_eq!(card_of(&d, false).unwrap().3, Some(1));
+        assert_eq!(card_of(&d, None).unwrap().3, Some(1));
         assert!(c.body.contains("@\u{200b}everyone") && c.body.contains("\\`x\\`"));
         assert_eq!(
             answer_of(&c, &d, 1).unwrap(),
@@ -1352,7 +1364,7 @@ mod tests {
             "green please"
         );
         // A multi-select question has no recommended default.
-        assert_eq!(card_of(&ask(Some(1), true), false).unwrap().3, None);
+        assert_eq!(card_of(&ask(Some(1), true), None).unwrap().3, None);
         let b = buttons("s", &c.choices, Some(1), false);
         assert_eq!(b[0]["components"][1]["style"], 1);
         assert_eq!(b[0]["components"][0]["custom_id"], "cy:s:0");
@@ -1360,9 +1372,11 @@ mod tests {
         let approval = dialog_of(&json!({"id": "a", "method": "select", "title": "Run bash?",
             "options": ["Approve Once", "Deny"]}))
         .unwrap();
-        assert!(card_of(&approval, false).is_none());
-        let (kind, ..) = card_of(&approval, true).unwrap();
+        assert!(card_of(&approval, None).is_none());
+        let (kind, body, choices, _) = card_of(&approval, Some(Language::Korean)).unwrap();
         assert_eq!(kind, Kind::Approval);
+        assert_eq!(body, "**권한 요청**\nRun bash?");
+        assert_eq!(choices, ["이번만 허용", "거부"]);
         let confirm = dialog_of(&json!({"id": "c", "method": "confirm", "title": "Go?"})).unwrap();
         let mut cc = card(&confirm);
         cc.kind = Kind::Confirm;

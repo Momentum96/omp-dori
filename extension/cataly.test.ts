@@ -55,6 +55,8 @@ test("a launched session is accepted, gets its tool and guidance, forwards calls
 	expect(sent[0].params).toMatchObject({ ext: 1, token: "tok", session: "s1", agent: "main" });
 	expect(b.token).toBeUndefined();
 	expect(pi.tools.map(t => t.name)).toEqual(["cataly_lead"]);
+	// A direct call only: never mounted as a bash command, and OMP runs it without asking.
+	expect(pi.tools[0]).toMatchObject({ loadMode: "essential", approval: { tier: "write", policy: "allow" } });
 	const prompt = await pi.emit("before_agent_start", { systemPrompt: ["BASE"] }, ctx);
 	expect(prompt).toEqual({ systemPrompt: ["BASE", "GUIDE"] });
 	expect(await pi.emit("before_agent_start", { systemPrompt: ["BASE", "GUIDE"] }, ctx)).toBeUndefined();

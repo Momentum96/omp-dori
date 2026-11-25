@@ -99,8 +99,8 @@ pub(crate) fn file_item(cwd: &Path, path: &str) -> Result<(String, String), Stri
 }
 
 /// Whether a shell command the bridge saw runs the Cataly CLI (a word `cataly`, alone or ending a
-/// path) or a Cataly tool as an OMP tool command, between blanks or shell separators. Such a call
-/// organises the lane (EVR req. 12).
+/// path) or names a Cataly tool (refused in the shell, DESIGN 12.2 A13), between blanks or shell
+/// separators. Such a call organises the lane (EVR req. 12).
 fn runs_cataly(command: &str) -> bool {
     command
         .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))

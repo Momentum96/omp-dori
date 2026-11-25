@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-11-26)
 
 - The lead resumes after an update or restart even when its session was started in another folder
   than today's default: it reopens in the folder its session recorded. OMP's per-session folder
@@ -19,6 +19,16 @@
   flips them every tick.
 - Setup also gives the Discord application Cataly's avatar as its icon, under the same rule as
   the bot's images: an icon you set yourself is kept until `cataly setup --profile`.
+- No more approval requests for Cataly's own tools: the lead and lanes call them directly, and
+  OMP runs them without asking. A shell line that names them is refused at once with a pointer
+  to the direct call, instead of asking you.
+- Read-only shell commands (`ls`, `cat`, `grep`, `head`, `git status`, `git log`, `git diff` and
+  the like) run without asking; anything that writes, deletes, pushes, installs or uses the
+  network still asks (coordinator decision P1, pending your confirmation).
+- The Discord approval card speaks your language (`[hub] language`): "권한 요청", the tool and the
+  command in a code block, long commands cut cleanly, buttons "이번만 허용" / "거부".
+- Setup's Discord invite asks for Pin Messages, so the ops panel can pin its message; without it
+  the panel still posts and edits in place, unpinned.
 
 ## 0.1.1 (2026-11-26)
 

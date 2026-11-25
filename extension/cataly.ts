@@ -336,11 +336,11 @@ export class Bridge {
 			const ms = Number(def.timeout_ms) || TOOL_MS;
 			const parameters = (def.parameters ?? { type: "object" }) as ToolDefinition["parameters"];
 			const [label, description] = [String(def.label ?? name), String(def.description ?? "")];
-			// The hub checks every operation these tools request, so OMP need not ask first
-			// (extension API `approval`; a user deny policy still wins).
+			// The hub checks every operation, so OMP need not ask (extension API `approval`; a user deny still wins). An
+			// `essential` tool stays a direct call, never a bash command, where the outer bash approval would ask.
 			const approval = { tier: "write", policy: "allow" } as const;
 			const execute: ToolDefinition["execute"] = (callId, params, _s, _u, ctx) => this.tool(name, ms, callId, params as Json, ctx);
-			pi.registerTool({ name, label, description, parameters, approval, execute });
+			pi.registerTool({ name, label, description, parameters, approval, loadMode: "essential", execute });
 		}
 		safe(() => pi.setActiveTools?.([...(pi.getActiveTools?.() ?? []).filter((n: string) => !names.includes(n)), ...names]));
 		this.status(answer.status as string | undefined);

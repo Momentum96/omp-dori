@@ -242,6 +242,8 @@ pub(crate) async fn run<T: Runtime>(
 /// One running intake.
 pub(crate) struct Intake<T: Runtime> {
     pub(super) settings: DiscordSettings,
+    /// The owner's language for fixed card wording (DESIGN 12.2 A19).
+    pub(super) language: crate::config::Language,
     pub(super) rest: Arc<Rest>,
     pub(super) bot: Snowflake,
     pub(super) owner: Snowflake,
@@ -356,6 +358,7 @@ impl<T: Runtime> Intake<T> {
             tap: (env.tap.clone(), voice),
             events: Arc::clone(&env.events),
             settings: settings.clone(),
+            language: config.hub.language,
             rest,
             bot,
             owner,

@@ -1352,3 +1352,58 @@ the overlay, by design. The lead told the owner it could record nothing.
   rule passes as a tool line; with a second command or by path it does not) and
   `onboarding_consent_is_stored_and_writes_wait` (the lead's tool line passes, the CLI's refusal
   names `cataly_lead`).
+
+# Approvals (FixApprovals, 2026-11-26)
+
+## What failed
+
+On the owner's 0.1.1 the lead asked for approval in Discord for every call of its own tool, four
+times in three minutes. OMP 19.1.1 mounted `cataly_lead` as a `bash` tool command
+(`tools.commands`, on by default), and the model wrote lines like
+`cataly_lead --help 2>&1 | head -60` or `cataly_lead a 2>&1; echo ---; cataly_lead b`. OMP's
+outer `bash` gate treats only a line made of tool commands alone (no redirection, no other
+command) as `read`; every other line is `exec`, which `always-ask` asks for. The extension's
+`policy: allow` applies only once the tool itself runs. The card was English.
+
+## Fix (decision P1, pending the owner)
+
+- OMP surface: the extension API's `loadMode: "essential"` (`custom-tools.md`: "Explicitly
+  requested tools and essential tools stay top-level"). The bridge registers each Cataly tool
+  with it, so OMP offers the tool as a direct call, where `approval: {tier: write, policy: allow}`
+  holds, and never mounts it in `bash`. `tools.commands` stays on for the owner's other tools.
+  The contract case shows `cataly_lead` among the request's top-level tools with the default
+  settings. No OMP approval rule can allow the owner's lines: a `bash.patterns` `allow` applies
+  only to a whole simple command (`approval-mode.md`, `tools/bash.md`), never to a pipe,
+  redirection or `;` chain.
+- The hub's shell veto refuses a `bash` line whose command word (past assignments) is the
+  session's own tool (`lanes::shell::runs_tool`, replacing `tool_only`), with "Call cataly_lead
+  directly as a tool call". The extension's `tool_call` handler runs before OMP's approval
+  (`hooks.md`), so no dialog opens. The guidance says to call the tool directly.
+- Read-only shell work: the overlay's `bash.patterns` list `omp::launch::READ_ONLY` as `allow`
+  (OMP resolves a matched simple command to `{tier: write, policy: allow}`, which wins in
+  `always-ask`) behind one `prompt` rule for git's `--output=<file>`. `always-ask` stays; an
+  unlisted command, any shell control and the file tools still ask (fail closed). `write` mode was
+  rejected: its tier has no folder bound.
+- The approval card (`relay::discord::questions::approval`) reads OMP's prompt lines
+  (`Allow tool:`, `Reason:`, `Command:`) into the owner's language, puts the command in a code
+  block that a backquote cannot close, cuts it at 20 lines or 900 characters at a line or word
+  boundary with a note, and drops the redundant numbered choices. Buttons and the result line
+  ("보스가 허용했습니다") follow `[hub] language`; English keeps its wording.
+
+## Tests
+
+- Contract (`CATALY_CONTRACT_OMP=1`): `tests/contract_session.rs`
+  `lead_tool_and_read_only_commands_run_without_asking_in_stock_omp` replaces
+  `lead_tool_works_as_a_call_and_as_a_shell_command_in_stock_omp`. The fake model sends the
+  owner's four lines as `bash`; each gets the hub's refusal and no dialog opens (the test answers
+  none, and fails as soon as one appears). Direct calls run; `cat notes.txt` and `ls -la` run
+  without asking; `echo made > made.txt` asks (title `Allow tool: bash` / `Command: …`), is
+  denied and writes nothing; `cataly lead send hi` gets rule 0; `eval` gets OMP's user deny.
+  `bridge_accepted_lead_in_stock_omp` asserts the tool is top-level.
+- Rust unit: `lanes::shell` `a_line_that_runs_the_sessions_own_tool_by_name_is_found`,
+  `omp::launch` `overlay_lets_listed_read_only_commands_run_and_asks_first_for_git_output`,
+  `relay::discord::questions::approval` (Korean card, code block safety, clean cuts),
+  `questions` `questions_convert_and_answers_validate` (Korean approval card and buttons).
+- `tests/lanes.rs`: a lane's or the lead's line naming its tool is refused with the pointer; the
+  tool by path is judged by the rules.
+- Bun: the registered tool carries `loadMode: essential` and the allow policy.

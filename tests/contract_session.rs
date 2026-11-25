@@ -9,7 +9,8 @@
 //! folder its session recorded after the default folder changed, and the
 //! fallback chain moves a usage-limited lead to the backup model (acceptance check 9). The bridge
 //! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead. The lead's
-//! tool works as a direct call and as a `bash` tool command; the CLI and `eval` stay refused.
+//! tool and read-only commands run without asking, its tool named in `bash` is refused without a
+//! dialog, a write still asks, and the CLI and `eval` stay refused.
 
 #![allow(
     clippy::unwrap_used,
@@ -854,16 +855,11 @@ fn bridge_accepted_lead_in_stock_omp() {
     });
     wait_lead(&hub, |v| v["sent"] == 0 && v["waiting"] == 0);
     assert!(last.contains("Cataly: your role"), "no guidance: {last}");
-    // OMP offers an extension tool either as a top-level tool or, with its default
-    // `tools.commands`, as a command mounted in `bash` and listed in the system prompt.
-    let top_level = last.contains("\"name\":\"cataly_lead\"");
+    // The bridge registers the tool `essential`, so OMP offers it as a top-level tool even with its
+    // default `tools.commands`, never as a command mounted in `bash` (DESIGN 12.2 A13).
     assert!(
-        top_level || last.contains("Cataly's records and watches"),
-        "no hub tool: {last}"
-    );
-    eprintln!(
-        "MEASURE lead_tool_offered_as={}",
-        if top_level { "tool" } else { "command" }
+        last.contains("\"name\":\"cataly_lead\""),
+        "not a top-level tool: {last}"
     );
     let file = live["session"]["session_file"].as_str().unwrap();
     let text = std::fs::read_to_string(file).unwrap();
@@ -894,13 +890,25 @@ fn tool_results(model: &FakeModel) -> Vec<(String, String, String)> {
     out
 }
 
-/// Sends the owner message that makes the fake model call `tool` with `args` once, and returns
-/// that call's result once the turn has settled.
+/// The lead's open approval dialogs.
+fn dialogs(hub: &TestHub) -> Vec<Value> {
+    let v = hub.json(&["lead", "status", "--json"]);
+    v["session"]["dialogs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Sends the owner message that makes the fake model call `tool` with `args` once and returns that
+/// call's result once the turn has settled. Nobody answers dialogs here (`always-ask`), so a call
+/// that asked could never return; one that opens a dialog fails at once.
 fn lead_calls(hub: &TestHub, model: &FakeModel, tool: &str, args: &Value) -> String {
     let before = tool_results(model).len();
     let text = format!("Run this.\nCALL {tool} {args}");
     assert!(hub.cli(&["lead", "send", &text]).status.success());
     let result = hub.until(Duration::from_secs(60), || {
+        let asked = dialogs(hub);
+        assert!(asked.is_empty(), "{tool} {args} asked: {asked:?}");
         let all = tool_results(model);
         all.get(before..)?
             .iter()
@@ -912,43 +920,93 @@ fn lead_calls(hub: &TestHub, model: &FakeModel, tool: &str, args: &Value) -> Str
     result
 }
 
-/// The owner's first run (OMP 19.1.1 offers the lead's tool as a command of its embedded shell):
-/// the lead records onboarding and reads requests through its tool both as a direct call and as a
-/// `bash` command line, while rule 0 still refuses the `cataly` CLI's `lead send` in its shell and
-/// OMP's user deny still refuses `eval`.
+/// Like [`lead_calls`] for a `bash` line that must ask: returns the approval dialog OMP opened
+/// and the call's result after the dialog is answered Deny.
+fn lead_asks(hub: &TestHub, model: &FakeModel, command: &str) -> (Value, String) {
+    let before = tool_results(model).len();
+    let text = format!("Run this.\nCALL bash {}", json!({ "command": command }));
+    assert!(hub.cli(&["lead", "send", &text]).status.success());
+    let dialog = hub.until(Duration::from_secs(60), || dialogs(hub).first().cloned());
+    let id = dialog["id"].as_str().unwrap();
+    let deny = hub.cli(&["lead", "answer", id, r#"{"value":"Deny"}"#]);
+    assert!(deny.status.success(), "{deny:?}");
+    let result = hub.until(Duration::from_secs(60), || {
+        let all = tool_results(model);
+        all.get(before..)?
+            .iter()
+            .find(|(_, name, _)| name == "bash")
+            .map(|(.., content)| content.clone())
+    });
+    wait_lead(hub, |v| v["sent"] == 0 && v["waiting"] == 0);
+    eprintln!("lead bash {command}: asked {dialog}, then {result}");
+    (dialog, result)
+}
+
+/// The owner's lines from the first runs of 0.1.1, where every one asked for approval: the bridge
+/// registers the lead's tool `essential`, so stock OMP 19.1.1 offers it only as a direct call that
+/// runs without asking (its `policy: allow`), and the hub's shell veto refuses a `bash` line that
+/// names it, before OMP's approval, with a pointer to the direct call. Listed read-only commands
+/// run without asking (the overlay's `bash.patterns`); a write still asks; rule 0 still refuses
+/// the CLI's `lead send` in the lead's shell; OMP's user deny still refuses `eval` (DESIGN 12.2 A13).
 #[test]
-fn lead_tool_works_as_a_call_and_as_a_shell_command_in_stock_omp() {
+fn lead_tool_and_read_only_commands_run_without_asking_in_stock_omp() {
     if !enabled() {
         return;
     }
     let lead_box = Sandbox::new("leadtool");
+    let work = lead_box.root.join("work");
+    std::fs::write(work.join("notes.txt"), "READ-ME-OK\n").unwrap();
     let mut hub = lead_hub(&lead_box, "fake/primary", "");
     hub.start();
     wait_lead(&hub, |v| {
         v["phase"] == "live" && v["bridge"]["connected"] == true
     });
     let model = &lead_box.model;
-    // The line the owner's lead ran, as a `bash` call of the tool's command.
-    let line = format!("{LEAD_TOOL} onboarding.start; {LEAD_TOOL} requests");
-    let shell = lead_calls(&hub, model, "bash", &json!({ "command": line }));
+    // The bash form, as the owner's lead wrote it: refused by the hub without a dialog.
+    for line in [
+        format!("{LEAD_TOOL} onboarding.start 2>&1; echo ---; {LEAD_TOOL} requests 2>&1"),
+        format!("{LEAD_TOOL} question.ask --help 2>&1 | head -30"),
+        format!("{LEAD_TOOL} --help 2>&1 | head -60"),
+        format!(
+            "{LEAD_TOOL} request.close --id 1 --text \"done\" 2>&1; {LEAD_TOOL} request.next --id 2 --text \"next\" 2>&1"
+        ),
+    ] {
+        let shell = lead_calls(&hub, model, "bash", &json!({ "command": line }));
+        assert!(
+            shell.contains("cataly_lead is a tool, not a shell command"),
+            "{shell}"
+        );
+        assert!(!shell.contains("Onboarding runs"), "{shell}");
+    }
+    // The direct call is offered and runs without asking.
     assert!(
-        shell.contains("Onboarding runs")
-            && (shell.contains("request-log") || shell.contains("next:")),
-        "{shell}"
+        model
+            .bodies()
+            .last()
+            .is_some_and(|b| b.to_string().contains("\"name\":\"cataly_lead\""))
     );
-    assert!(
-        !shell.contains("rule 0") && !shell.contains("exited with code"),
-        "{shell}"
-    );
-    // The same records through a direct call.
     let start = json!({ "op": "onboarding.start" });
     let direct = lead_calls(&hub, model, LEAD_TOOL, &start);
-    assert!(direct.contains("Onboarding already runs"), "{direct}");
+    assert!(direct.contains("Onboarding runs"), "{direct}");
     let direct = lead_calls(&hub, model, LEAD_TOOL, &json!({ "op": "requests" }));
     assert!(
         direct.contains("request-log") || direct.contains("next:"),
         "{direct}"
     );
+    // Read-only commands run without asking.
+    for (command, shows) in [("cat notes.txt", "READ-ME-OK"), ("ls -la", "notes.txt")] {
+        let read = lead_calls(&hub, model, "bash", &json!({ "command": command }));
+        assert!(read.contains(shows), "{command}: {read}");
+    }
+    // A command that writes still asks; denied, it does not run.
+    let (dialog, denied) = lead_asks(&hub, model, "echo made > made.txt");
+    assert!(
+        dialog["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("echo made > made.txt")),
+        "{dialog}"
+    );
+    assert!(!work.join("made.txt").exists(), "{denied}");
     // The CLI stays refused in the lead's shell, and the refusal names the tool to use.
     let cli = json!({ "command": "cataly lead send hi" });
     let refused = lead_calls(&hub, model, "bash", &cli);

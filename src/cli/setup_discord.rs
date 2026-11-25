@@ -36,9 +36,16 @@ const MESSAGE_CONTENT_LIMITED: u64 = 1 << 19;
 const LIMITED_INTENTS: u64 = (1 << 13) | (1 << 15) | MESSAGE_CONTENT_LIMITED;
 /// What Cataly does in its server: manage channels (setup creates its two), add reactions, view
 /// channels, send messages, read message history, manage threads, create public threads, send
-/// messages in threads.
-const PERMISSIONS: u64 =
-    (1 << 4) | (1 << 6) | (1 << 10) | (1 << 11) | (1 << 16) | (1 << 34) | (1 << 35) | (1 << 38);
+/// messages in threads, pin messages (the ops panel pins its message; it works unpinned without).
+const PERMISSIONS: u64 = (1 << 4)
+    | (1 << 6)
+    | (1 << 10)
+    | (1 << 11)
+    | (1 << 16)
+    | (1 << 34)
+    | (1 << 35)
+    | (1 << 38)
+    | (1 << 51);
 /// The lead's channel and the job notices' channel (also the name of the destination for it).
 pub(super) const LEAD: &str = "cataly";
 pub(super) const OPS: &str = "cataly-ops";
@@ -399,6 +406,9 @@ impl Flow<'_> {
             self.say(&format!(
                 "Add the bot to your server: open {link}, pick the server, then Authorize."
             ));
+            self.say(
+                "The link asks for Pin Messages so the ops panel can pin its message; without it the panel still works, unpinned.",
+            );
             let wait = self.flags.wait.unwrap_or(if self.term.is_some() {
                 JOIN_WAIT
             } else {
@@ -931,7 +941,7 @@ mod tests {
 
     #[test]
     fn invite_permissions_are_the_ones_cataly_uses() {
-        assert_eq!(PERMISSIONS, 326_417_583_184);
+        assert_eq!(PERMISSIONS, 2_252_126_231_268_432);
     }
 
     #[test]

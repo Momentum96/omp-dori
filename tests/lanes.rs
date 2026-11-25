@@ -626,18 +626,16 @@ fn shell_rules_block_and_grants_are_one_attempt() {
         reason.contains("rule 1") && reason.contains("sha256") && !reason.contains("origin main"),
         "{reason}"
     );
-    // The lane's own tool as an OMP tool command passes even when its text matches a deny rule;
-    // anything else on the line, or the tool name by path, is judged as usual.
-    let report = "cataly_lane report --kind progress --text 'ready for git push'";
-    assert_eq!(shell(&mut b, report)["allow"], true);
-    assert_eq!(
-        shell(&mut b, &format!("{report}; git push origin main"))["allow"],
-        false
-    );
-    assert_eq!(
-        shell(&mut b, "/tmp/cataly_lane report --text 'git push'")["allow"],
-        false
-    );
+    // The lane's own tool named in bash is refused with a pointer to the direct call (DESIGN 12.2
+    // A13); the tool name by path is judged by the rules as usual.
+    let report = "cataly_lane report --kind progress --text 'ready' 2>&1 | head -5";
+    for line in [report.to_string(), format!("ls; {report}")] {
+        let refused = shell(&mut b, &line).to_string();
+        let pointer = "\"allow\":false,\"reason\":\"No command ran: cataly_lane is a tool";
+        assert!(refused.contains(pointer), "{refused}");
+    }
+    let by_path = shell(&mut b, "/tmp/cataly_lane report --text 'git push'").to_string();
+    assert!(by_path.contains("rule 1"), "{by_path}");
     assert_eq!(shell(&mut b, "omp usage reset")["allow"], false);
     assert!(
         lane(
@@ -1015,9 +1013,20 @@ fn onboarding_consent_is_stored_and_writes_wait() {
             .contains("cataly_lead tool"),
         "{refused}"
     );
-    // The lead's own tool as an OMP tool command (DESIGN 10.6) is not the CLI and passes.
-    let own = "cataly_lead onboarding; cataly_lead requests";
-    assert_eq!(shell(&mut b, own)["allow"], true);
+    // The lead's own tool named in bash (the owner's line) is refused with a pointer to the direct
+    // call, which is the only form OMP offers (DESIGN 12.2 A13).
+    let own = shell(
+        &mut b,
+        "cataly_lead onboarding.start 2>&1; echo ---; cataly_lead requests",
+    );
+    assert_eq!(own["allow"], false);
+    assert!(
+        own["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Call cataly_lead directly as a tool call"),
+        "{own}"
+    );
     assert_eq!(
         shell(&mut b, "/usr/bin/cataly slack upload T1/C1 /tmp/x")["allow"],
         false

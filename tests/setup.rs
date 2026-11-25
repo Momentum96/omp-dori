@@ -163,7 +163,7 @@ fn first_run_at_a_terminal_then_a_second_run_changes_nothing() {
     );
     assert_eq!(fake.app_flags(), (1 << 23) | (1 << 19));
     assert!(
-        shown.contains("permissions=326417583184"),
+        shown.contains("permissions=2252126231268432"),
         "the invite link:\n{shown}"
     );
     assert_eq!(creates(&fake), ["cataly", "cataly-ops"]);

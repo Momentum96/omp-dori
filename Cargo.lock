@@ -253,7 +253,7 @@ checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cataly"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "audiopus",
  "audiopus_sys",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "cataly-voice"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "audiopus",
  "audiopus_sys",

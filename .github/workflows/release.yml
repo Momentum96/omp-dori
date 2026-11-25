@@ -161,7 +161,7 @@ jobs:
           "./cataly-$V-linux-x64" extension > "cataly-$V.ts"
           sed "s/@RELEASE_KEY@/$RELEASE_KEY/" ../install.sh > install.sh
           cp ../LICENSE LICENSE
-          for f in $(ls | LC_ALL=C sort); do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done > SHA256SUMS
+          for f in $(ls | grep -Ev '^SHA256SUMS(\.sig)?$' | LC_ALL=C sort); do printf '%s  %s\n' "$(sha256sum "$f" | cut -d' ' -f1)" "$f"; done > SHA256SUMS
           umask 077
           printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/key.pem"
           derived=$(openssl pkey -in "$RUNNER_TEMP/key.pem" -pubout -outform DER | tail -c 32 | od -An -tx1 -v | tr -d ' \n')

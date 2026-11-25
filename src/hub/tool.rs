@@ -15,8 +15,8 @@ use crate::sys::now_ms;
 const RECAP_MAX: usize = 8 * 1024;
 /// The owner notes are capped (OPC req. 55, COORD req. 51).
 pub(crate) const PROFILE_MAX: usize = crate::jobs::notes::MAX;
-/// The tool's name. It differs from the Cataly CLI's `cataly`, so OMP's tool command of that name
-/// never shadows the CLI in the lead's shell and rule 0 keeps judging only the CLI (DESIGN 9.2).
+/// The tool's name. It differs from the Cataly CLI's `cataly`, so rule 0 keeps judging only the CLI
+/// and the shell veto can point a `bash` line that names the tool to the direct call (DESIGN 9.2).
 pub(crate) const LEAD_TOOL: &str = "cataly_lead";
 
 /// The tool as the bridge registers it: name, description and JSON Schema from the hub.

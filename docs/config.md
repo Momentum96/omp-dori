@@ -67,9 +67,10 @@ asks only what Discord forces, then fills in defaults without asking:
 2. **Message Content intent**: switched on through `PATCH /applications/@me` (Discord allows it for
    a bot in fewer than 100 servers). If Discord does not take it, setup names the place: Developer
    Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content Intent**.
-3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=326417583184`,
+3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=2252126231268432`,
    exactly the permissions Cataly uses (Manage Channels, View Channels, Send Messages, Read Message
-   History, Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads). Setup
+   History, Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads, Pin
+   Messages; the ops panel pins its message with it and works unpinned without). Setup
    reads the bot's servers every 3 s until it joins (10 minutes at a terminal; `--wait 5m` in a
    script, none by default). With several servers it asks which (`--guild <id>`).
 
@@ -260,7 +261,7 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `#cataly`, found or created |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
 | `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `#cataly` when there are several |
-| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button. | `--approvals on\|off` (setup's default: on) |
+| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button, on a card in `[hub] language` with the command in a code block. Cataly's own tools and a fixed list of read-only commands (`ls`, `cat`, `grep`, `git status`, `git log`, `git diff` and the like) never ask; anything else still does. | `--approvals on\|off` (setup's default: on) |
 | `form_default_after` | duration | `"3m"` | 1s–1h | A question with one recommended choice takes it after this long. | |
 | `profile` | boolean | `true` | | `cataly setup` puts Cataly's avatar and banner on the bot where the bot has none (or still has Cataly's older ones); an image you set yourself is kept. Off: setup leaves the profile alone. | `--profile` re-applies them |
 | `away` | duration | `"3h"` | 1s–720h | You count as back when your message comes this long after your previous one. | |
