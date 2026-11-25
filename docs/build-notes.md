@@ -877,3 +877,58 @@ are not in the tree). Figures are in `docs/measurements.md`. Two findings:
   build --release`; each contract binary passed alone in release with `CATALY_CONTRACT_OMP=1`
   against stock OMP 19.1.1 (`contract` 1, `contract_session` 5, `contract_discord` 3,
   `contract_lanes` 2, `contract_relays` 1).
+
+# macOS test failures (FixMacos, 2026-11-25)
+
+CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_relay.rs` tests.
+`cargo test` stops at the first failing binary, so `hub`, `jobs`, `lanes`, `lead`, `owner` and
+`relays` had never run on macOS; run 45583627584 used `--no-fail-fast` and ran them all.
+
+## The state directory behind a symlink (crash and unconfirmed hand-off tests)
+
+- Evidence: after a hub restart the lead ran a new session file in the same sandbox, and the hub
+  log said `lead starts fresh: the transcript of lead session … did not verify for an exact
+  resume`. The unconfirmed hand-off then met "another session" and held the room
+  ("the lead may or may not have it") instead of resending once.
+- Cause: on macOS `/tmp` and `/var/folders` are symlinks into `/private`. The hub gave OMP
+  `--session-dir` under `$XDG_STATE_HOME` as spelled, recorded the transcript path OMP reported,
+  and the exact-resume check (`omp::transcript::exact`, HOST req. 9-10) refuses a recorded path
+  that differs from its real location. Lanes resume through the same check.
+- Fix (DISC-IN's OS note: state paths are resolved to their real location first):
+  `Paths::real_state` resolves the state directory once at hub start, and the hub derives every
+  state path from it. The resume check still refuses symlinks below the state directory.
+- Tests: `tests/lead.rs` `lead_resumes_through_a_symlinked_state_directory` reaches the state
+  directory through a symlink on any system; on main it fails on Linux (a fresh session after the
+  restart) and passes with the fix. Unit: `sys::paths` `real_state_resolves_a_symlinked_state_directory`.
+
+## The busy lead's second answer 5 s late (`busy_lead_answers_in_order`)
+
+- Evidence: 7.05 s in both runs, the 2 s turn plus the lead's 5 s backstop tick.
+- Cause, in the fake OMP: it answered `get_state` from a busy flag it removed (a forked `rm`)
+  only after printing the turn's end events. When the readback those events trigger arrives
+  first, it shows the lead still streaming, no later event brings another readback, and the
+  waiting message goes at the tick. Stock OMP clears `isStreaming` before it emits `agent_end`
+  (pi-agent-core `Agent`, the `agent_end` case) and answers `get_state` synchronously. Reproduced
+  on Linux by delaying the `rm` 0.2 s: 7.04 s, with a readback answered busy after `agent_end`.
+- Fix: the fake clears the flag before the end events (unless follow-ups wait to run next); with
+  the same 0.2 s delay the gap is 2.2 s.
+
+## The crash test read the transcript too early (`crash_at_each_wake_point_delivers_once`)
+
+- Evidence (once the resume worked): `wake_after_commit: written before the crash`, 0 entries.
+- Cause: OMP answers `prompt` before the prompt runs (rpc-mode: "Don't await - events will
+  stream"), so its user entry lands after the answer; the hub died at the fault point right
+  after the answer and the test read the file before the fake appended it.
+- Fix: the test waits until the lead's OMP process is gone, when its file is final (the rule the
+  hub's own confirmation uses).
+
+## After the release merge
+
+- `tests/install.rs` (four tests, darwin only): `held: …/home/.local/bin/cataly exists and is not
+  Cataly's link`. `Layout::of_running` finds the program folder through the binary's real path
+  (`/private/tmp/…`) while the links were written with the default spelling (`/tmp/…`). It now
+  keeps the default layout when the binary's folder is the default folder under another spelling.
+- `tests/owner.rs` `home_backup_setup_and_restore` (both systems on CI): the test's bare
+  repository took git's default branch (`master` on the runners, `main` where it was written), so
+  the clone of the pushed `main` was empty. The bare repository now starts on `main`.
+- `TestHub` prints the last 200 lines of the hub log when a test fails.
