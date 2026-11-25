@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { guardConsumerReservation } from "../release/launch-leases.ts";
 import type { HeadlessBeginOutcome } from "./headless-launch-model.ts";
-import { closeHost, startHost, stopHarnessRole } from "./headless-lifecycle.ts";
+import { closeHost, reapGoneHost, startHost, stopHarnessRole } from "./headless-lifecycle.ts";
 import {
   type HeadlessAnswer,
   type HeadlessObservation,
@@ -98,6 +98,10 @@ export class HeadlessRuntime implements NativeSessionRuntime {
 
   stopHarnessRole(ref: SessionRef, role: Exclude<SessionRole, "lane">, sessionId?: string): Promise<void> {
     return stopHarnessRole(this.stateDir, ref, role, sessionId);
+  }
+
+  reapGoneHost(ref: SessionRef, role: SessionRole): boolean {
+    return reapGoneHost(this.stateDir, ref, role);
   }
 
   observe(ref: SessionRef): Promise<HeadlessObservation> {

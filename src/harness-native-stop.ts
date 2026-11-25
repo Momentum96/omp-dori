@@ -88,6 +88,7 @@ export async function stopNativeHarness(d: Deps): Promise<void> {
         const queue = lockInboxFiles(root, binding.ref, d.now());
         if (!queue) throw new Refusal("inbox flush is in progress; retry after it settles");
         unlock.push(queue);
+        rt.reapGoneHost(binding.ref, role);
         const entry = laneEntry(rt.stateDir, binding.ref);
         const receipt = entry?.reservation.role === role && readPrivate<StopReceipt>(join(entry.dir, "stopped.json"));
         if (receipt) {

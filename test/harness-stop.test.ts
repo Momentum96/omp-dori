@@ -7,7 +7,7 @@ import { owedFile } from "../src/inbox-files.ts";
 import { flushInbox } from "../src/inbox.ts";
 import { lockInboxFiles, lockRoute, spoolMessage } from "../src/inbox-spool.ts";
 import { HeadlessRuntime, headlessArgv } from "../src/runtime/headless.ts";
-import { writePrivate } from "../src/runtime/headless-record.ts";
+import { readPrivate, type StopReceipt, writePrivate } from "../src/runtime/headless-record.ts";
 import { Runtimes } from "../src/runtime/registry.ts";
 import { World } from "./fake.ts";
 import { captureIo } from "./inbox-setup.ts";
@@ -46,6 +46,68 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+async function startedWithEndpoint(pids: { lead: number; "duty-loop": number }) {
+  const d = new World().deps();
+  const root = d.store.root;
+  const stateDir = join(root, "state");
+  const rt = new HeadlessRuntime(stateDir);
+  const lead = await rt.create({ name: "lead", role: "lead", cwd: root, env: {} });
+  const loop = await rt.create({ name: "duty-loop", role: "duty-loop", cwd: root, env: {} });
+  const dirs = { lead: join(stateDir, "headless", lead.id), "duty-loop": join(stateDir, "headless", loop.id) };
+  for (const role of ["lead", "duty-loop"] as const) {
+    writeFileSync(join(dirs[role], "started"), "", { flag: "wx", mode: 0o600 });
+    writePrivate(join(dirs[role], "endpoint.json"), {
+      socket: "/tmp/cataly-rpc-gone/socket",
+      key: "k",
+      pid: pids[role],
+    });
+  }
+  d.store.setRole("lead", lead);
+  d.store.setRole("duty-loop", loop);
+  const inventory = join(root, "harness-native.json");
+  writePrivate(inventory, {
+    version: 1,
+    stateDir,
+    roles: { lead: { ref: lead, sessionId: "owned-session" }, "duty-loop": { ref: loop } },
+  });
+  return { d, root, dirs, inventory, lead, loop };
+}
+
+test.skipIf(process.platform === "win32")(
+  "native stop retires roles whose broker died without a stop receipt",
+  async () => {
+    const dead = Bun.spawn(["true"]);
+    await dead.exited;
+    const { d, root, dirs, inventory } = await startedWithEndpoint({ lead: dead.pid, "duty-loop": dead.pid });
+    try {
+      expect((await captureIo(() => main(["stop"], d))).out).toInclude("STOPPED native harness");
+      expect(existsSync(inventory)).toBe(false);
+      expect(d.store.roles()).toEqual({});
+      for (const dir of Object.values(dirs))
+        expect(readPrivate<StopReceipt>(join(dir, "stopped.json"))?.detail).toInclude(`process ${dead.pid} is gone`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32").each([
+  ["a live broker", () => process.pid],
+  ["a reused pid", () => Bun.spawn(["sleep", "30"]).pid],
+] as const)("native stop stays held when the recorded pid is %s", async (_name, pid) => {
+  const holder = pid();
+  const { d, root, dirs, inventory, lead, loop } = await startedWithEndpoint({ lead: holder, "duty-loop": holder });
+  try {
+    await expect(main(["stop"], d)).rejects.toThrow("identity is unconfirmed");
+    expect(existsSync(inventory)).toBe(true);
+    expect(d.store.roles()).toEqual({ lead, "duty-loop": loop });
+    for (const dir of Object.values(dirs)) expect(existsSync(join(dir, "stopped.json"))).toBe(false);
+  } finally {
+    if (holder !== process.pid) process.kill(holder);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test.skipIf(process.platform === "win32").each([
   ["queued", "pending inbox"],

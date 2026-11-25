@@ -141,6 +141,33 @@ export async function stopHarnessRole(
   if (!stopped()) throw new host.HeadlessError("native role exit was not confirmed");
 }
 
+const hostGone = (pid: unknown): boolean => {
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+};
+
+/**
+ * Record a stop receipt for a started host whose broker died without writing one (a reboot or SIGKILL). Only a
+ * recorded broker PID that no longer exists proves it gone; a live or reused PID is left alone, and the receipt
+ * carries a detail so the role is never resumed as a clean close.
+ */
+export function reapGoneHost(stateDir: string, ref: SessionRef, role: SessionRole): boolean {
+  const entry = host.laneEntry(stateDir, ref);
+  if (!entry || entry.reservation.role !== role || !existsSync(join(entry.dir, "started"))) return false;
+  if (host.readPrivate<host.StopReceipt>(join(entry.dir, "stopped.json"))) return false;
+  const endpoint = host.readPrivate<host.Endpoint>(join(entry.dir, "endpoint.json"));
+  if (!endpoint || !hostGone(endpoint.pid)) return false;
+  host.writePrivate(join(entry.dir, "stopped.json"), {
+    detail: `headless host process ${endpoint.pid} is gone and left no stop receipt`,
+  });
+  return true;
+}
+
 export async function closeHost(stateDir: string, ref: SessionRef, expectedSessionId?: string): Promise<void> {
   const entry = host.laneEntry(stateDir, ref);
   if (!entry || host.readPrivate<host.StopReceipt>(join(entry.dir, "stopped.json"))) return;
