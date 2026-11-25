@@ -260,7 +260,7 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `#cataly`, found or created |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
 | `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `#cataly` when there are several |
-| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button. | `--approvals on\|off` (setup's default: on) |
+| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button, on a card in `[hub] language` with the command in a code block. Cataly's own tools and a fixed list of read-only commands (`ls`, `cat`, `grep`, `git status`, `git log`, `git diff` and the like) never ask; anything else still does. | `--approvals on\|off` (setup's default: on) |
 | `form_default_after` | duration | `"3m"` | 1s–1h | A question with one recommended choice takes it after this long. | |
 | `profile` | boolean | `true` | | `cataly setup` puts Cataly's avatar and banner on the bot where the bot has none (or still has Cataly's older ones); an image you set yourself is kept. Off: setup leaves the profile alone. | `--profile` re-applies them |
 | `away` | duration | `"3h"` | 1s–720h | You count as back when your message comes this long after your previous one. | |

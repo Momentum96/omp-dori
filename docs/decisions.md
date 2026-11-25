@@ -24,3 +24,12 @@ Decisions the owner made. They override defaults in `DESIGN.md` section 12 and i
 | 16 | Home backup | Every Cataly user's home backup goes to a private GitHub repository named `cataly-home` (under the authenticated `gh` user) by default. The home is the state folder; the config file is copied in and the store goes in as an online-backup snapshot, never the live SQLite files. Secrets and token files stay out; the secret scan runs before every push. A public repository is refused and never created. |
 | 17 | Release contents | Releases ship with voice built in (`--features voice`) on every target. One release build, not a voice and a no-voice variant. |
 | 18 | Earlier product | The earlier product is finished. Nothing is migrated from it: no bot, channels, settings or state. A new Discord application, bot and channels are created for Cataly. |
+
+## 2026-11-26: coordinator decisions pending the owner's confirmation
+
+Made by the coordinator after the owner's first 0.1.1 runs, where every call of the lead's own tool
+asked for approval in Discord. They apply until the owner confirms or changes them.
+
+| # | Topic | Decision |
+| --- | --- | --- |
+| P1 | Approvals for Cataly's tools and read-only shell work (DESIGN 12.2 A13) | Sessions keep OMP's `always-ask`. Cataly's own tools (`cataly_lead`, `cataly_lane`) are offered only as direct tool calls, which run without asking; a `bash` line naming them is refused by the hub before OMP asks, with a pointer to the direct call. A fixed list of read-only simple commands (`ls`, `cat`, `grep`, `head`, `git status`, `git log`, `git diff` and the like; the list is in DESIGN A13) runs without asking. Everything else still asks the owner: writes (shell or file tools, inside the session folder too), deletes, pushes, installs, network use, any pipe, redirection, chain or expansion, and every command not on the list, because OMP cannot vouch for them. `write` mode was rejected: OMP's `write` tier has no folder bound, so it would also auto-approve writes outside the session folder. |

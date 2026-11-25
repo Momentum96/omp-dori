@@ -6,8 +6,9 @@
 //! and off for the lead, every per-window saved-reset auto-redeem key to `no` (OJ-13; the five keys
 //! OMP 19.1.1 defines, see [`NO_REDEEM`]), and OMP's own model fallback on with `cooldown-expiry`
 //! revert (decision 7, OJ-10/11). `retry.fallbackOn` and `retry.fallbackChains` appear only when the
-//! owner set them in Cataly's `[fallback]` section; Cataly never invents a chain. JSON is valid YAML,
-//! so the overlay is written as JSON.
+//! owner set them in Cataly's `[fallback]` section; Cataly never invents a chain. Read-only shell
+//! commands run without asking ([`READ_ONLY`], DESIGN 12.2 A13). JSON is valid YAML, so the overlay
+//! is written as JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -131,6 +132,60 @@ pub(crate) const NO_REDEEM: [(&str, &str); 5] = [
     ("claudeResets", "autoRedeemFable"),
 ];
 
+/// Simple shell commands that only read, as OMP `bash.patterns` globs (`*` is any text) with
+/// `approval: allow` (DESIGN 12.2 A13). OMP applies an `allow` rule only to a whole simple command:
+/// a pipe, redirection, `;`/`&&` chain, substitution or expansion keeps the line at the `exec` tier,
+/// so `always-ask` still asks for it, as for every command not listed here (fail closed). Each entry
+/// has no option that writes, deletes, runs another program or reaches the network; git's
+/// `--output=<file>` is the one such option and asks through [`ASKS`].
+pub(crate) const READ_ONLY: [&str; 41] = [
+    "pwd",
+    "ls",
+    "ls *",
+    "cat *",
+    "head *",
+    "tail *",
+    "wc *",
+    "grep *",
+    "stat *",
+    "file *",
+    "du *",
+    "df",
+    "df *",
+    "which *",
+    "realpath *",
+    "readlink *",
+    "basename *",
+    "dirname *",
+    "diff *",
+    "cmp *",
+    "jq *",
+    "date",
+    "whoami",
+    "git status",
+    "git status *",
+    "git log",
+    "git log *",
+    "git show",
+    "git show *",
+    "git diff",
+    "git diff *",
+    "git branch",
+    "git branch --show-current",
+    "git remote -v",
+    "git rev-parse *",
+    "git ls-files",
+    "git ls-files *",
+    "git blame *",
+    "cataly status",
+    "cataly events",
+    "cataly version",
+];
+
+/// Option patterns that ask even inside a [`READ_ONLY`] command (OMP checks `prompt` rules first, on
+/// every segment): git's `--output=<file>` writes a file.
+pub(crate) const ASKS: [&str; 1] = ["* --output*"];
+
 /// The overlay's settings for a lane (`lane`) or the lead.
 pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
     let mut retry = Map::new();
@@ -146,6 +201,13 @@ pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
     // `eval` runs Python and JavaScript that can start any command, and no shell rule sees it:
     // a user `deny` is absolute in OMP, subagents included (OMP approval-mode docs).
     root.insert("tools".into(), json!({ "approval": { "eval": "deny" } }));
+    let patterns: Vec<Value> = ASKS
+        .iter()
+        .map(|glob| (glob, "prompt"))
+        .chain(READ_ONLY.iter().map(|glob| (glob, "allow")))
+        .map(|(glob, approval)| json!({ "match": glob, "approval": approval }))
+        .collect();
+    root.insert("bash".into(), json!({ "patterns": patterns }));
     root.insert("ask".into(), json!({ "timeout": 0 }));
     root.insert(
         "goal".into(),
@@ -268,6 +330,34 @@ mod tests {
         for lane in [false, true] {
             let o = overlay(&FallbackSettings::default(), lane);
             assert_eq!(o["tools"]["approval"]["eval"], "deny", "lane {lane}");
+        }
+    }
+
+    #[test]
+    fn overlay_lets_listed_read_only_commands_run_and_asks_first_for_git_output() {
+        for lane in [false, true] {
+            let o = overlay(&FallbackSettings::default(), lane);
+            let rules = o["bash"]["patterns"].as_array().unwrap();
+            assert_eq!(rules.len(), ASKS.len() + READ_ONLY.len());
+            assert_eq!(
+                rules[0],
+                json!({ "match": "* --output*", "approval": "prompt" })
+            );
+            assert!(rules[1..].iter().all(|r| r["approval"] == "allow"));
+            for glob in ["git status", "ls *", "cat *"] {
+                assert!(rules.iter().any(|r| r["match"] == glob), "{glob}");
+            }
+            // Nothing that writes, deletes, installs, pushes or fetches is listed.
+            for word in [
+                "rm", "mv", "cp", "tee", "sed", "find", "curl", "npm", "git push",
+            ] {
+                assert!(
+                    !READ_ONLY
+                        .iter()
+                        .any(|g| *g == word || g.starts_with(&format!("{word} "))),
+                    "{word}"
+                );
+            }
         }
     }
 }

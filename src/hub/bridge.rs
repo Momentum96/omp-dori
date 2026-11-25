@@ -40,8 +40,15 @@ const STOP_LIST: usize = 5;
 /// What the lead sees when rule 0 refuses its shell command (DESIGN 9.2).
 const LEAD_RULE_ZERO: &str = "No command ran: built-in shell rule 0 refuses `omp usage reset`, \
 setting a reset option with `omp config set`, and every `cataly` CLI command that changes anything. \
-Use your cataly_lead tool instead (a direct call, or `cataly_lead <op> --flag value` in bash); spending a \
-reset is never allowed.";
+Call your cataly_lead tool directly instead; spending a reset is never allowed.";
+
+/// What a session sees when its `bash` line runs its own tool by name (DESIGN 12.2 A13).
+fn own_tool_in_shell(tool: &str) -> String {
+    format!(
+        "No command ran: {tool} is a tool, not a shell command. Call {tool} directly as a tool call, \
+one op per call; its result needs no redirection, `head` or separators. This is not a blocker."
+    )
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -367,8 +374,8 @@ fn welcome(key: &str, sub: bool, lane: Option<&(String, String)>, notes: bool) -
 /// Answers a request off the read loop, so a slow lane action never stalls the connection. Shell
 /// and spawn calls and the model barrier carry facts the hub judges (EXT req. 32-35, 38-39; the
 /// lead has only rule 0 and no pin); tool calls and the stop gate go to their owners. A `bash` line
-/// that only runs the session's own tool as an OMP tool command passes; a subagent has no tool, so
-/// that name would reach a program on `PATH` there and is judged as usual.
+/// that runs the session's own tool by name is refused with a pointer to the direct call, the only
+/// form OMP offers; a subagent has no tool, so the name is judged as usual there.
 fn answer_later(
     hub: &Arc<Hub>,
     tx: &mpsc::Sender<Response>,
@@ -390,13 +397,15 @@ fn answer_later(
     tokio::spawn(async move {
         let verdict = |(allow, reason): (bool, String)| json!({ "allow": allow, "reason": reason });
         let param = |key: &str| request.params.get(key).and_then(Value::as_str);
-        let tool_line = param("tool") == Some("bash")
-            && param("command")
-                .zip(own_tool)
-                .is_some_and(|(c, t)| shell::tool_only(c, t));
+        let tool_line = own_tool.filter(|t| {
+            param("tool") == Some("bash")
+                && param("command").is_some_and(|c| shell::runs_tool(c, t))
+        });
         let reply = match (request.method.as_str(), &caller) {
             ("bridge.model", None) => verdict((true, String::new())),
-            ("bridge.shell", _) if tool_line => verdict((true, String::new())),
+            ("bridge.shell", _) if tool_line.is_some() => {
+                verdict((false, tool_line.map_or_else(String::new, own_tool_in_shell)))
+            }
             ("bridge.shell", None) => {
                 if param("command").is_some_and(shell::rule_zero) {
                     verdict((false, LEAD_RULE_ZERO.to_string()))
