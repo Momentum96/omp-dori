@@ -48,9 +48,6 @@ const TYPING_EVERY: Duration = Duration::from_secs(8);
 /// Catch-up retry backoff (DISC-IN req. 34).
 const CATCH_UP_FIRST: Duration = Duration::from_secs(2);
 const CATCH_UP_MAX: Duration = Duration::from_secs(30);
-/// The bundled avatar (DISC-OUT req. 85).
-const AVATAR: &[u8] = include_bytes!("../../../assets/avatar.jpg");
-const AVATAR_MAX: usize = 512 * 1024;
 /// The REST client for a config.
 pub(crate) type RestFor = Arc<dyn Fn(&Config) -> Result<Arc<Rest>, String> + Send + Sync>;
 
@@ -302,7 +299,7 @@ impl<T: Runtime> Intake<T> {
             .owner
             .ok_or_else(|| Stop::Fatal("no owner configured".into()))?;
         let rest = (env.rest)(config).map_err(Stop::Fatal)?;
-        let (me, bot, application, buttons) = account(&rest, owner).await?;
+        let (bot, application, buttons) = account(&rest, owner).await?;
         let bound = env
             .store
             .relay(RelayWrite::Bind {
@@ -316,9 +313,6 @@ impl<T: Runtime> Intake<T> {
             return Err(Stop::Fatal(format!(
                 "intake state belongs to bot {account} and owner {was}; `cataly discord reset` starts afresh"
             )));
-        }
-        if settings.profile && me.get("avatar").is_none_or(Value::is_null) {
-            set_avatar(&rest).await;
         }
         let scope = listed(&rest, &settings.channels).await?;
         let gateway_url = if settings.api_base.is_some() {
@@ -1055,12 +1049,9 @@ impl<T: Runtime> Intake<T> {
     }
 }
 
-/// The bot account and application checks (DISC-IN req. 1-2; DISC-OUT req. 68): the account, the
-/// bot ID, the application ID, and whether buttons arrive over the Gateway.
-async fn account(
-    rest: &Rest,
-    owner: Snowflake,
-) -> Result<(Value, Snowflake, Snowflake, bool), Stop> {
+/// The bot account and application checks (DISC-IN req. 1-2; DISC-OUT req. 68): the bot ID, the
+/// application ID, and whether buttons arrive over the Gateway.
+async fn account(rest: &Rest, owner: Snowflake) -> Result<(Snowflake, Snowflake, bool), Stop> {
     let me = rest
         .me()
         .await
@@ -1088,7 +1079,7 @@ async fn account(
         .and_then(Snowflake::parse)
         .unwrap_or(bot);
     let buttons = str_field(&app, "interactions_endpoint_url").is_none_or(str::is_empty);
-    Ok((me, bot, application, buttons))
+    Ok((bot, application, buttons))
 }
 
 /// The listed channels with their kinds and guilds; one that cannot be read stops intake (DISC-IN
@@ -1115,41 +1106,6 @@ async fn listed(rest: &Rest, channels: &[Snowflake]) -> Result<Scope, Stop> {
         );
     }
     Ok(scope)
-}
-
-/// Uploads the bundled avatar when the bot has none; failures are logged once (DISC-OUT req. 85).
-async fn set_avatar(rest: &Rest) {
-    if AVATAR.len() > AVATAR_MAX || !AVATAR.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        log::warn("bundled avatar is not a JPEG within 512 KiB", &[]);
-        return;
-    }
-    let uri = format!("data:image/jpeg;base64,{}", base64(AVATAR));
-    if let Err(e) = rest.set_avatar(&uri).await {
-        log::warn("bot avatar not set", &[("error", &e)]);
-    }
-}
-
-/// Standard base64 with padding.
-pub(crate) fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk.first().copied().unwrap_or(0),
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
-            if i <= chunk.len() {
-                let index = usize::try_from((n >> shift) & 63).unwrap_or(0);
-                out.push(char::from(TABLE.get(index).copied().unwrap_or(b'A')));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 impl<T: Runtime> Handler for Arc<Intake<T>> {
@@ -1212,20 +1168,5 @@ impl<T: Runtime> Handler for Arc<Intake<T>> {
             }
             None => h.state = "connected".into(),
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_matches_the_standard() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-        assert!(AVATAR.starts_with(&[0xFF, 0xD8, 0xFF]) && AVATAR.len() <= AVATAR_MAX);
     }
 }

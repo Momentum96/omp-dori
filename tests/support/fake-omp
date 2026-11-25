@@ -4,6 +4,7 @@
 #   omp --version            -> "omp/<omp-data/version>" (19.1.1 when the file is absent)
 #   omp usage --json         -> omp-data/usage.json; exit 1 when absent (usage unavailable)
 #   omp session lease --json -> omp-data/lease.json, else {"held":[],"unknown":[]}
+#   omp config get modelRoles --json -> omp-data/model-roles.json; exit 1 when absent
 #   rpc mode (--mode rpc-ui) -> exit 3 (no rpc-ui in this fake) unless omp-data/rpc exists; then a
 #                               minimal rpc-ui peer: the ready frame, every command answered with
 #                               success, get_state naming the session it created (--session-dir) or
@@ -193,6 +194,14 @@ case "$1" in
         printf 'omp/%s\n' "$(cat "$dir/version")"
     else
         echo 'omp/19.1.1'
+    fi
+    ;;
+config)
+    if [ -f "$dir/model-roles.json" ]; then
+        cat "$dir/model-roles.json"
+    else
+        echo 'fake omp: no model roles' >&2
+        exit 1
     fi
     ;;
 usage)

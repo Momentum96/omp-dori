@@ -289,17 +289,15 @@ fn git_out(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-/// A hub with fake `omp` and `gh` (first on PATH) and a private config folder, as setup needs.
+/// A hub with fake `omp` and `gh` (first on PATH) and Telegram as its messenger, as setup needs.
 fn backup_sandbox() -> TestHub {
     let mut hub = TestHub::new("");
     let omp = hub.install_fake("omp");
     hub.install_fake("gh");
-    hub.write_config(&format!("[omp]\npath = \"{}\"\n", omp.display()));
-    std::fs::set_permissions(
-        hub.root.join("config/cataly"),
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[telegram]\nowner = 7\n",
+        omp.display()
+    ));
     let mut path = std::ffi::OsString::from(hub.root.join("bin"));
     path.push(":");
     path.push(support::path_without_omp());
@@ -307,9 +305,9 @@ fn backup_sandbox() -> TestHub {
     hub
 }
 
-/// Decision 16: `setup --backup` reads the gh login, refuses a public repository, only offers an
-/// absent one and creates it private after `--create`, makes the state folder a git tree with its
-/// ignore list and remote, and adds the job. Restore: snapshot, change, restore from a local bare
+/// Decision 16: `setup` reads the gh login, refuses a public repository, offers an absent one and
+/// creates it private once the owner says yes, makes the state folder a git tree with its ignore
+/// list and remote, and adds the job. Restore: snapshot, change, restore from a local bare
 /// repository; the store opens (with its migrations) and the config is the one backed up.
 #[test]
 fn home_backup_setup_and_restore() {
@@ -328,7 +326,7 @@ fn home_backup_setup_and_restore() {
         "repos_owner_cataly-home",
         &json!({ "private": false }),
     );
-    let out = hub.cli(&["setup", "--backup", "--json"]);
+    let out = hub.cli(&["setup", "--backup", "on", "--json"]);
     assert!(!out.status.success());
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("public"),
@@ -336,18 +334,20 @@ fn home_backup_setup_and_restore() {
     );
     hub.fixture("gh", "repos_owner_cataly-home.json", None);
 
-    let preview = hub.json(&["setup", "--backup", "--json"]);
+    let preview = hub.json(&["setup", "--json"]);
     assert_eq!(preview["backup"]["state"], "absent", "{preview}");
     assert_eq!(preview["backup"]["repository"], "owner/cataly-home");
     let digest = preview["before"].as_str().unwrap().to_string();
-    let out = hub.cli(&["setup", "--backup", "--apply", "--expect", &digest]);
-    assert!(!out.status.success(), "an absent repository needs --create");
+    let out = hub.cli(&["setup"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("cataly setup --yes"),
+        "without a yes nothing changes: {out:?}"
+    );
     assert!(!calls().contains("repo create"));
     assert!(!state.join(".git").exists());
 
-    let out = hub.cli(&[
-        "setup", "--backup", "--apply", "--create", "--expect", &digest,
-    ]);
+    let out = hub.cli(&["setup", "--yes", "--expect", &digest]);
     assert!(out.status.success(), "{out:?}");
     assert!(calls().contains("repo create owner/cataly-home --private"));
     let ignore = std::fs::read_to_string(state.join(".gitignore")).unwrap();
@@ -371,8 +371,15 @@ fn home_backup_setup_and_restore() {
         config.contains("[jobs.home]") && config.contains("include_cataly = true"),
         "{config}"
     );
-    let again = hub.json(&["setup", "--backup", "--json"]);
-    assert_eq!(again["backup"]["state"], "private");
+    let again = hub.json(&["setup", "--json"]);
+    let backup = again["summary"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["item"] == "backup")
+        .unwrap()
+        .clone();
+    assert_eq!(backup["value"], "on (job home)", "{again}");
     assert_eq!(again["action"], "keep", "applying twice changes nothing");
     let (bare, config, events) = snapshot_follows_visibility(&mut hub, &state, &config);
     restore_and_open(&mut hub, &bare, &config, events);

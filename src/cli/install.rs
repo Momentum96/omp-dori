@@ -623,20 +623,42 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
             ));
         }
     };
-    let Some(omp) = crate::omp::resolve(&config.omp.path) else {
-        return Outcome::Held(format!(
-            "OMP ('{}') is not an executable file or on PATH; install it or set [omp] path",
-            config.omp.path
-        ));
-    };
     // The service's PATH is not the shell's: a bare name would not be found there.
     let mut notes = Vec::new();
-    if !Path::new(&config.omp.path).is_absolute() {
+    if let Some(omp) = crate::omp::resolve(&config.omp.path)
+        && !Path::new(&config.omp.path).is_absolute()
+    {
         let value = omp.display().to_string();
         if let Err(e) = super::setup::write_one(paths, "omp", "path", &value) {
             return Outcome::Held(e);
         }
         notes.push(format!("[omp] path set to {value}"));
+    }
+    match enable_service(&l, paths, &config).await {
+        Ok((file, more)) => {
+            notes.extend(more);
+            Outcome::Done(format!(
+                "service written to {} and started\n  {}",
+                file.display(),
+                notes.join("\n  ")
+            ))
+        }
+        Err(e) => Outcome::Held(e),
+    }
+}
+
+/// Writes and starts the user service that runs the installed hub (the caller checked it is
+/// installed) with `config`. Returns the service file and notes on its PATH and provider keys.
+pub(super) async fn enable_service(
+    l: &Layout,
+    paths: &Paths,
+    config: &crate::config::Config,
+) -> Result<(PathBuf, Vec<String>), String> {
+    if crate::omp::resolve(&config.omp.path).is_none() {
+        return Err(format!(
+            "OMP ('{}') is not an executable file or on PATH; install it or set [omp] path",
+            config.omp.path
+        ));
     }
     // The folders of the tools the hub runs, as found now.
     let tools = [
@@ -653,22 +675,16 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
         .collect();
     let path_line = crate::sys::service::path_line(found.iter().map(PathBuf::as_path));
     let env_path = service_env_file(paths);
-    let keys = match crate::sys::service::env_file(&env_path, &config.sessions.credentials, |k| {
+    let keys = crate::sys::service::env_file(&env_path, &config.sessions.credentials, |k| {
         std::env::var(k).ok()
-    }) {
-        Ok(k) => k,
-        Err(e) => return Outcome::Held(e),
-    };
+    })?;
     let unit = crate::sys::service::Unit {
         command: &l.command,
         path: &path_line,
         env_file: &env_path,
     };
-    let file = match crate::sys::service::enable(&l, &unit).await {
-        Ok(path) => path,
-        Err(e) => return Outcome::Held(e),
-    };
-    notes.push(format!("PATH={path_line}"));
+    let file = crate::sys::service::enable(l, &unit).await?;
+    let mut notes = vec![format!("PATH={path_line}")];
     let verb = if keys.created {
         "written to"
     } else {
@@ -681,11 +697,7 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
             keys.missing.join(", ")
         ));
     }
-    Outcome::Done(format!(
-        "service written to {} and started\n  {}",
-        file.display(),
-        notes.join("\n  ")
-    ))
+    Ok((file, notes))
 }
 
 /// The owner-only environment file the service reads its provider keys from.

@@ -1,18 +1,17 @@
-//! `cataly setup --backup [--backup-repo owner/name]` (owner decision 16): the Cataly home (the state
-//! folder) is backed up to a private GitHub repository, by default `<gh login>/cataly-home`. The
-//! preview reads the `gh` login and the repository's visibility; an existing public repository is
-//! refused, an absent one is only offered, and it is created private (`gh repo create --private`)
-//! only when the owner confirms with `--apply --create`. Applying makes the state folder a git
-//! working tree with a `.gitignore` that keeps token files, secrets and the live database files out,
-//! sets the remote and adds the backup job, which copies the config file in and snapshots the store.
+//! The home backup `cataly setup` turns on (owner decision 16): the Cataly home (the state folder)
+//! is backed up to a private GitHub repository, by default `<gh login>/cataly-home`
+//! (`--backup-repo owner/name` names another). Setup reads the `gh` login and the repository's
+//! visibility; an existing public repository is refused, and an absent one is created private
+//! (`gh repo create --private`) once the owner said yes to the setup. Applying makes the state
+//! folder a git working tree with a `.gitignore` that keeps token files, secrets and the live
+//! database files out, sets the remote and adds the backup job, which copies the config file in and
+//! snapshots the store.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::Failure;
-use super::args::Parsed;
 use crate::jobs::owner::backup::{private, valid_repo};
 use crate::sys::command::{KILL_GRACE, Output, Spec};
 use crate::sys::paths::Paths;
@@ -126,30 +125,23 @@ async fn visibility(repo: &str) -> Result<Visibility, String> {
     }
 }
 
-/// Reads the `gh` login and the repository; refuses a public one.
-pub(super) async fn plan(p: &Parsed, paths: &Paths) -> Result<Home, Failure> {
-    let user = gh_json(&["api", "user"])
-        .await
-        .map_err(Failure::Refused)?
-        .map_err(|e| {
-            Failure::Refused(format!(
-                "gh is not logged in ({}); run `gh auth login` first",
-                first_line(&e)
-            ))
-        })?;
+/// Reads the `gh` login and the repository (`repo`, else `<login>/cataly-home`); refuses a public
+/// one.
+pub(super) async fn plan(repo: Option<&str>, paths: &Paths) -> Result<Home, String> {
+    let user = gh_json(&["api", "user"]).await?.map_err(|e| {
+        format!(
+            "gh is not logged in ({}); run `gh auth login` first",
+            first_line(&e)
+        )
+    })?;
     let login = user
         .get("login")
         .and_then(Value::as_str)
         .filter(|l| valid_repo(&format!("{l}/{REPO}")))
-        .ok_or_else(|| Failure::Refused("gh did not report a usable login".into()))?
+        .ok_or("gh did not report a usable login")?
         .to_string();
-    let repo = p
-        .value("--backup-repo")
-        .map_or_else(|| format!("{login}/{REPO}"), str::to_string);
-    if !valid_repo(&repo) {
-        return Err(Failure::Usage("--backup-repo: expected owner/name".into()));
-    }
-    let visibility = visibility(&repo).await.map_err(Failure::Refused)?;
+    let repo = repo.map_or_else(|| format!("{login}/{REPO}"), str::to_string);
+    let visibility = visibility(&repo).await?;
     let name = user
         .get("name")
         .and_then(Value::as_str)
@@ -205,33 +197,17 @@ impl Home {
         })
     }
 
-    pub(super) fn lines(&self, apply: bool) -> Vec<String> {
-        let mut out = vec![format!(
-            "  home backup: {} to {} (job {JOB}, config copied in, store as a snapshot)",
-            self.dir.display(),
-            self.repo
-        )];
-        out.push(match (self.visibility, apply) {
-            (Visibility::Private, _) => format!("  {} exists and is private", self.repo),
-            (Visibility::Absent, true) => format!("  {} was created private", self.repo),
-            (Visibility::Absent, false) => format!(
-                "  {} does not exist; confirm with --create to create it private (gh repo create --private)",
-                self.repo
-            ),
-        });
-        out.push(format!("  ignored: {}", IGNORE.join(" ")));
-        out
+    /// One line for the setup summary.
+    pub(super) fn summary(&self) -> String {
+        match self.visibility {
+            Visibility::Private => format!("{} (private, exists)", self.repo),
+            Visibility::Absent => format!("{} (to create, private)", self.repo),
+        }
     }
 
-    /// Creates the repository private when confirmed, then prepares the working tree.
-    pub(super) async fn apply(&self, create: bool) -> Result<(), String> {
+    /// Creates the repository private when it is absent, then prepares the working tree.
+    pub(super) async fn apply(&self) -> Result<(), String> {
         if self.visibility == Visibility::Absent {
-            if !create {
-                return Err(format!(
-                    "{} does not exist; the preview offers to create it private: add --create",
-                    self.repo
-                ));
-            }
             let argv = words(&["gh", "repo", "create", &self.repo, "--private"]);
             let (ok, _, stderr) = command(&argv, None, GH_TIMEOUT).await?;
             if !ok {

@@ -335,6 +335,84 @@ impl TestHub {
         path
     }
 
+    /// The CLI with `args`, started by a shell that sets `umask` first.
+    pub fn umask_command(&self, umask: &str, args: &[&str]) -> Command {
+        let mut cmd = self.sandboxed("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("umask {umask}; exec \"$0\" \"$@\""))
+            .arg(BIN)
+            .args(args);
+        cmd
+    }
+
+    /// Runs the CLI with `args` and `umask 0002` on a pseudo-terminal, as the owner does. Each step
+    /// waits for its text in the output since the previous step, then runs its action, whose
+    /// answer (if any) is typed. Returns the exit status and everything the terminal showed.
+    pub fn pty(
+        &self,
+        args: &[&str],
+        steps: Vec<Step<'_>>,
+        limit: Duration,
+    ) -> (Option<i32>, String) {
+        use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+        use std::io::Read as _;
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+        grantpt(&master).unwrap();
+        unlockpt(&master).unwrap();
+        let name = ptsname(&master, Vec::new()).unwrap();
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name.to_str().unwrap())
+            .unwrap();
+        let mut cmd = self.umask_command("0002", args);
+        cmd.stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        let mut child = cmd.spawn().unwrap();
+        // The terminal reads end once the child and every copy of its side are gone.
+        drop(cmd);
+        let mut writer = std::fs::File::from(master);
+        let mut reader = writer.try_clone().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut steps = steps.into_iter();
+        let mut next = steps.next();
+        let mut shown = String::new();
+        let mut from = 0;
+        let deadline = Instant::now() + limit;
+        loop {
+            let done = child.try_wait().unwrap();
+            while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(30)) {
+                shown.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            while let Some((expect, act)) = next.as_mut() {
+                let Some(at) = shown[from..].find(*expect) else {
+                    break;
+                };
+                from += at + expect.len();
+                if let Some(answer) = act() {
+                    writer.write_all(answer.as_bytes()).unwrap();
+                }
+                next = steps.next();
+            }
+            if let Some(status) = done {
+                return (status.code(), shown);
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("no exit within {limit:?}:\n{shown}");
+            }
+        }
+    }
+
     /// One dry tick of a job: the reply's events.
     pub fn run_job(&self, name: &str) -> Vec<serde_json::Value> {
         self.json(&["job", "run", name, "--json"])["events"]
@@ -481,6 +559,8 @@ pub fn path_without_omp() -> std::ffi::OsString {
         .unwrap_or_default()
 }
 
+/// One pseudo-terminal step: the text to wait for, and what to do then (the answer to type).
+pub type Step<'a> = (&'a str, Box<dyn FnMut() -> Option<String> + 'a>);
 /// A probe job section.
 pub fn probe(name: &str, argv: &str, extra: &str) -> String {
     format!(

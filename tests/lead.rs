@@ -239,7 +239,7 @@ fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
         Some(&format!(
             "{bin} quota lift; echo \"lift=$?\"\n\
              {bin} job enable x --ack; echo \"enable=$?\"\n\
-             {bin} setup --apply --expect 0; echo \"setup=$?\"\n\
+             {bin} setup --yes --backup off; echo \"setup=$?\"\n\
              {bin} status --json > /dev/null; echo \"status=$?\"\n\
              env -u CATALY_LAUNCH {bin} voice restart; echo \"untokened=$?\"\n\
              echo done\n"

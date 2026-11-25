@@ -21,7 +21,9 @@ as the XDG rules require. `cataly setup` shows which of these came from the envi
 The config file must be a regular file owned by you, with no access for group or others
 (`chmod 600`), not a symlink, not hard-linked, UTF-8, and at most 1 MiB. A missing file means
 built-in defaults for everything. `cataly setup` applies the same rule: it refuses an existing file
-that breaks it and names the fix (for example `chmod go=`).
+that breaks it and names the fix (for example `chmod go=`). The folders it owns (the config folder,
+`secrets/` and the state folder) it creates with mode `700` and its files with mode `600`, whatever
+your umask; one of those folders that is yours but open to group or others is tightened to `700`.
 
 ### Tokens and keys
 
@@ -54,92 +56,72 @@ owned by someone else or readable by others is refused, and the error names only
 
 ### `cataly setup`
 
-`cataly setup` writes the settings it manages into the config file without touching anything else:
-comments, other keys and unknown keys stay as they are, only the managed lines change. The
-settings it manages are the ones in the flag table below; the preview lists them all.
+One command for the first run and for every later change of what it manages. At a terminal it
+asks only what Discord forces, then fills in defaults without asking:
 
-1. **Preview** (default). `cataly setup --discord-owner 1000… --discord-channels 1000…,1000…` takes
-   a snapshot of the file (identity and SHA-256), shows the action (`create`, `update` or `keep`),
-   the digests before and after, whether the result would be valid, and for each managed setting its
-   value and where it comes from (this file and whether the running hub has applied it, or the
-   built-in default). It ends with the exact command that applies it, including `--expect <hash>`.
-2. **Apply.** `cataly setup --apply --expect <hash> …` refuses an invalid result, refuses when the
-   file changed since the preview's hash, re-checks the snapshot just before writing, writes
-   atomically (a new file is created, never overwritten), and reads it back. Your own edits made in
-   between are never clobbered: setup stops and asks you to run it again.
-3. Run `cataly config reload` to apply the new file to a running hub.
+1. **Bot token.** In the [Developer Portal](https://discord.com/developers/applications): **New
+   Application**, name it, **Create**; **Bot**, **Reset Token**, copy it. Setup asks for it without
+   showing it, checks it with Discord (`GET /users/@me`) and saves it in the token file
+   (`[discord] token_file`, default `secrets/discord-token`, mode `600`). A script saves it there
+   itself; the token is never read from the command line.
+2. **Message Content intent**: switched on through `PATCH /applications/@me` (Discord allows it for
+   a bot in fewer than 100 servers). If Discord does not take it, setup names the place: Developer
+   Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content Intent**.
+3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=326417583184`,
+   exactly the permissions Cataly uses (Manage Channels, View Channels, Send Messages, Read Message
+   History, Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads). Setup
+   reads the bot's servers every 3 s until it joins (10 minutes at a terminal; `--wait 5m` in a
+   script, none by default). With several servers it asks which (`--guild <id>`).
 
-A new file gets `[hub] log_level = "info"` and `[omp] path = "omp"`. `--json` prints the report as
-JSON. Setup refuses a file that is not a regular file, is owned by someone else, or is writable by
-group or others.
+Then the defaults, each applied only where the config says nothing yet:
+
+| What | Default | Flag |
+|---|---|---|
+| Owner | the application's owner (the team's owner for a team application) | `--owner <id>` |
+| Channels | the text channels `#cataly` (your talks with the lead) and `#cataly-ops` (job notices) are reused, missing ones created; no other channel is touched | |
+| Lead | the model OMP starts with (`omp config get modelRoles`) | `--lead-model provider/id`, `--lead-cwd` |
+| Remote approvals | on: OMP's permission requests get buttons; only your presses count | `--approvals on\|off` |
+| Bot profile | Cataly's avatar and banner (`PATCH /users/@me`), only where the bot has none or still has the ones Cataly set; your own images are kept | `--profile` re-applies Cataly's |
+| Home backup | to `<gh login>/cataly-home`, private, created if absent, when `gh` is logged in (see [Home backup](#home-backup)) | `--backup on\|off`, `--backup-repo owner/name` |
+| Jobs | `[jobs.health]` and `[jobs.pressure]` with their defaults, notices to `#cataly-ops`, unless a job of that kind exists | |
+| Service | the user service, enabled and started (see [`cataly service enable`](#cataly-service-enable)); only for an installed release | `--service on\|off` |
+
+Setup then shows one short summary (a `+` marks what this run changes) and asks once; nothing
+changes before you say yes. `--yes` says yes in a script; without it and without a terminal setup
+only reports. A run on a configured machine shows what is set and changes nothing. Setup records
+which avatar and banner it set in `discord-profile.json` in the state folder, so it can tell them
+from images you set yourself.
+
+On yes it creates the missing channels, sets the bot's images, prepares the home backup, writes the
+config file, enables the service, and asks a running hub to reload. It writes the config without
+touching anything else: comments, other keys and unknown keys stay, only the lines it manages
+change. It snapshots the file (identity and SHA-256), re-checks the snapshot just before an atomic
+replace (or a create that never overwrites), and reads the file back; your own edits made
+meanwhile are never clobbered. `--expect <hash>` refuses a file whose SHA-256 is no longer the one
+a `--json` report showed as `before`, for scripts that edit an existing file.
+
+`--json` never asks and prints one report: `file`, `action` (`create`, `update`, `keep`),
+`applied`, `before` and `after` digests, `valid`, `summary` (each line with `change`), `discord`
+(`stage`, bot, application, `message_content`, `invite`, `guilds`, `guild`, `channels`, `owner`
+with its source), `backup`, `sources` (each setting below with its value and where it comes from)
+and `notes`. A step that still needs you ends the run with exit status 1, `discord.stage` naming
+it (`token`, `intent`, `guild`, `channels`, `owner`) and `discord.next` saying what to do.
+
+Setup runs the Discord steps unless the config or the flags name only a Telegram or Slack owner.
+These flags write their keys as given:
 
 | Setup option | Key it writes |
 |---|---|
 | `--log-level` | `[hub] log_level` |
 | `--omp` | `[omp] path` |
-| `--discord-token-file`, `--discord-guild`, `--discord-owner`, `--discord-channels` (comma-separated IDs) | `[discord] token_file`, `guild`, `owner`, `channels` |
+| `--discord-token-file` | `[discord] token_file` |
 | `--telegram-token-file`, `--telegram-owner`, `--telegram-group`, `--telegram-topic` | `[telegram] token_file`, `owner`, `group`, `topic` |
 | `--slack-token-file`, `--slack-role`, `--slack-owner` | `[slack] token_file`, `role`, `owner` |
 | `--fallback-on` | `[fallback] on` |
-| `--lead-model` (`provider/id`), `--lead-cwd` (absolute folder) | `[lead] model`, `cwd` |
 | `--fallback-chain` (comma-separated `provider/id`) | `[fallback.chains] default` |
-| `--backup [--backup-repo owner/name] [--create]` | the `[jobs.home]` backup job (see [Home backup](#home-backup)) |
+| `--lead-model` (`provider/id`), `--lead-cwd` (absolute folder) | `[lead] model`, `cwd` |
 
-### `cataly setup discord`
-
-The guided Discord setup. Discord leaves three steps to you, because they need your own Discord
-login; setup prints them and does everything else with the bot's token:
-
-1. In the [Developer Portal](https://discord.com/developers/applications): **New Application**,
-   name it, **Create**.
-2. **Bot**, **Reset Token**, copy it. At a terminal setup asks for it without showing it, checks
-   it with Discord and saves it in the token file (`[discord] token_file`, default
-   `secrets/discord-token`, mode `600`). A script saves it there itself. The token is never read
-   from the command line.
-3. Open the invite link setup prints, pick your server, **Authorize**.
-
-What setup does, in order, reading everything again on each run:
-
-- **Token**: `GET /users/@me`; a token Discord refuses (401) or one that is not a bot's stops the
-  run and says where to reset it.
-- **Message Content intent**: read from `GET /applications/@me`. When it is off, setup offers to
-  switch it on (`--enable-intent` in scripts) through `PATCH /applications/@me`, which Discord
-  allows for a bot in fewer than 100 servers. If Discord does not take it, setup names the place:
-  Developer Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content
-  Intent**, **Save Changes**.
-- **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=<n>`
-  with exactly the permissions Cataly uses: View Channels, Send Messages, Read Message History,
-  Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads
-  (`326417583168`); plus Manage Channels (`326417583184`) only when setup is to create channels.
-- **Server**: `GET /users/@me/guilds`, read every 3 s until the bot joins, for at most `--wait`
-  (up to `1h`; 10 minutes at a terminal, no wait in a script). With several servers setup asks
-  which (`--guild <id>` in scripts; `[discord] guild` when already set).
-- **Channels**: the text channels named `cataly` (your talks with the lead) and `cataly-ops` (job
-  notices) are reused. Missing ones are created with `POST /guilds/{id}/channels` only after you
-  confirm (`--create-channels` in scripts). No other channel is changed. Two
-  text channels with the same name stop the run until you rename one.
-- **Owner**: `--owner <id>`, else `[discord] owner`, else the application's owner (the team's
-  owner for a team application) after you confirm (`--owner app` in scripts), else the ID you
-  type.
-- **Config**, through the same preview, `--expect` and apply rules as `cataly setup`:
-  `[discord] guild`, `owner`, `channels` (the lead's channel added to any already listed; `home`
-  set to it when the list has more than one) and `[destinations.cataly-ops]` with
-  `kind = "discord"` and the `cataly-ops` channel. A setting is written only when the file says
-  something else, so a second run changes nothing. At a terminal setup shows the preview and asks
-  before writing; a script writes with `--apply --expect <hash>`.
-- **Lead**: when the config has no `[lead]`, setup asks for the lead's model as `provider/id`,
-  offering the model OMP itself starts with (`--lead-model <provider/id>` in scripts; `-` for
-  none). Without a lead your messages wait with nobody to answer them.
-- **Remote approvals**: setup asks whether OMP's permission requests (commands, file edits) may be
-  approved with buttons in Discord (`--remote-approvals` in scripts), writing
-  `[discord] remote_approvals = true`. Only your own presses count. Without it a request posts
-  one notice in the room and waits for `cataly lead answer` on this machine.
-
-`--json` never asks and prints one JSON report: the `cataly setup` report with a `discord` section
-(`stage`, `next`, bot, application, `message_content`, `invite`, `guilds`, `guild`, `channels`
-with `existing` or `created`, `owner` with its source). A step that still needs you ends the run
-with exit status 1, `stage` naming it (`token`, `intent`, `guild`, `channels`, `owner`) and `next`
-saying what to do; run setup again afterwards.
+A new file also gets `[hub] log_level = "info"` and `[omp] path = "omp"`.
 
 ### `cataly service enable`
 
@@ -257,15 +239,15 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | Key | Type | Default | Allowed | What it does | Setup |
 |---|---|---|---|---|---|
 | `token_file` | string | `secrets/discord-token` | absolute path | The bot token file. | `--discord-token-file` |
-| `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | `--discord-guild`, `setup discord` |
+| `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | `--guild` |
 | `api_base` | string | Discord's API | `http(s)://` on localhost only | Test override of the API address. | |
-| `owner` | string | none | Discord user ID | Your account. | `--discord-owner`, `setup discord` |
-| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `--discord-channels`, `setup discord` |
+| `owner` | string | none | Discord user ID | Your account. | `--owner` (default: the application's owner) |
+| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `#cataly`, found or created |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
-| `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `setup discord` |
-| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button. | |
+| `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `#cataly` when there are several |
+| `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button. | `--approvals on\|off` (setup's default: on) |
 | `form_default_after` | duration | `"3m"` | 1s–1h | A question with one recommended choice takes it after this long. | |
-| `profile` | boolean | `true` | | Clear the bot's avatar at start. | |
+| `profile` | boolean | `true` | | `cataly setup` puts Cataly's avatar and banner on the bot where the bot has none (or still has Cataly's older ones); an image you set yourself is kept. Off: setup leaves the profile alone. | `--profile` re-applies them |
 | `away` | duration | `"3h"` | 1s–720h | You count as back when your message comes this long after your previous one. | |
 | `others` | list of strings | `[]` | subset of `channels` | Watched rooms where you talk with other people. | |
 | `others_alert` | duration | `"120m"` | 1s–168h | A message from someone else in those rooms unanswered this long is reported once. | |
@@ -696,15 +678,17 @@ Events: `pr.baseline` (`pr`, `title`, `state`), `pr.feedback` (`pr`, `author`, `
 
 #### `quota`: provider quota and the quota gate
 
-Warns once when a provider limit rises past an alert level. While any watched limit is at or above
-`hold`, the quota gate holds new session starts; it opens when fresh data shows all of them below,
-or when every limit that closed it has passed its reset time. `cataly quota lift` opens it by hand.
+Warns once when a provider limit rises past an alert level. While a watched limit is at or above
+`hold`, the quota gate holds new session starts on that limit's provider; a session whose model
+(`provider/id`) belongs to another provider starts as usual. The gate opens when fresh data shows
+the limits below, or when every limit that closed it has passed its reset time. `cataly status` and
+`cataly quota` name the held providers; `cataly quota lift` opens the gate by hand.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `providers` | list of strings | `[]` (all OMP reports) | | Providers watched. |
 | `levels` | list of integers | `[70, 85, 95]` | 1–100, at least one; sorted, duplicates dropped | Alert levels in per cent. |
-| `hold` | integer | `85` | 1–100 | The gate closes at this level. |
+| `hold` | integer | `85` | 1–100 | The gate holds a provider's new sessions from this level. |
 
 Events: `quota.level` (`limit`, `provider`, `account`, `percent`, `window`, `reset_in`),
 `quota.recovered` (`limit`, `provider`, `account`, `percent`), `quota.hold` (`limits`, `level`),
@@ -733,10 +717,10 @@ Events: `backup.refused` (`files`, `rule`), `backup.clean` (`commit`),
 
 ##### Home backup
 
-`cataly setup --backup` backs up the state folder to a private GitHub repository, by default
-`<your gh login>/cataly-home` (`--backup-repo owner/name` picks another). The preview reads your
-`gh` login and the repository; a public repository is refused, and a missing one is created private
-only with `--apply --create`. Applying makes the state folder a git working tree whose
+`cataly setup` backs up the state folder to a private GitHub repository when `gh` is logged in, by
+default `<your gh login>/cataly-home` (`--backup-repo owner/name` picks another; `--backup off`
+leaves it out). It reads your `gh` login and the repository; a public repository is refused, and a
+missing one is created private once you say yes. Setup makes the state folder a git working tree whose
 `.gitignore` keeps token files, secrets, keys and the live database out, sets the remote, and adds
 `[jobs.home]` with `kind = "backup"`, `dir` = the state folder, `remote = "origin"`,
 `branch = "main"`, your GitHub name and no-reply email, and `include_cataly = true`.

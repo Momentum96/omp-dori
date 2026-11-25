@@ -792,17 +792,17 @@ impl Rest {
         }
     }
 
-    /// Sets the bot's avatar from a data URI (DISC-OUT req. 85).
-    pub(crate) async fn set_avatar(&self, data_uri: &str) -> Result<(), RestError> {
+    /// Sets the bot's avatar and banner (`fields`: `avatar` and/or `banner` as image data URIs);
+    /// returns the bot account as Discord answers it, with the new image hashes.
+    pub(crate) async fn set_profile(&self, fields: Value) -> Result<Value, RestError> {
         self.call(
             "PATCH users/@me",
             Method::PATCH,
             "/users/@me",
-            Some(json!({ "avatar": data_uri })),
+            Some(fields),
             Kind::Idempotent,
         )
         .await
-        .map(drop)
     }
 
     /// One part of an answer: a linked reply for the first part (fail if the source is gone), with

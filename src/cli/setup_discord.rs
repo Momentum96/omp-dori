@@ -1,31 +1,26 @@
-//! `cataly setup discord`: the guided Discord setup. Discord leaves three steps to the owner, because
-//! they need his own Discord login: making the application, copying its bot token, and adding the
-//! bot to a server through the invite link. Everything else runs here on the bot's token: the token
-//! is checked (`GET /users/@me`); the Message Content intent is read from the application and, with
-//! the owner's consent, switched on (`PATCH /applications/@me` may set the intent flag of a bot in
-//! fewer than 100 servers); the invite link carries exactly the permissions Cataly uses; the
-//! servers the bot is in are read until it joins one; text channels named `cataly` and `cataly-ops`
-//! are reused, or created after confirmation, and no other channel is touched; the owner's user ID
-//! comes from the application's owner after confirmation, or is typed in. The config is written
-//! through the preview, `--expect` and apply path of `cataly setup`. Every fact is read again on
+//! The Discord part of `cataly setup`. Discord leaves three steps to the owner, because they need
+//! his own Discord login: making the application, copying its bot token, and adding the bot to a
+//! server through the invite link. Everything else runs here on the bot's token: the token is
+//! checked (`GET /users/@me`); the Message Content intent is read from the application and switched
+//! on (`PATCH /applications/@me` may set the intent flag of a bot in fewer than 100 servers); the
+//! invite link carries exactly the permissions Cataly uses; the servers the bot is in are read until
+//! it joins one; text channels named `cataly` and `cataly-ops` are found, and missing ones are
+//! created only once the owner said yes to the setup; no other channel is touched. The owner is the
+//! application's owner unless `--owner` or the config names someone. Every fact is read again on
 //! each run and a setting is written only when it differs, so a second run changes nothing.
 //!
-//! At a terminal the setup asks; with `--json`, or when stdin is not a terminal, it never asks:
-//! the flags answer, and a step that still needs the owner ends the run with exit status 1 and
-//! names that step.
+//! At a terminal the token is asked for without echo; a script saves it in the token file. A step
+//! that still needs the owner ends the run with exit status 1 and names that step.
 
-use std::io::BufRead as _;
 use std::path::Path;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::args::Parsed;
-use super::setup::{self, Plan};
-use super::{Failure, out};
-use crate::config::{self, Config, Destination};
-use crate::omp::transcript::model_selector;
+use super::out;
+use super::setup::{self, Terminal};
+use crate::config::{self, Config, Destination, sha256_hex};
 use crate::relay::discord::{API, ChannelRef, Rest, Snowflake};
 use crate::relay::http::Base;
 use crate::sys::paths::Paths;
@@ -39,86 +34,26 @@ const MESSAGE_CONTENT_LIMITED: u64 = 1 << 19;
 /// The application flags a bot may set itself: the presence, members and message content intents
 /// of a bot in fewer than 100 servers.
 const LIMITED_INTENTS: u64 = (1 << 13) | (1 << 15) | MESSAGE_CONTENT_LIMITED;
-/// What Cataly does in its channels: add reactions, view channels, send messages, read message
-/// history, manage threads, create public threads, send messages in threads.
+/// What Cataly does in its server: manage channels (setup creates its two), add reactions, view
+/// channels, send messages, read message history, manage threads, create public threads, send
+/// messages in threads.
 const PERMISSIONS: u64 =
-    (1 << 6) | (1 << 10) | (1 << 11) | (1 << 16) | (1 << 34) | (1 << 35) | (1 << 38);
-/// Manage channels, asked for only when setup is to create its channels.
-const MANAGE_CHANNELS: u64 = 1 << 4;
+    (1 << 4) | (1 << 6) | (1 << 10) | (1 << 11) | (1 << 16) | (1 << 34) | (1 << 35) | (1 << 38);
 /// The lead's channel and the job notices' channel (also the name of the destination for it).
-const LEAD: &str = "cataly";
-const OPS: &str = "cataly-ops";
+pub(super) const LEAD: &str = "cataly";
+pub(super) const OPS: &str = "cataly-ops";
 /// How often the server list is read while waiting for the bot to join.
 const POLL: Duration = Duration::from_secs(3);
 /// How long a run at a terminal waits for the bot to join, unless `--wait` says otherwise.
 const JOIN_WAIT: Duration = Duration::from_mins(10);
 /// The longest `--wait`.
 const WAIT_MAX: Duration = Duration::from_hours(1);
-/// How long one question waits for its answer.
-const ANSWER_WAIT: Duration = Duration::from_mins(30);
 /// Tries at one step before the run stops and asks for a new run.
 const TRIES: usize = 5;
 
-/// The owner's terminal. Answers are read on their own thread, so every wait for one is bounded.
-struct Terminal {
-    lines: mpsc::Receiver<String>,
-}
-
-impl Terminal {
-    /// The terminal, when stdin is one and JSON was not asked for; scripts get none.
-    fn open(as_json: bool) -> Option<Self> {
-        if as_json || !rustix::termios::isatty(std::io::stdin()) {
-            return None;
-        }
-        let (tx, lines) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        Some(Self { lines })
-    }
-
-    /// One answer, trimmed; `None` when stdin closed or no answer came in time.
-    fn ask(&self, question: &str) -> Option<String> {
-        out::prompt(&format!("{question} "));
-        let answer = self.lines.recv_timeout(ANSWER_WAIT).ok();
-        if answer.is_none() {
-            out::line("");
-        }
-        answer.map(|a| a.trim().to_string())
-    }
-
-    fn yes(&self, question: &str) -> bool {
-        match self.ask(&format!("{question} [Y/n]")).as_deref() {
-            Some("") => true,
-            Some(a) => matches!(a.to_ascii_lowercase().as_str(), "y" | "yes"),
-            None => false,
-        }
-    }
-
-    /// One answer typed without echo. `None` also when echo cannot be turned off: then nothing is
-    /// asked, so a token never shows on the screen.
-    fn hidden(&self, question: &str) -> Option<String> {
-        use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
-        let stdin = std::io::stdin();
-        let saved = tcgetattr(&stdin).ok()?;
-        let mut quiet = saved.clone();
-        quiet.local_modes.remove(LocalModes::ECHO);
-        tcsetattr(&stdin, OptionalActions::Now, &quiet).ok()?;
-        let answer = self.ask(question);
-        let _ = tcsetattr(&stdin, OptionalActions::Now, &saved);
-        out::line("");
-        answer
-    }
-}
-
 /// What the run found, for the report.
 #[derive(Default)]
-struct Found {
+pub(super) struct Found {
     stage: &'static str,
     token_file: String,
     bot: Option<Value>,
@@ -132,7 +67,7 @@ struct Found {
 }
 
 impl Found {
-    fn report(&self, next: Option<&str>) -> Value {
+    pub(super) fn report(&self, next: Option<&str>) -> Value {
         json!({
             "stage": self.stage,
             "next": next,
@@ -149,14 +84,6 @@ impl Found {
     }
 }
 
-/// What the config gets once every step is done.
-struct Ready {
-    guild: Snowflake,
-    lead: Snowflake,
-    ops: Snowflake,
-    owner: Snowflake,
-}
-
 /// The owner as `--owner` names him.
 #[derive(Clone, Copy)]
 enum OwnerFlag {
@@ -164,160 +91,124 @@ enum OwnerFlag {
     Application,
 }
 
-struct Flow<'a> {
-    p: &'a Parsed,
-    paths: &'a Paths,
-    config: Config,
-    term: Option<Terminal>,
-    as_json: bool,
-    wait: Option<Duration>,
+/// The `--guild`, `--owner` and `--wait` flags, checked.
+pub(super) struct Flags {
     guild: Option<Snowflake>,
     owner: Option<OwnerFlag>,
-    /// Whether setup creates missing channels, once known (the invite link depends on it).
-    create: Option<bool>,
+    wait: Option<Duration>,
+}
+
+impl Flags {
+    pub(super) fn parse(p: &Parsed) -> Result<Self, String> {
+        let wait = p
+            .value("--wait")
+            .map(|w| {
+                config::parse_duration(w)
+                    .filter(|d| *d <= WAIT_MAX)
+                    .ok_or("--wait: expected a duration up to 1h, such as 5m")
+            })
+            .transpose()?;
+        let guild = p
+            .value("--guild")
+            .map(|g| Snowflake::parse(g).ok_or("--guild: expected the server's Discord ID"))
+            .transpose()?;
+        let owner = p
+            .value("--owner")
+            .map(|o| match o {
+                "app" => Ok(OwnerFlag::Application),
+                id => Snowflake::parse(id)
+                    .map(OwnerFlag::Id)
+                    .ok_or("--owner: expected your Discord user ID, or app"),
+            })
+            .transpose()?;
+        Ok(Self { guild, owner, wait })
+    }
+}
+
+/// Discord once every step that needs the owner is done: what the config gets.
+pub(super) struct Discord {
+    rest: Rest,
+    pub(super) found: Found,
+    pub(super) bot: String,
+    /// The bot account as Discord reported it (its avatar and banner hashes among it).
+    me: Value,
+    pub(super) guild: Snowflake,
+    pub(super) server: String,
+    /// The two channels; `None` until created.
+    pub(super) lead: Option<Snowflake>,
+    pub(super) ops: Option<Snowflake>,
+    pub(super) owner: Snowflake,
+    pub(super) owner_source: &'static str,
+}
+
+/// Why the run stopped: the report so far and the step that still needs the owner.
+pub(super) type Stop = (Value, String);
+
+struct Flow<'a> {
+    paths: &'a Paths,
+    config: &'a Config,
+    term: Option<&'a Terminal>,
+    as_json: bool,
+    flags: &'a Flags,
     found: Found,
 }
 
-/// Why the run stopped: the step that still needs the owner.
-type Stop = String;
-
-pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
-    let wait = p
-        .value("--wait")
-        .map(|w| {
-            config::parse_duration(w)
-                .filter(|d| *d <= WAIT_MAX)
-                .ok_or_else(|| {
-                    Failure::Usage("--wait: expected a duration up to 1h, such as 5m".into())
-                })
-        })
-        .transpose()?;
-    let guild = p
-        .value("--guild")
-        .map(|g| {
-            Snowflake::parse(g)
-                .ok_or_else(|| Failure::Usage("--guild: expected the server's Discord ID".into()))
-        })
-        .transpose()?;
-    let owner = p
-        .value("--owner")
-        .map(|o| match o {
-            "app" => Ok(OwnerFlag::Application),
-            id => Snowflake::parse(id).map(OwnerFlag::Id).ok_or_else(|| {
-                Failure::Usage("--owner: expected your Discord user ID, or app".into())
-            }),
-        })
-        .transpose()?;
-    let (before, text) = setup::load(paths)?;
-    let current = config::parse(&text).map_err(|e| {
-        Failure::Refused(format!(
-            "{} is not a valid config ({}); fix it first, cataly config check shows why",
-            paths.config_file.display(),
-            config::describe(&e)
-        ))
-    })?;
+/// Runs the Discord steps against `config` (the config file as it is now).
+pub(super) async fn discover(
+    paths: &Paths,
+    config: &Config,
+    term: Option<&Terminal>,
+    as_json: bool,
+    flags: &Flags,
+) -> Result<Discord, Stop> {
     let mut flow = Flow {
-        p,
         paths,
-        config: current,
-        term: Terminal::open(as_json),
+        config,
+        term,
         as_json,
-        wait,
-        guild,
-        owner,
-        create: None,
+        flags,
         found: Found::default(),
     };
-    let ready = match super::install::block_on(flow.discover()) {
-        Ok(ready) => ready,
-        Err(next) => {
-            if as_json {
-                out::json(&json!({ "discord": flow.found.report(Some(&next)) }));
-            }
-            return Err(Failure::Refused(next));
+    match flow.steps().await {
+        Ok((rest, me, (guild, server), (lead, ops), (owner, owner_source))) => {
+            flow.found.stage = "ready";
+            Ok(Discord {
+                rest,
+                found: flow.found,
+                bot: me
+                    .get("username")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string(),
+                me,
+                guild,
+                server,
+                lead,
+                ops,
+                owner,
+                owner_source,
+            })
         }
-    };
-    flow.found.stage = "ready";
-    let creating = before.bytes.is_none();
-    let mut text = flow.config_text(setup::managed(p, text, creating)?, &ready);
-    let mut flags = format!(" --guild {} --owner {}", ready.guild, ready.owner);
-    if let Some(model) = flow.lead_model() {
-        text = setup::set_key(&text, "lead", "model", &model);
-        flags.push_str(" --lead-model ");
-        flags.push_str(&model);
+        Err(next) => Err((flow.found.report(Some(&next)), next)),
     }
-    if flow.remote_approvals() {
-        text = setup::set_rendered(&text, "discord", "remote_approvals", "true");
-        flags.push_str(" --remote-approvals");
-    }
-    let digest = before.digest();
-    let mut plan = Plan {
-        apply: p.flag("--apply"),
-        expect: p.value("--expect"),
-        command: "setup discord",
-        flags,
-        always_offer: false,
-        extra: Some(("discord", flow.found.report(None))),
-    };
-    setup::finish(paths, &before, creating, &text, None, as_json, &plan)?;
-    let changes = creating || before.bytes.as_deref() != Some(text.as_bytes());
-    if !plan.apply
-        && changes
-        && config::parse(&text).is_ok()
-        && flow.term.as_ref().is_some_and(|t| t.yes("Write it now?"))
-    {
-        plan.apply = true;
-        plan.expect = Some(&digest);
-        setup::finish(paths, &before, creating, &text, None, as_json, &plan)?;
-    }
-    Ok(())
 }
 
-impl Flow<'_> {
-    /// The lead's model to write: `--lead-model`, else, when the config has no lead, the answer at
-    /// the terminal, offering the model OMP itself starts with. `None` leaves `[lead]` as it is.
-    fn lead_model(&self) -> Option<String> {
-        if let Some(model) = self.p.value("--lead-model") {
-            return Some(model.trim().to_string());
-        }
-        if self.config.lead.is_some() {
-            return None;
-        }
-        let term = self.term.as_ref()?;
-        let offered = crate::omp::resolve(&self.config.omp.path)
-            .and_then(|omp| super::install::block_on(crate::omp::usage::default_model(&omp)));
-        self.say(
-            "No lead is set. The lead is the OMP session that answers your messages; without one \
-             they wait.",
-        );
-        let question = match &offered {
-            Some(m) => format!("The lead's model, as provider/id [{m}] (- for none):"),
-            None => "The lead's model, as provider/id (empty for none):".to_string(),
-        };
-        for _ in 0..TRIES {
-            let pick = match term.ask(&question)?.as_str() {
-                "" => offered.clone()?,
-                "-" => return None,
-                answer => answer.to_string(),
-            };
-            if model_selector(&pick) {
-                return Some(pick);
-            }
-            self.say("Expected provider/id, such as anthropic/claude-opus-5-5.");
-        }
-        None
-    }
+type Steps = (
+    Rest,
+    Value,
+    (Snowflake, String),
+    (Option<Snowflake>, Option<Snowflake>),
+    (Snowflake, &'static str),
+);
 
-    /// Whether to turn remote approvals on: `--remote-approvals`, else the owner's yes at the
-    /// terminal. Only the owner's own button presses count; a request nobody answers stays waiting.
-    fn remote_approvals(&self) -> bool {
-        !self.config.discord.remote_approvals
-            && self.confirm(
-                "--remote-approvals",
-                "Approve OMP's permission requests (commands, file edits) with buttons in Discord? \
-                 Only your account can press them; without this they wait for `cataly lead answer` \
-                 on this machine.",
-            )
+impl Flow<'_> {
+    async fn steps(&mut self) -> Result<Steps, String> {
+        let rest = self.token().await?;
+        let (app, me) = self.intent(&rest).await?;
+        let server = self.server(&rest).await?;
+        let channels = self.channels(&rest, server.0).await?;
+        let owner = self.owner_id(&app)?;
+        Ok((rest, me, server, channels, owner))
     }
 
     fn say(&self, line: &str) {
@@ -326,33 +217,14 @@ impl Flow<'_> {
         }
     }
 
-    /// Yes from the flag, else from the owner at the terminal; no when nobody can answer.
-    fn confirm(&self, flag: &str, question: &str) -> bool {
-        self.p.flag(flag) || self.term.as_ref().is_some_and(|t| t.yes(question))
-    }
-
-    fn stop(&mut self, stage: &'static str, next: String) -> Stop {
+    fn stop(&mut self, stage: &'static str, next: String) -> String {
         self.found.stage = stage;
         next
     }
 
-    async fn discover(&mut self) -> Result<Ready, Stop> {
-        let rest = self.token().await?;
-        let app = self.intent(&rest).await?;
-        let (guild, name) = self.server(&rest).await?;
-        let (lead, ops) = self.channels(&rest, guild, &name).await?;
-        let owner = self.owner_id(&app)?;
-        Ok(Ready {
-            guild,
-            lead,
-            ops,
-            owner,
-        })
-    }
-
     /// A REST client on a token Discord accepts as a bot's.
-    async fn token(&mut self) -> Result<Rest, Stop> {
-        let path = crate::jobs::owner::health::token_path(&self.config, &self.paths.config_file);
+    async fn token(&mut self) -> Result<Rest, String> {
+        let path = crate::jobs::owner::health::token_path(self.config, &self.paths.config_file);
         self.found.token_file = path.display().to_string();
         let base = match &self.config.discord.api_base {
             Some(b) => b.clone(),
@@ -396,22 +268,18 @@ impl Flow<'_> {
                     self.say(&line);
                 }
             }
-            let Some(term) = &self.term else {
+            let Some(term) = self.term else {
                 let next = format!(
-                    "make the bot in the Developer Portal ({PORTAL}) and save its token in {} (chmod 600), then run cataly setup discord again",
+                    "make the bot in the Developer Portal ({PORTAL}) and save its token in {} (chmod 600), then run cataly setup again",
                     path.display()
                 );
                 return Err(self.stop("token", next));
             };
-            let question = format!(
-                "Paste the bot token (it is not shown), or press Enter once it is in {}:",
-                path.display()
-            );
-            let Some(typed) = term.hidden(&question) else {
+            let Some(typed) = term.hidden("Bot token (not shown):") else {
                 return Err(self.stop(
                     "token",
                     format!(
-                        "no token given; save it in {} and run setup again",
+                        "no token given; save it in {} and run cataly setup again",
                         path.display()
                     ),
                 ));
@@ -433,54 +301,51 @@ impl Flow<'_> {
         }
         Err(self.stop(
             "token",
-            "no token Discord accepts yet; run cataly setup discord again".into(),
+            "no token Discord accepts yet; run cataly setup again".into(),
         ))
     }
 
-    /// The application, with its Message Content intent on.
-    async fn intent(&mut self, rest: &Rest) -> Result<Value, Stop> {
+    /// The application, with its Message Content intent switched on, and the bot's account.
+    async fn intent(&mut self, rest: &Rest) -> Result<(Value, Value), String> {
         let me = rest
             .me()
             .await
             .map_err(|e| self.stop("token", format!("reading the bot: {e}")))?;
         let bot_id = me.get("id").and_then(Value::as_str).unwrap_or_default();
-        let bot_name = me.get("username").and_then(Value::as_str).unwrap_or("?");
+        let bot_name = me
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
         self.found.bot = Some(json!({ "id": bot_id, "username": bot_name }));
-        self.say(&format!(
-            "bot: {bot_name} ({bot_id}), token from {}",
-            self.found.token_file
-        ));
         let mut app = self.application(rest).await?;
         if intent_on(&app) {
             self.found.message_content = Some("on");
-            self.say("Message Content intent: on");
-            return Ok(app);
+            return Ok((app, me));
+        }
+        // Cataly cannot read the owner's messages without it: switch it on, no question.
+        let flags = app.get("flags").and_then(Value::as_u64).unwrap_or(0);
+        match rest
+            .set_application_flags((flags & LIMITED_INTENTS) | MESSAGE_CONTENT_LIMITED)
+            .await
+        {
+            Ok(_) => app = self.application(rest).await?,
+            Err(e) => self.say(&format!(
+                "Discord did not take the Message Content intent ({e})"
+            )),
+        }
+        if intent_on(&app) {
+            self.found.message_content = Some("switched on");
+            self.say("Message Content intent: switched on");
+            return Ok((app, me));
         }
         self.found.message_content = Some("off");
-        if self.confirm(
-            "--enable-intent",
-            "The bot's Message Content intent is off; Cataly needs it to read your messages. Switch it on now?",
-        ) {
-            let flags = app.get("flags").and_then(Value::as_u64).unwrap_or(0);
-            match rest
-                .set_application_flags((flags & LIMITED_INTENTS) | MESSAGE_CONTENT_LIMITED)
-                .await
-            {
-                Ok(_) => app = self.application(rest).await?,
-                Err(e) => self.say(&format!("Discord did not take the change ({e})")),
-            }
-            if intent_on(&app) {
-                self.found.message_content = Some("switched on");
-                self.say("Message Content intent: switched on");
-                return Ok(app);
-            }
-        }
         let place = format!(
             "turn on the Message Content intent: Developer Portal ({PORTAL}), your application, Bot, \
              Privileged Gateway Intents, Message Content Intent, Save Changes"
         );
         for _ in 0..TRIES {
-            let Some(term) = &self.term else { break };
+            let Some(term) = self.term else { break };
             self.say(&format!("Please {place}."));
             if term.ask("Press Enter once it is on:").is_none() {
                 break;
@@ -488,17 +353,13 @@ impl Flow<'_> {
             app = self.application(rest).await?;
             if intent_on(&app) {
                 self.found.message_content = Some("on");
-                self.say("Message Content intent: on");
-                return Ok(app);
+                return Ok((app, me));
             }
         }
-        Err(self.stop(
-            "intent",
-            format!("{place}; or run cataly setup discord --enable-intent"),
-        ))
+        Err(self.stop("intent", format!("{place}; then run cataly setup again")))
     }
 
-    async fn application(&mut self, rest: &Rest) -> Result<Value, Stop> {
+    async fn application(&mut self, rest: &Rest) -> Result<Value, String> {
         let app = rest
             .application()
             .await
@@ -510,52 +371,31 @@ impl Flow<'_> {
         Ok(app)
     }
 
-    /// The invite link: the bot scope with Cataly's permissions, and Manage Channels when setup is
-    /// to create its channels.
-    fn invite(&mut self, create: bool) -> String {
+    /// The invite link: the bot scope with Cataly's permissions.
+    fn invite(&mut self) -> String {
         let id = self
             .found
             .application
             .map_or_else(String::new, |a| a.to_string());
-        let permissions = PERMISSIONS | if create { MANAGE_CHANNELS } else { 0 };
-        let link = format!("{INVITE}?client_id={id}&scope=bot&permissions={permissions}");
+        let link = format!("{INVITE}?client_id={id}&scope=bot&permissions={PERMISSIONS}");
         self.found.invite = Some(link.clone());
         link
     }
 
-    fn create_channels(&mut self) -> bool {
-        if let Some(c) = self.create {
-            return c;
-        }
-        let c = self.confirm(
-            "--create-channels",
-            &format!(
-                "Should setup create #{LEAD} (your talks with the lead) and #{OPS} (job notices) \
-                 when the server has none? The bot then also gets Manage Channels."
-            ),
-        );
-        self.create = Some(c);
-        c
-    }
-
     /// The server the bot is in, after the owner added it through the invite link.
-    async fn server(&mut self, rest: &Rest) -> Result<(Snowflake, String), Stop> {
-        let wanted = self.guild.or(self.config.discord.guild);
+    async fn server(&mut self, rest: &Rest) -> Result<(Snowflake, String), String> {
+        let wanted = self.flags.guild.or(self.config.discord.guild);
         let mut guilds = self.guild_list(rest).await?;
         let present = |list: &[(Snowflake, String)]| match wanted {
             Some(w) => list.iter().any(|(id, _)| *id == w),
             None => !list.is_empty(),
         };
-        if present(&guilds) {
-            let create = self.p.flag("--create-channels");
-            self.invite(create);
-        } else {
-            let create = self.create_channels();
-            let link = self.invite(create);
+        let link = self.invite();
+        if !present(&guilds) {
             self.say(&format!(
                 "Add the bot to your server: open {link}, pick the server, then Authorize."
             ));
-            let wait = self.wait.unwrap_or(if self.term.is_some() {
+            let wait = self.flags.wait.unwrap_or(if self.term.is_some() {
                 JOIN_WAIT
             } else {
                 Duration::ZERO
@@ -583,7 +423,7 @@ impl Flow<'_> {
                 );
                 return Err(self.stop(
                     "guild",
-                    format!("{what}: open {link}, add it, then run cataly setup discord again"),
+                    format!("{what}: open {link}, add it, then run cataly setup again"),
                 ));
             }
         }
@@ -604,11 +444,10 @@ impl Flow<'_> {
             ));
         };
         self.found.guild = Some(json!({ "id": id.to_string(), "name": name }));
-        self.say(&format!("server: {name} ({id})"));
         Ok((id, name))
     }
 
-    async fn guild_list(&mut self, rest: &Rest) -> Result<Vec<(Snowflake, String)>, Stop> {
+    async fn guild_list(&mut self, rest: &Rest) -> Result<Vec<(Snowflake, String)>, String> {
         let list = rest
             .guilds()
             .await
@@ -633,7 +472,7 @@ impl Flow<'_> {
 
     /// The owner's choice among several servers, at the terminal.
     fn pick(&self, list: &[(Snowflake, String)]) -> Option<(Snowflake, String)> {
-        let term = self.term.as_ref()?;
+        let term = self.term?;
         self.say("The bot is in several servers:");
         for (i, (id, name)) in list.iter().enumerate() {
             self.say(&format!("  {}. {name} ({id})", i + 1));
@@ -652,14 +491,12 @@ impl Flow<'_> {
         None
     }
 
-    /// `#cataly` and `#cataly-ops`: the text channels with those names, or new ones after
-    /// confirmation. No other channel is changed.
+    /// `#cataly` and `#cataly-ops`: the text channels with those names; `None` for one to create.
     async fn channels(
         &mut self,
         rest: &Rest,
         guild: Snowflake,
-        server: &str,
-    ) -> Result<(Snowflake, Snowflake), Stop> {
+    ) -> Result<(Option<Snowflake>, Option<Snowflake>), String> {
         let all = rest
             .guild_channels(guild)
             .await
@@ -683,10 +520,14 @@ impl Flow<'_> {
                     self.found
                         .channels
                         .push(json!({ "name": name, "id": one.to_string(), "state": "existing" }));
-                    self.say(&format!("#{name}: found ({one})"));
                     ids.push(Some(*one));
                 }
-                [] => ids.push(None),
+                [] => {
+                    self.found
+                        .channels
+                        .push(json!({ "name": name, "id": null, "state": "missing" }));
+                    ids.push(None);
+                }
                 more => {
                     return Err(self.stop(
                         "channels",
@@ -698,113 +539,27 @@ impl Flow<'_> {
                 }
             }
         }
-        let missing: Vec<&str> = [LEAD, OPS]
-            .into_iter()
-            .zip(&ids)
-            .filter(|(_, id)| id.is_none())
-            .map(|(n, _)| n)
-            .collect();
-        if !missing.is_empty() {
-            let list = missing
-                .iter()
-                .map(|n| format!("#{n}"))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            let create = match self.create {
-                Some(c) => c,
-                None => self.confirm(
-                    "--create-channels",
-                    &format!("{server} has no {list}. Create them now?"),
-                ),
-            };
-            if !create {
+        Ok((
+            ids.first().copied().flatten(),
+            ids.get(1).copied().flatten(),
+        ))
+    }
+
+    /// The owner's user ID: `--owner`, else the config's, else the application's owner, else
+    /// typed in at the terminal.
+    fn owner_id(&mut self, app: &Value) -> Result<(Snowflake, &'static str), String> {
+        let candidate = app_owner(app);
+        let (id, source) = match (self.flags.owner, self.config.discord.owner, &candidate) {
+            (Some(OwnerFlag::Id(id)), _, _) => (id, "--owner"),
+            (None, Some(id), _) => (id, "config"),
+            (_, _, Some((id, _))) => (*id, "application owner"),
+            (Some(OwnerFlag::Application), _, None) => {
                 return Err(self.stop(
-                    "channels",
-                    format!(
-                        "create the text channels {list} in {server}, or run cataly setup discord --create-channels"
-                    ),
+                    "owner",
+                    "the application names no owner; pass --owner <your Discord user ID>".into(),
                 ));
             }
-            for (name, id) in [LEAD, OPS].into_iter().zip(ids.iter_mut()) {
-                if id.is_none() {
-                    *id = Some(self.create_one(rest, guild, name).await?);
-                }
-            }
-        }
-        match ids.as_slice() {
-            [Some(lead), Some(ops)] => Ok((*lead, *ops)),
-            _ => Err(self.stop("channels", "the channels could not be settled".into())),
-        }
-    }
-
-    async fn create_one(
-        &mut self,
-        rest: &Rest,
-        guild: Snowflake,
-        name: &'static str,
-    ) -> Result<Snowflake, Stop> {
-        let topic = if name == LEAD {
-            "Talk with Cataly's lead here."
-        } else {
-            "Cataly's job notices."
-        };
-        match rest.create_text_channel(guild, name, topic).await {
-            Ok(v) => {
-                let id = v
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .and_then(Snowflake::parse)
-                    .filter(|_| v.get("name").and_then(Value::as_str) == Some(name));
-                let Some(id) = id else {
-                    return Err(self.stop(
-                        "channels",
-                        format!("Discord's answer named no #{name}; run setup again, it finds the channel if it was made"),
-                    ));
-                };
-                self.found
-                    .channels
-                    .push(json!({ "name": name, "id": id.to_string(), "state": "created" }));
-                self.say(&format!("#{name}: created ({id})"));
-                Ok(id)
-            }
-            Err(e) if e.status == Some(403) => {
-                let link = self.invite(true);
-                Err(self.stop(
-                    "channels",
-                    format!(
-                        "the bot may not create channels ({e}): give it Manage Channels by opening {link}, \
-                         or create #{name} yourself, then run setup again"
-                    ),
-                ))
-            }
-            Err(e) if e.uncertain => Err(self.stop(
-                "channels",
-                format!("Discord did not confirm #{name} ({e}); run setup again, it finds the channel if it was made"),
-            )),
-            Err(e) => Err(self.stop("channels", format!("creating #{name}: {e}"))),
-        }
-    }
-
-    /// The owner's user ID: `--owner`, else the config's, else the application's owner after
-    /// confirmation, else typed in.
-    fn owner_id(&mut self, app: &Value) -> Result<Snowflake, Stop> {
-        let candidate = app_owner(app);
-        let (id, source) = match self.owner {
-            Some(OwnerFlag::Id(id)) => (id, "--owner"),
-            Some(OwnerFlag::Application) => match &candidate {
-                Some((id, _)) => (*id, "application owner"),
-                None => {
-                    return Err(self.stop(
-                        "owner",
-                        "the application names no owner; pass --owner <your Discord user ID>"
-                            .into(),
-                    ));
-                }
-            },
-            None => match self.config.discord.owner {
-                Some(id) => (id, "config"),
-                None => self.ask_owner(candidate.as_ref())?,
-            },
+            (None, None, None) => self.ask_owner()?,
         };
         let bot = self
             .found
@@ -817,83 +572,250 @@ impl Flow<'_> {
             return Err(self.stop("owner", "the owner cannot be the bot itself".into()));
         }
         self.found.owner = Some(json!({ "id": id.to_string(), "source": source }));
-        self.say(&format!("owner: {id} ({source})"));
-        Ok(id)
+        Ok((id, source))
     }
 
-    fn ask_owner(
-        &mut self,
-        candidate: Option<&(Snowflake, String)>,
-    ) -> Result<(Snowflake, &'static str), Stop> {
-        let Some(term) = &self.term else {
-            let next = match candidate {
-                Some((id, name)) => format!(
-                    "name the owner: --owner app takes the application's owner, {name} ({id}); or --owner <your Discord user ID>"
-                ),
-                None => "name the owner: --owner <your Discord user ID>".into(),
-            };
-            return Err(self.stop("owner", next));
-        };
-        if let Some((id, name)) = candidate
-            && term.yes(&format!(
-                "The application belongs to {name} ({id}). Is that your Discord account?"
-            ))
-        {
-            return Ok((*id, "application owner"));
-        }
-        for _ in 0..TRIES {
-            let Some(answer) = term.ask(
-                "Your Discord user ID (Discord settings, Advanced, Developer Mode on; then right-click your name, Copy User ID):",
-            ) else {
-                break;
-            };
-            if let Some(id) = Snowflake::parse(&answer) {
-                return Ok((id, "entered"));
+    fn ask_owner(&mut self) -> Result<(Snowflake, &'static str), String> {
+        if let Some(term) = self.term {
+            for _ in 0..TRIES {
+                let Some(answer) = term.ask(
+                    "Your Discord user ID (Discord settings, Advanced, Developer Mode on; then right-click your name, Copy User ID):",
+                ) else {
+                    break;
+                };
+                if let Some(id) = Snowflake::parse(&answer) {
+                    return Ok((id, "entered"));
+                }
             }
         }
         Err(self.stop(
             "owner",
-            "no owner ID given; run setup again or pass --owner <your Discord user ID>".into(),
+            "the application names no owner; pass --owner <your Discord user ID>".into(),
         ))
     }
+}
 
-    /// The config with the guild, owner, the lead's channel and the `cataly-ops` destination; a
-    /// setting is written only when the file says something else.
-    fn config_text(&self, mut text: String, ready: &Ready) -> String {
-        let d = &self.config.discord;
-        if d.guild != Some(ready.guild) {
-            text = setup::set_key(&text, "discord", "guild", &ready.guild.to_string());
+impl Discord {
+    /// Creates the channels that are missing (after the owner's yes). No other channel is changed.
+    pub(super) async fn create_missing(&mut self) -> Result<(Snowflake, Snowflake), String> {
+        if self.lead.is_none() {
+            self.lead = Some(self.create_one(LEAD).await?);
         }
-        if d.owner != Some(ready.owner) {
-            text = setup::set_key(&text, "discord", "owner", &ready.owner.to_string());
+        if self.ops.is_none() {
+            self.ops = Some(self.create_one(OPS).await?);
         }
-        if !d.channels.contains(&ready.lead) {
-            let mut channels = d.channels.clone();
-            channels.push(ready.lead);
-            let quoted: Vec<String> = channels
-                .iter()
-                .map(|c| setup::toml_string(&c.to_string()))
-                .collect();
-            text = setup::set_rendered(
-                &text,
-                "discord",
-                "channels",
-                &format!("[{}]", quoted.join(", ")),
-            );
-            if channels.len() > 1 && d.home.is_none() {
-                text = setup::set_key(&text, "discord", "home", &ready.lead.to_string());
+        match (self.lead, self.ops) {
+            (Some(lead), Some(ops)) => Ok((lead, ops)),
+            _ => Err("the channels could not be settled".into()),
+        }
+    }
+
+    async fn create_one(&mut self, name: &'static str) -> Result<Snowflake, String> {
+        let topic = if name == LEAD {
+            "Talk with Cataly's lead here."
+        } else {
+            "Cataly's job notices."
+        };
+        match self.rest.create_text_channel(self.guild, name, topic).await {
+            Ok(v) => {
+                let id = v
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(Snowflake::parse)
+                    .filter(|_| v.get("name").and_then(Value::as_str) == Some(name))
+                    .ok_or_else(|| {
+                        format!("Discord's answer named no #{name}; run setup again, it finds the channel if it was made")
+                    })?;
+                for c in &mut self.found.channels {
+                    if c.get("name").and_then(Value::as_str) == Some(name) {
+                        *c = json!({ "name": name, "id": id.to_string(), "state": "created" });
+                    }
+                }
+                Ok(id)
+            }
+            Err(e) if e.status == Some(403) => Err(format!(
+                "the bot may not create channels ({e}): give it Manage Channels by opening {}, \
+                 or create #{name} yourself, then run setup again",
+                self.found.invite.as_deref().unwrap_or(INVITE)
+            )),
+            Err(e) if e.uncertain => Err(format!(
+                "Discord did not confirm #{name} ({e}); run setup again, it finds the channel if it was made"
+            )),
+            Err(e) => Err(format!("creating #{name}: {e}")),
+        }
+    }
+
+    /// What the profile step does with the bot's avatar and banner. An image is set when the bot
+    /// has none, when it is the one Cataly set earlier but Cataly's default changed since, or always
+    /// with `force` (`--profile`); one the owner set by hand is kept.
+    pub(super) fn profile_plan(&self, state_dir: &Path, force: bool) -> ProfilePlan {
+        let record = read_record(state_dir, &self.me);
+        let mut plan = ProfilePlan::default();
+        for (field, bytes) in IMAGES {
+            let current = self.me.get(field).and_then(Value::as_str);
+            let mine = record.get(field);
+            let ours = current.is_some()
+                && mine.and_then(|m| m.get("hash")).and_then(Value::as_str) == current;
+            let fresh = mine.and_then(|m| m.get("image")).and_then(Value::as_str)
+                == Some(sha256_hex(bytes).as_str());
+            if force || current.is_none() || (ours && !fresh) {
+                plan.set.push(field);
+            } else if ours {
+                plan.cataly.push(field);
+            } else {
+                plan.kept.push(field);
             }
         }
-        let ops = Destination::Discord {
-            channel: ChannelRef::Id(ready.ops),
-        };
-        if self.config.destinations.get(OPS) != Some(&ops) {
-            let section = format!("destinations.{OPS}");
-            text = setup::set_key(&text, &section, "kind", "discord");
-            text = setup::set_key(&text, &section, "channel", &ready.ops.to_string());
-        }
-        text
+        plan
     }
+
+    /// Sets Cataly's images for `fields` and records the hashes Discord gave them, so a later run
+    /// can tell them from images the owner set himself.
+    pub(super) async fn set_profile(
+        &self,
+        state_dir: &Path,
+        fields: &[&'static str],
+    ) -> Result<(), String> {
+        let mut body = serde_json::Map::new();
+        for (field, bytes) in IMAGES.iter().filter(|(f, _)| fields.contains(f)) {
+            body.insert(
+                (*field).to_string(),
+                Value::String(format!("data:image/jpeg;base64,{}", base64(bytes))),
+            );
+        }
+        let me = self
+            .rest
+            .set_profile(Value::Object(body))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut record = read_record(state_dir, &self.me);
+        record.insert(
+            "bot".into(),
+            self.me.get("id").cloned().unwrap_or(Value::Null),
+        );
+        for (field, bytes) in IMAGES.iter().filter(|(f, _)| fields.contains(f)) {
+            record.insert(
+                (*field).to_string(),
+                json!({ "hash": me.get(field), "image": sha256_hex(bytes) }),
+            );
+        }
+        let text = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+        crate::sys::fs::write_atomic(&state_dir.join(PROFILE_RECORD), text.as_bytes())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Cataly's default profile images: Discord's field and the bundled JPEG.
+const IMAGES: [(&str, &[u8]); 2] = [
+    ("avatar", include_bytes!("../../assets/avatar.jpg")),
+    ("banner", include_bytes!("../../assets/banner.jpg")),
+];
+/// The file in the state folder that records which images Cataly set on which bot.
+const PROFILE_RECORD: &str = "discord-profile.json";
+
+/// The profile step for the avatar and the banner (Discord's field names).
+#[derive(Default)]
+pub(super) struct ProfilePlan {
+    /// Cataly sets its image.
+    pub(super) set: Vec<&'static str>,
+    /// Cataly's image is there already.
+    pub(super) cataly: Vec<&'static str>,
+    /// The owner's own image stays.
+    pub(super) kept: Vec<&'static str>,
+}
+
+impl ProfilePlan {
+    /// One line for the setup summary.
+    pub(super) fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        for (fields, what) in [
+            (&self.set, "Cataly's (to set)"),
+            (&self.cataly, "Cataly's"),
+            (&self.kept, "yours, kept (--profile sets Cataly's)"),
+        ] {
+            if !fields.is_empty() {
+                parts.push(format!("{}: {what}", fields.join(" and ")));
+            }
+        }
+        parts.join("; ")
+    }
+}
+
+/// What Cataly recorded setting on this bot; empty for another bot or no record.
+fn read_record(state_dir: &Path, me: &Value) -> serde_json::Map<String, Value> {
+    crate::sys::fs::read_private(&state_dir.join(PROFILE_RECORD), 64 * 1024)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).ok())
+        .filter(|r| r.get("bot").is_some() && r.get("bot") == me.get("id"))
+        .unwrap_or_default()
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk.first().copied().unwrap_or(0),
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                let index = usize::try_from((n >> shift) & 63).unwrap_or(0);
+                out.push(char::from(TABLE.get(index).copied().unwrap_or(b'A')));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The config with the guild, owner, the lead's channel and the `cataly-ops` destination; a
+/// setting is written only when the file says something else.
+pub(super) fn config_text(
+    config: &Config,
+    mut text: String,
+    d: &Discord,
+    lead: Snowflake,
+    ops: Snowflake,
+) -> String {
+    let c = &config.discord;
+    if c.guild != Some(d.guild) {
+        text = setup::set_key(&text, "discord", "guild", &d.guild.to_string());
+    }
+    if c.owner != Some(d.owner) {
+        text = setup::set_key(&text, "discord", "owner", &d.owner.to_string());
+    }
+    if !c.channels.contains(&lead) {
+        let mut channels = c.channels.clone();
+        channels.push(lead);
+        let quoted: Vec<String> = channels
+            .iter()
+            .map(|c| setup::toml_string(&c.to_string()))
+            .collect();
+        text = setup::set_rendered(
+            &text,
+            "discord",
+            "channels",
+            &format!("[{}]", quoted.join(", ")),
+        );
+        if channels.len() > 1 && c.home.is_none() {
+            text = setup::set_key(&text, "discord", "home", &lead.to_string());
+        }
+    }
+    let dest = Destination::Discord {
+        channel: ChannelRef::Id(ops),
+    };
+    if config.destinations.get(OPS) != Some(&dest) {
+        let section = format!("destinations.{OPS}");
+        text = setup::set_key(&text, &section, "kind", "discord");
+        text = setup::set_key(&text, &section, "channel", &ops.to_string());
+    }
+    text
 }
 
 /// Whether the application has either Message Content flag.
@@ -971,8 +893,6 @@ fn portal_steps(path: &Path, at_terminal: bool) -> Vec<String> {
         "  1. New Application, give it a name, Create.".to_string(),
         "  2. Bot, Reset Token, copy the token.".to_string(),
         format!("  3. {last} {} (only you may read it).", path.display()),
-        "Setup does the rest: the Message Content intent, the invite link, the channels."
-            .to_string(),
     ]
 }
 
@@ -982,8 +902,20 @@ mod tests {
 
     #[test]
     fn invite_permissions_are_the_ones_cataly_uses() {
-        assert_eq!(PERMISSIONS, 326_417_583_168);
-        assert_eq!(PERMISSIONS | MANAGE_CHANNELS, 326_417_583_184);
+        assert_eq!(PERMISSIONS, 326_417_583_184);
+    }
+
+    #[test]
+    fn base64_matches_the_standard_and_the_images_are_jpegs() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        for (field, bytes) in IMAGES {
+            assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "{field}");
+            assert!(bytes.len() <= 512 * 1024, "{field}");
+        }
     }
 
     #[test]

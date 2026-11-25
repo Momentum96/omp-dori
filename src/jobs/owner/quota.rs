@@ -1,8 +1,8 @@
 //! The quota watch and the quota gate (OJ-07, OJ-08, OJ-09; DESIGN 9.2). Each limit, identified by
 //! provider, account ordinal and limit ID, has a band: the highest alert level its used share
 //! reaches. A rise warns once; a fall from at or above the gate level to below it sends one recovery
-//! note. While any watched limit is at or above the gate level, the gate holds new session starts
-//! (sessions arrive in milestone 2; here the flag, its persistence and its lifting). The gate opens
+//! note. While a watched limit is at or above the gate level, the gate holds new session starts on
+//! that limit's provider: a session whose model belongs to another provider starts as usual. The gate opens
 //! when fresh data shows every watched limit below the level, or when every limit that closed it
 //! passed its reset time, whichever comes first, so unavailable data never keeps it closed for ever.
 //! When OMP reports no reset time (the field is unverified), the window length after the fetch is
@@ -25,8 +25,18 @@ const GATE: &str = "gate";
 /// One limit holding the gate, with the time it releases the gate at the latest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Cause {
+    /// The limit's key, `provider#account/id`.
     pub(crate) limit: String,
     pub(crate) release_ms: i64,
+}
+
+impl Cause {
+    /// The provider the limit belongs to.
+    pub(crate) fn provider(&self) -> &str {
+        self.limit
+            .split_once('#')
+            .map_or(self.limit.as_str(), |(p, _)| p)
+    }
 }
 
 /// The hub-wide gate: causes per quota job, plus the owner's lift.
@@ -41,14 +51,44 @@ struct GateState {
     lifted_until_ms: Option<i64>,
 }
 
+/// Why the quota gate holds a new session on a model (`provider/id`) now, if it does.
+pub(crate) type QuotaHold = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// The gate as `cataly quota` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct GateView {
-    /// New session starts wait.
+    /// New session starts on some provider wait.
     pub(crate) held: bool,
+    /// The providers whose new session starts wait, in order.
+    #[serde(default)]
+    pub(crate) providers: Vec<String>,
     pub(crate) causes: Vec<Cause>,
     /// The owner lifted the gate until this instant.
     pub(crate) lifted_until_ms: Option<i64>,
+}
+
+impl GateView {
+    /// Whether a new session on `model` (`provider/id`) must wait. A model without a provider waits
+    /// while any provider is held: its provider cannot be ruled out.
+    pub(crate) fn holds(&self, model: &str) -> bool {
+        match model.split_once('/') {
+            Some((provider, _)) if !provider.is_empty() => {
+                self.providers.iter().any(|p| p == provider)
+            }
+            _ => self.held,
+        }
+    }
+
+    /// Why a start on `model` waits, if it must.
+    pub(crate) fn hold_reason(&self, model: &str) -> Option<String> {
+        self.holds(model).then(|| {
+            let provider = model.split_once('/').map_or(model, |(p, _)| p);
+            format!(
+                "the quota gate holds new sessions on {provider} (limits at the hold level); \
+                 `cataly quota lift` lifts it"
+            )
+        })
+    }
 }
 
 impl Gate {
@@ -73,8 +113,17 @@ impl Gate {
         let s = self.lock();
         let causes: Vec<Cause> = s.causes.values().flatten().cloned().collect();
         let lifted = s.lifted_until_ms.filter(|until| *until > now);
+        let held = !causes.is_empty() && lifted.is_none();
+        let mut providers: Vec<String> = if held {
+            causes.iter().map(|c| c.provider().to_string()).collect()
+        } else {
+            Vec::new()
+        };
+        providers.sort();
+        providers.dedup();
         GateView {
-            held: !causes.is_empty() && lifted.is_none(),
+            held,
+            providers,
             causes,
             lifted_until_ms: lifted,
         }
@@ -278,5 +327,32 @@ mod tests {
         gate.set("q", Vec::new());
         assert!(!gate.view(1000).held);
         assert_eq!(duration_text(90 * 60_000), "1h30m");
+    }
+
+    #[test]
+    fn the_gate_holds_only_the_providers_at_the_hold_level() {
+        let gate = Gate::default();
+        let cause = |limit: &str| Cause {
+            limit: limit.into(),
+            release_ms: 1000,
+        };
+        gate.set(
+            "q",
+            vec![cause("openai-codex#1/primary"), cause("devin#1/weekly")],
+        );
+        let view = gate.view(10);
+        assert_eq!(view.providers, ["devin", "openai-codex"]);
+        assert!(view.holds("openai-codex/gpt-5"));
+        assert!(
+            view.hold_reason("devin/swe")
+                .is_some_and(|w| w.contains("devin"))
+        );
+        assert!(
+            !view.holds("anthropic/claude-opus-5-5"),
+            "another provider starts"
+        );
+        assert!(view.holds("no-provider"), "an unknown provider waits");
+        let lifted = gate.lift(10);
+        assert!(lifted.providers.is_empty() && !lifted.holds("openai-codex/gpt-5"));
     }
 }

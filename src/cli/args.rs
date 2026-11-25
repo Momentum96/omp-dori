@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 55] = [
+pub(crate) const COMMANDS: [Spec; 54] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -167,14 +167,21 @@ pub(crate) const COMMANDS: [Spec; 55] = [
     Spec {
         path: &["setup"],
         args: &[],
-        flags: &["--json", "--apply", "--backup", "--create"],
+        flags: &["--json", "--yes", "--profile"],
         values: &[
+            "--owner",
+            "--guild",
+            "--wait",
+            "--lead-model",
+            "--lead-cwd",
+            "--approvals",
+            "--backup",
+            "--backup-repo",
+            "--service",
             "--expect",
             "--omp",
+            "--log-level",
             "--discord-token-file",
-            "--discord-guild",
-            "--discord-owner",
-            "--discord-channels",
             "--telegram-token-file",
             "--telegram-owner",
             "--telegram-group",
@@ -184,29 +191,13 @@ pub(crate) const COMMANDS: [Spec; 55] = [
             "--slack-owner",
             "--fallback-on",
             "--fallback-chain",
-            "--lead-model",
-            "--lead-cwd",
-            "--log-level",
-            "--backup-repo",
         ],
-        summary: "preview the config the setup writes; --apply writes it (--expect <hash> from the preview); --backup [--backup-repo owner/name] [--create] sets up the private home backup",
-    },
-    Spec {
-        path: &["setup", "discord"],
-        args: &[],
-        flags: &[
-            "--json",
-            "--apply",
-            "--enable-intent",
-            "--create-channels",
-            "--remote-approvals",
-        ],
-        values: &["--expect", "--guild", "--owner", "--wait", "--lead-model"],
-        summary: "guided Discord setup: checks the bot token and its Message Content intent, prints the invite \
-                  link, waits for the bot to join, finds or creates #cataly and #cataly-ops, offers the lead's \
-                  model and remote approvals, previews the config (--apply --expect <hash> writes it); \
-                  --guild <id>, --owner <id|app>, --wait 5m, --enable-intent, --create-channels, \
-                  --lead-model <provider/id> and --remote-approvals answer its questions in scripts",
+        summary: "the whole setup in one run: asks for the Discord bot token, then fills in defaults \
+                  (owner, #cataly and #cataly-ops, lead model, remote approvals, bot avatar and banner, \
+                  home backup, health and pressure jobs, user service), shows a short summary and asks \
+                  once; again later it changes only what a flag names. --yes answers in scripts; \
+                  --owner <id|app>, --guild <id>, --lead-model <provider/id>, --approvals/--backup/--service \
+                  on|off, --backup-repo owner/name, --profile re-applies the bot's avatar and banner",
     },
     Spec {
         path: &["health"],

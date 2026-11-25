@@ -504,7 +504,7 @@ fn sessions(
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
-        gate_held: Arc::new(move || gate.gate().held),
+        quota_hold: Arc::new(move |model: &str| gate.gate().hold_reason(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         events: Arc::clone(&events),
         store: store.clone(),
@@ -695,7 +695,7 @@ fn lanes(
         state_dir: paths.state_dir.clone(),
         events: Arc::clone(events),
         make: runtime(paths, agent_start, links),
-        gate_held: Arc::new(move || gate.gate().held),
+        quota_hold: Arc::new(move |model: &str| gate.gate().hold_reason(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         lead_live: Arc::new(move || lead.snapshot().is_some()),
         threads: Arc::new(crate::relay::discord::threads::DiscordThreads {

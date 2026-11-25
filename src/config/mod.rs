@@ -130,7 +130,7 @@ pub(crate) struct DiscordSettings {
     pub(crate) remote_approvals: bool,
     /// A question with one recommended choice takes it after this long (A17, default 3 minutes).
     pub(crate) form_default_after: Duration,
-    /// Set an empty bot avatar at start (MSG-11; the owner may turn it off).
+    /// `cataly setup` sets Cataly's avatar and banner on the bot (off: it leaves the profile alone).
     pub(crate) profile: bool,
     /// The owner counts as back when his message comes this long after his previous one (OJ req. 50).
     pub(crate) away: Duration,

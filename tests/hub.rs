@@ -276,15 +276,13 @@ fn owner_only_files_and_directories() {
     hub.stop();
 }
 
-/// `cataly setup --fallback-on --fallback-chain`: previewed without a write, validated, then applied
-/// against the preview's hash; the hub's config parser takes the result (decision 7).
+/// `cataly setup --fallback-on --fallback-chain`: reported without a write, validated, then applied
+/// with `--yes` against the report's hash; the hub's config parser takes the result (decision 7).
+/// The config folder, made under the test's umask, is tightened rather than refused.
 #[test]
 fn setup_sets_the_fallback_chain() {
-    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n");
+    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n[telegram]\nowner = 7\n");
     let before = std::fs::read_to_string(hub.config_path()).unwrap();
-    // The atomic replace refuses a config directory others can enter.
-    let dir = hub.config_path().parent().unwrap().to_path_buf();
-    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     for bad in [
         ["--fallback-on", "sometimes"],
         ["--fallback-chain", "no-provider"],
@@ -302,6 +300,8 @@ fn setup_sets_the_fallback_chain() {
         "usage-limit",
         "--fallback-chain",
         "fake/backup, other/model",
+        "--backup",
+        "off",
         "--json",
     ];
     let preview = hub.json(&args);
@@ -322,7 +322,7 @@ fn setup_sets_the_fallback_chain() {
     );
     let expect = preview["before"].as_str().unwrap().to_string();
     let mut apply = args.to_vec();
-    apply.extend(["--apply", "--expect", &expect]);
+    apply.extend(["--yes", "--expect", &expect]);
     assert_eq!(hub.json(&apply)["applied"], true);
     let text = std::fs::read_to_string(hub.config_path()).unwrap();
     assert!(
@@ -345,9 +345,7 @@ fn setup_sets_the_fallback_chain() {
 /// the applied file passes `config check`.
 #[test]
 fn setup_sets_the_lead() {
-    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n");
-    let dir = hub.config_path().parent().unwrap().to_path_buf();
-    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n[telegram]\nowner = 7\n");
     for bad in [["--lead-model", "opus"], ["--lead-cwd", "work"]] {
         let out = hub.cli(&["setup", bad[0], bad[1]]);
         assert!(!out.status.success(), "{bad:?} refused");
@@ -356,7 +354,7 @@ fn setup_sets_the_lead() {
             "{bad:?}: the error names the flag"
         );
     }
-    let preview = hub.json(&["setup", "--json"]);
+    let preview = hub.json(&["setup", "--json", "--backup", "off"]);
     let lead = |report: &serde_json::Value| {
         report["sources"]
             .as_array()
@@ -377,13 +375,15 @@ fn setup_sets_the_lead() {
         "anthropic/claude-opus-5-5",
         "--lead-cwd",
         "/srv/work",
+        "--backup",
+        "off",
         "--json",
     ];
     let preview = hub.json(&args);
     assert_eq!(preview["valid"], true);
     let expect = preview["before"].as_str().unwrap().to_string();
     let mut apply = args.to_vec();
-    apply.extend(["--apply", "--expect", &expect]);
+    apply.extend(["--yes", "--expect", &expect]);
     let applied = hub.json(&apply);
     assert_eq!(applied["applied"], true);
     assert_eq!(lead(&applied)["value"], "anthropic/claude-opus-5-5");

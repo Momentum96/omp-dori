@@ -1,7 +1,8 @@
 //! A fake Discord on loopback only (DISC-OUT-27): the REST calls Cataly makes (bot and application
 //! identity, the Gateway URL, channels, history, single messages, active threads, message create and
-//! edit, reactions, typing, interaction callbacks, avatar; for setup the intent flags, the bot's
-//! servers, a server's channels and channel create) and a Gateway WebSocket server. It records
+//! edit, reactions, typing, interaction callbacks; for setup the bot account with its avatar and
+//! banner, the intent flags, the bot's servers, a server's channels and channel create) and a
+//! Gateway WebSocket server. It records
 //! every request, deduplicates creates by their enforced nonce as Discord does, keeps a history per
 //! channel, answers a reply with message type 19 and its reference, and lets a test script the next
 //! create statuses, push dispatches, and send op 7, op 9 or a close code. With a token set, any
@@ -76,10 +77,11 @@ struct State {
     voice_ops: Vec<Value>,
     intents: Vec<u64>,
     /// Setup: the token the fake accepts (any when unset), the application's flags, the servers
-    /// the bot is in.
+    /// the bot is in, and the bot's avatar and banner hashes with the data each was set from.
     token: Option<String>,
     app_flags: u64,
     guilds: Vec<Value>,
+    profile: HashMap<String, (String, String)>,
 }
 
 pub struct FakeDiscord {
@@ -308,6 +310,20 @@ impl FakeDiscord {
         self.state.lock().unwrap().app_flags
     }
 
+    /// The bot's avatar or banner as its owner set it by hand: `hash`, from unknown data.
+    pub fn set_image(&self, field: &str, hash: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .profile
+            .insert(field.into(), (hash.into(), String::new()));
+    }
+
+    /// The bot's avatar or banner: its hash and the data URI it was set from.
+    pub fn image(&self, field: &str) -> Option<(String, String)> {
+        self.state.lock().unwrap().profile.get(field).cloned()
+    }
+
     /// The bot joins a server.
     pub fn join(&self, id: &str, name: &str) {
         self.state
@@ -482,8 +498,8 @@ fn param(query: &str, key: &str) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
-/// The calls only `cataly setup discord` makes: the application's intent flags, the bot's
-/// servers, a server's channels and a new channel.
+/// The calls `cataly setup` makes: the bot account (its avatar and banner kept and changed), the
+/// application's intent flags, the bot's servers, a server's channels and a new channel.
 fn setup_route(
     s: &mut State,
     method: &str,
@@ -497,6 +513,21 @@ fn setup_route(
             let asked = body["flags"].as_u64().unwrap_or(0);
             s.app_flags = (s.app_flags & !limited) | (asked & limited);
             reply(200, &application(s))
+        }
+        ("GET" | "PATCH", ["users", "@me"]) => {
+            for field in ["avatar", "banner"] {
+                if let Some(data) = body[field].as_str() {
+                    s.next_id += 1;
+                    let hash = format!("{field}-{}", s.next_id);
+                    s.profile.insert(field.into(), (hash, data.into()));
+                }
+            }
+            let hash = |f: &str| s.profile.get(f).map(|(h, _)| h.clone());
+            reply(
+                200,
+                &json!({"id": BOT, "username": "fake-bot", "bot": true,
+                    "avatar": hash("avatar"), "banner": hash("banner")}),
+            )
         }
         ("GET", ["users", "@me", "guilds"]) => reply(200, &Value::Array(s.guilds.clone())),
         ("GET", ["guilds", guild, "channels"]) => {
@@ -558,11 +589,6 @@ async fn answer(
     }
     let unknown = json!({ "message": "Unknown Message", "code": 10008 });
     let response = match (method.as_str(), parts.as_slice()) {
-        ("GET", ["users", "@me"]) => reply(
-            200,
-            &json!({"id": BOT, "username": "fake-bot", "bot": true, "avatar": null}),
-        ),
-        ("PATCH", ["users", "@me"]) => reply(200, &json!({"id": BOT, "bot": true, "avatar": "a"})),
         ("GET", ["applications", "@me"]) => reply(200, &application(&s)),
         ("GET", ["gateway"]) => {
             let url = s

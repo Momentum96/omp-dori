@@ -701,16 +701,18 @@ impl<R: Runtime> Lanes<R> {
         };
         let open = u32::try_from(lanes.len()).unwrap_or(u32::MAX);
         let free = p.max_open.saturating_sub(open).min(p.max_starts);
-        let mut why = None;
-        if (self.env.gate_held)() {
-            why = Some("the quota gate holds new starts".to_string());
-        } else if !(self.env.lead_live)() {
-            why = Some("no lead".into());
-        } else if let Err(e) = self
-            .admission(&config, std::path::Path::new(&first.cwd))
-            .await
-        {
-            why = Some(e);
+        // Planner starts run on the lanes' configured model.
+        let model = config.lanes.model.as_deref().unwrap_or_default();
+        let mut why = (self.env.quota_hold)(model);
+        if why.is_none() {
+            if !(self.env.lead_live)() {
+                why = Some("no lead".into());
+            } else if let Err(e) = self
+                .admission(&config, std::path::Path::new(&first.cwd), model)
+                .await
+            {
+                why = Some(e);
+            }
         }
         if let Some(why) = why {
             run.held

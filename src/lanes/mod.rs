@@ -98,7 +98,7 @@ pub(crate) struct Env<R: Runtime> {
     pub(crate) state_dir: PathBuf,
     pub(crate) events: Events,
     pub(crate) make: Factory<R>,
-    pub(crate) gate_held: Arc<dyn Fn() -> bool + Send + Sync>,
+    pub(crate) quota_hold: crate::jobs::owner::quota::QuotaHold,
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     /// Whether the lead's session is live (it counts toward the session cap).
     pub(crate) lead_live: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -319,7 +319,7 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// Admission for every open, reopen and restart (LANE req. 18; OJ-08; C14).
-    async fn admission(&self, config: &Config, cwd: &Path) -> Result<PathBuf, String> {
+    async fn admission(&self, config: &Config, cwd: &Path, model: &str) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -327,10 +327,8 @@ impl<R: Runtime> Lanes<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if (self.env.gate_held)() {
-            return Err(
-                "the quota gate holds new session starts; `cataly quota lift` lifts it".into(),
-            );
+        if let Some(why) = (self.env.quota_hold)(model) {
+            return Err(why);
         }
         (self.env.bridge_link)()?;
         let live = self.live_map().values().filter(|s| s.alive()).count();
@@ -521,7 +519,10 @@ impl<R: Runtime> Lanes<R> {
                     .map(PathBuf::from)
                     .or_else(|| config.lanes.cwd.clone())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                Ok(match self.admission(&config, &cwd).await {
+                let model = s(input, "model")
+                    .or(config.lanes.model.as_deref())
+                    .unwrap_or_default();
+                Ok(match self.admission(&config, &cwd, model).await {
                     Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
                     Err(e) => json!({ "admit": false, "detail": e }),
                 })
@@ -974,7 +975,7 @@ impl<R: Runtime> Lanes<R> {
             return Err(format!("the key {} is already used by a lane", valid.key));
         }
         let config = self.cfg();
-        let exe = self.admission(&config, &valid.cwd).await?;
+        let exe = self.admission(&config, &valid.cwd, &valid.model).await?;
         let mut rec = Self::build(&valid, &config, crate::host::random_hex(8));
         self.tern_spend(&config, &rec).await?;
         if let Some(source) = thread_from {

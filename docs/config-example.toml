@@ -79,8 +79,8 @@ levels = [70, 85, 95]
 hold = 85
 destinations = ["owner-dm"]
 
-# Back up the state folder to the private repository <login>/cataly-home. `cataly setup --backup`
-# writes this job and prepares the folder; the remote is https://github.com/example-owner/cataly-home.git
+# Back up the state folder to the private repository <login>/cataly-home. `cataly setup` writes
+# this job and prepares the folder; the remote is https://github.com/example-owner/cataly-home.git
 [jobs.home]
 kind = "backup"
 dir = "/home/owner/.local/state/cataly"

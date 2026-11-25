@@ -1,31 +1,44 @@
-//! `cataly setup` (COORD-51, COORD-52, IR-09): writes the settings it manages into the config file
-//! without clobbering a hand edit. It snapshots the file (identity and SHA-256), previews the change,
-//! re-checks the snapshot just before an atomic replace (or a create that never overwrites), reads
-//! the file back, and reports for each managed setting where its effective value comes from.
-//! Unknown keys and comments are kept: only the managed lines change.
+//! `cataly setup` (COORD-51, COORD-52, IR-09): the whole first run in one command, and every later
+//! change of what it manages. It makes Cataly's folders owner-only (0700, files 0600, whatever the
+//! umask), runs the Discord steps only the owner can take (the bot token, asked without echo; the
+//! invite link, then a wait for the bot to join), and fills in the rest with defaults, asking
+//! nothing: the application's owner as the owner, `#cataly` and `#cataly-ops` found or created,
+//! OMP's default model for the lead, remote approvals on, the home backup to
+//! `<gh login>/cataly-home`, the health and pressure jobs, and the user service. It shows one short
+//! summary and asks one yes/no before it changes anything; `--yes` answers it in scripts. A default
+//! is applied only where the config says nothing yet, so a second run shows what is set and changes
+//! nothing; a flag changes its setting on any run.
+//!
+//! The config file is written without clobbering a hand edit: setup snapshots it (identity and
+//! SHA-256), re-checks the snapshot just before an atomic replace (or a create that never
+//! overwrites), and reads the file back. Unknown keys and comments are kept: only the managed lines
+//! change. `--expect <hash>` makes a scripted edit refuse a file that changed since its preview.
 
 use std::fmt::Write as _;
+use std::io::BufRead as _;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::args::Parsed;
+use super::install::block_on;
+use super::setup_discord::{self as discord, Discord};
 use super::{CALL_TIMEOUT, Failure, out};
-use crate::config::{self, sha256_hex};
+use crate::config::{self, Config, sha256_hex};
 use crate::omp::transcript::model_selector;
 use crate::proto::{Status, method};
 use crate::sys::fs::{create_atomic, read_private, write_atomic};
+use crate::sys::install::Layout;
 use crate::sys::paths::Paths;
 
-/// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 17] = [
+/// The settings setup writes straight from their flags: (section, key, flag).
+const MANAGED: [(&str, &str, &str); 14] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
-    ("discord", "guild", "--discord-guild"),
-    ("discord", "owner", "--discord-owner"),
-    ("discord", "channels", "--discord-channels"),
     ("telegram", "token_file", "--telegram-token-file"),
     ("telegram", "owner", "--telegram-owner"),
     ("telegram", "group", "--telegram-group"),
@@ -38,6 +51,67 @@ const MANAGED: [(&str, &str, &str); 17] = [
     ("lead", "model", "--lead-model"),
     ("lead", "cwd", "--lead-cwd"),
 ];
+/// The jobs a first run adds, each named after its kind, with their defaults.
+const JOBS: [&str; 2] = ["health", "pressure"];
+/// How long one question waits for its answer.
+const ANSWER_WAIT: Duration = Duration::from_mins(30);
+
+/// The owner's terminal. Answers are read on their own thread, so every wait for one is bounded.
+pub(super) struct Terminal {
+    lines: mpsc::Receiver<String>,
+}
+
+impl Terminal {
+    /// The terminal, when stdin is one and JSON was not asked for; scripts get none.
+    fn open(as_json: bool) -> Option<Self> {
+        if as_json || !rustix::termios::isatty(std::io::stdin()) {
+            return None;
+        }
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Self { lines })
+    }
+
+    /// One answer, trimmed; `None` when stdin closed or no answer came in time.
+    pub(super) fn ask(&self, question: &str) -> Option<String> {
+        out::prompt(&format!("{question} "));
+        let answer = self.lines.recv_timeout(ANSWER_WAIT).ok();
+        if answer.is_none() {
+            out::line("");
+        }
+        answer.map(|a| a.trim().to_string())
+    }
+
+    fn yes(&self, question: &str) -> bool {
+        match self.ask(&format!("{question} [Y/n]")).as_deref() {
+            Some("") => true,
+            Some(a) => matches!(a.to_ascii_lowercase().as_str(), "y" | "yes"),
+            None => false,
+        }
+    }
+
+    /// One answer typed without echo. `None` also when echo cannot be turned off: then nothing is
+    /// asked, so a token never shows on the screen.
+    pub(super) fn hidden(&self, question: &str) -> Option<String> {
+        use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
+        let stdin = std::io::stdin();
+        let saved = tcgetattr(&stdin).ok()?;
+        let mut quiet = saved.clone();
+        quiet.local_modes.remove(LocalModes::ECHO);
+        tcsetattr(&stdin, OptionalActions::Now, &quiet).ok()?;
+        let answer = self.ask(question);
+        let _ = tcsetattr(&stdin, OptionalActions::Now, &saved);
+        out::line("");
+        answer
+    }
+}
 const CONFIG_MAX: u64 = 1024 * 1024;
 
 /// Device, inode, mode, owner, group, size and the modification and change times.
@@ -97,7 +171,6 @@ pub(super) fn snapshot(path: &Path) -> Result<Snapshot, String> {
 fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
     let int = v.parse::<i64>().ok();
     let ok = match (section, key) {
-        ("discord", "owner" | "guild") => crate::relay::discord::Snowflake::parse(v).is_some(),
         ("telegram", "owner") => int.is_some_and(|n| n > 0),
         ("telegram", "group") => int.is_some_and(|n| n < 0),
         ("telegram", "topic") => int.is_some_and(|n| n > 0),
@@ -112,8 +185,6 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         _ => true,
     };
     (!ok).then_some(match (section, key) {
-        ("discord", "guild") => "expected the server's Discord ID",
-        ("discord", _) => "expected the owner's Discord user ID",
         ("telegram", "owner") => "expected the owner's Telegram user ID (a positive number)",
         ("telegram", "group") => "expected the group's Telegram chat ID (a negative number)",
         ("telegram", _) => "expected the forum topic's ID (a positive number)",
@@ -207,14 +278,6 @@ const NEW_FILE: &str = "# Cataly configuration. Check it with `cataly config che
 fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec<Value> {
     let parsed = config::parse(text).ok();
     let defaults = config::Config::default();
-    let in_file = |section: &str, key: &str| {
-        let table = toml::from_str::<toml::Table>(text).ok();
-        let mut at = table.as_ref();
-        for part in section.split('.') {
-            at = at.and_then(|t| t.get(part)?.as_table());
-        }
-        at.and_then(|t| t.get(key)).is_some()
-    };
     let effective = match hub {
         Some(s) if s.config_digest.as_deref() == Some(digest) => {
             "this file (the running hub applied it)"
@@ -227,7 +290,7 @@ fn sources(paths: &Paths, text: &str, hub: Option<&Status>, digest: &str) -> Vec
     let mut out = Vec::new();
     let config = parsed.unwrap_or(defaults);
     for (section, key, _) in MANAGED {
-        let from_file = in_file(section, key);
+        let from_file = in_file(text, section, key);
         let (value, note) = value_of(paths, &config, section, key);
         out.push(json!({
             "setting": format!("{section}.{key}"),
@@ -280,34 +343,6 @@ fn value_of(
             );
             (config.omp.path.clone(), Some(note))
         }
-        ("discord", "guild") => (
-            config
-                .discord
-                .guild
-                .map_or_else(|| "-".to_string(), |g| g.to_string()),
-            Some("your server; destinations may name its channels".to_string()),
-        ),
-        ("discord", "owner") => (
-            config
-                .discord
-                .owner
-                .map_or_else(|| "-".to_string(), |o| o.to_string()),
-            Some(if config.discord.intake() {
-                "intake runs".to_string()
-            } else {
-                "intake is off until the owner and channels are set".to_string()
-            }),
-        ),
-        ("discord", "channels") => (
-            config
-                .discord
-                .channels
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-            None,
-        ),
         ("telegram" | "slack", _) => relay_value(paths, config, section, key),
         ("fallback", _) => (
             config.fallback.on.clone().unwrap_or_else(|| "-".to_string()),
@@ -442,54 +477,577 @@ fn set_value(
         let quoted: Vec<String> = items.iter().map(|s| toml_string(s)).collect();
         format!("[{}]", quoted.join(", "))
     };
-    if key == "channels" {
-        let ids = comma_list(v);
-        let id = |s: &&str| crate::relay::discord::Snowflake::parse(s).is_some();
-        if ids.is_empty() || !ids.iter().all(id) {
-            return Err(Failure::Usage(format!(
-                "{flag}: expected Discord channel IDs separated by commas"
-            )));
-        }
-        return Ok(set_rendered(text, section, key, &list(&ids)));
-    }
     if section == "fallback.chains" {
         return Ok(set_rendered(text, section, key, &list(&comma_list(v))));
     }
     Ok(set_key(text, section, key, v.trim()))
 }
 
+/// `on` or `off` from a flag such as `--approvals`.
+fn switch(p: &Parsed, flag: &str) -> Result<Option<bool>, Failure> {
+    p.value(flag)
+        .map(|v| match v {
+            "on" => Ok(true),
+            "off" => Ok(false),
+            _ => Err(Failure::Usage(format!("{flag}: expected on or off"))),
+        })
+        .transpose()
+}
+
+/// Whether the TOML text sets `key` in `[section]` (a dotted section names nested tables).
+fn in_file(text: &str, section: &str, key: &str) -> bool {
+    let table = toml::from_str::<toml::Table>(text).ok();
+    let mut at = table.as_ref();
+    for part in section.split('.') {
+        at = at.and_then(|t| t.get(part)?.as_table());
+    }
+    at.and_then(|t| t.get(key)).is_some()
+}
+
+/// One line of the summary: what, its value, and whether this run changes it.
+struct Item {
+    what: &'static str,
+    value: String,
+    change: bool,
+}
+
+impl Item {
+    fn new(what: &'static str, value: impl Into<String>, change: bool) -> Self {
+        Self {
+            what,
+            value: value.into(),
+            change,
+        }
+    }
+}
+
+/// What happens to the user service.
+enum ServiceStep {
+    Keep,
+    Enable(Layout),
+    Disable(Layout),
+}
+
+/// Everything one run decided before it changes anything.
+struct Decided {
+    text: String,
+    discord: Option<Discord>,
+    profile: Vec<&'static str>,
+    home: Option<super::home::Home>,
+    service: ServiceStep,
+    items: Vec<Item>,
+}
+
 pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
-    let (before, mut text) = load(paths)?;
+    let flags = discord::Flags::parse(p).map_err(Failure::Usage)?;
+    if p.value("--backup-repo")
+        .is_some_and(|r| !crate::jobs::owner::backup::valid_repo(r))
+    {
+        return Err(Failure::Usage("--backup-repo: expected owner/name".into()));
+    }
+    let tightened = own_folders(paths)?;
+    let (before, text) = load(paths)?;
+    if let Some(expect) = p.value("--expect")
+        && expect != before.digest()
+    {
+        return Err(Failure::Refused(format!(
+            "{} changed since its preview (expected {expect}, found {}); your edit is kept, run setup again",
+            paths.config_file.display(),
+            before.digest()
+        )));
+    }
+    let current = config::parse(&text).map_err(|e| {
+        Failure::Refused(format!(
+            "{} is not a valid config ({}); fix it first, cataly config check shows why",
+            paths.config_file.display(),
+            config::describe(&e)
+        ))
+    })?;
     let creating = before.bytes.is_none();
-    text = managed(p, text, creating)?;
-    let home = if p.flag("--backup") {
-        Some(super::install::block_on(super::home::plan(p, paths))?)
+    let original = text;
+    let text = managed(p, original.clone(), creating)?;
+    let edited = (text != original).then(|| {
+        if creating {
+            "a new file".to_string()
+        } else {
+            let given: Vec<&str> = MANAGED
+                .iter()
+                .filter_map(|(_, _, f)| p.value(f).map(|_| *f))
+                .collect();
+            format!("{} as given", given.join(", "))
+        }
+    });
+    // What the flags asked for, as the hub would read it.
+    let planned = config::parse(&text).map_err(|e| {
+        Failure::Usage(format!(
+            "the result would not be a valid config: {}",
+            config::describe(&e)
+        ))
+    })?;
+    let term = Terminal::open(as_json);
+    let discord = if uses_discord(p, &current) {
+        match block_on(discord::discover(
+            paths,
+            &planned,
+            term.as_ref(),
+            as_json,
+            &flags,
+        )) {
+            Ok(d) => Some(d),
+            Err((report, next)) => {
+                if as_json {
+                    out::json(&json!({ "discord": report }));
+                }
+                return Err(Failure::Refused(next));
+            }
+        }
     } else {
         None
     };
-    if let Some(h) = &home {
-        text = h.config(&text);
+    let mut decided = decide(p, paths, &planned, text, discord)?;
+    if let Some(what) = edited {
+        decided.items.insert(0, Item::new("config", what, true));
     }
-    let mut flags: String = MANAGED
-        .iter()
-        .filter_map(|(_, _, f)| p.value(f).map(|v| format!(" {f} {v}")))
-        .collect();
-    if p.flag("--backup") {
-        flags.push_str(" --backup");
-        if let Some(r) = p.value("--backup-repo") {
-            let _ = write!(flags, " --backup-repo {r}");
+    if !tightened.is_empty() {
+        let list: Vec<String> = tightened.iter().map(|d| d.display().to_string()).collect();
+        decided.items.push(Item::new(
+            "folders",
+            format!("{} made owner-only (0700)", list.join(", ")),
+            false,
+        ));
+    }
+    let pending = decided.items.iter().any(|i| i.change);
+    if !as_json {
+        print_summary(paths, &decided.items, creating, pending);
+    }
+    let go = pending
+        && (p.flag("--yes") || term.as_ref().is_some_and(|t| t.yes("Apply these changes?")));
+    let mut notes = Vec::new();
+    let mut written = before.bytes.clone().unwrap_or_default();
+    if go {
+        written = apply(paths, &before, &planned, &mut decided, &mut notes)?.into_bytes();
+    } else if pending && !as_json {
+        out::line("Nothing changed. Run `cataly setup --yes` to apply it.");
+    }
+    if as_json {
+        out::json(&report(paths, &before, &written, go, &decided, &notes));
+    } else {
+        for n in &notes {
+            out::line(n);
         }
     }
-    let plan = Plan {
-        apply: p.flag("--apply"),
-        expect: p.value("--expect"),
-        command: "setup",
-        flags,
-        always_offer: home.is_some(),
-        extra: None,
+    Ok(())
+}
+
+/// Cataly's own folders: the config folder, its `secrets` and the state folder, made owner-only.
+/// Returns the ones that were open to group or others and were tightened.
+fn own_folders(paths: &Paths) -> Result<Vec<PathBuf>, Failure> {
+    let config_dir = paths.config_file.parent().unwrap_or(Path::new("/"));
+    let mut tightened = Vec::new();
+    for dir in [
+        config_dir.to_path_buf(),
+        config_dir.join("secrets"),
+        paths.state_dir.clone(),
+    ] {
+        if crate::sys::fs::claim_private_dir(&dir).map_err(|e| Failure::Refused(e.to_string()))? {
+            tightened.push(dir);
+        }
+    }
+    Ok(tightened)
+}
+
+/// Discord is set up unless the owner uses only Telegram or Slack.
+fn uses_discord(p: &Parsed, config: &Config) -> bool {
+    let d = &config.discord;
+    let discord = d.owner.is_some()
+        || d.guild.is_some()
+        || !d.channels.is_empty()
+        || p.value("--guild").is_some()
+        || p.value("--owner").is_some()
+        || p.value("--discord-token-file").is_some();
+    let other = config.telegram.owner.is_some()
+        || config.slack.owner.is_some()
+        || p.value("--telegram-owner").is_some()
+        || p.value("--slack-owner").is_some();
+    discord || !other
+}
+
+/// Every default and flag applied to the config text, and the steps beyond it.
+fn decide(
+    p: &Parsed,
+    paths: &Paths,
+    planned: &Config,
+    mut text: String,
+    discord: Option<Discord>,
+) -> Result<Decided, Failure> {
+    let mut items = Vec::new();
+    let mut profile = Vec::new();
+    if let Some(d) = &discord {
+        let owner_new =
+            planned.discord.owner != Some(d.owner) || planned.discord.guild != Some(d.guild);
+        items.push(Item::new(
+            "discord",
+            format!(
+                "bot {} in {}; owner {} ({})",
+                d.bot, d.server, d.owner, d.owner_source
+            ),
+            owner_new,
+        ));
+        let shown = |name: &str, id: Option<crate::relay::discord::Snowflake>| {
+            id.map_or_else(
+                || format!("#{name} (to create)"),
+                |id| format!("#{name} {id}"),
+            )
+        };
+        let settled = match (d.lead, d.ops) {
+            (Some(lead), Some(ops)) => {
+                discord::config_text(planned, String::new(), d, lead, ops).is_empty()
+            }
+            _ => false,
+        };
+        items.push(Item::new(
+            "channels",
+            format!(
+                "{} for the lead, {} for job notices",
+                shown(discord::LEAD, d.lead),
+                shown(discord::OPS, d.ops)
+            ),
+            !settled,
+        ));
+        let flag = switch(p, "--approvals")?;
+        let set = in_file(&text, "discord", "remote_approvals");
+        let on = flag.unwrap_or(if set {
+            planned.discord.remote_approvals
+        } else {
+            true
+        });
+        let change = !set || on != planned.discord.remote_approvals;
+        if change {
+            text = set_rendered(&text, "discord", "remote_approvals", &on.to_string());
+        }
+        items.push(Item::new(
+            "approvals",
+            if on {
+                "on: OMP's permission requests get buttons; only your presses count"
+            } else {
+                "off: permission requests wait for `cataly lead answer`"
+            },
+            change,
+        ));
+        let force = p.flag("--profile");
+        if planned.discord.profile || force {
+            let plan = d.profile_plan(&paths.state_dir, force);
+            items.push(Item::new("profile", plan.summary(), !plan.set.is_empty()));
+            profile = plan.set;
+        }
+    }
+    text = lead(planned, text, &mut items);
+    let (text, home) = backup(p, paths, planned, text, &mut items)?;
+    let text = jobs(planned, text, discord.is_some(), &mut items);
+    let (text, service) = service(p, planned, text, &mut items)?;
+    Ok(Decided {
+        text,
+        discord,
+        profile,
+        home,
+        service,
+        items,
+    })
+}
+
+/// The lead's model: the flag, else the config's, else the one OMP starts with.
+fn lead(planned: &Config, mut text: String, items: &mut Vec<Item>) -> String {
+    if let Some(l) = &planned.lead {
+        items.push(Item::new("lead", l.model.clone(), false));
+        return text;
+    }
+    let offered = crate::omp::resolve(&planned.omp.path)
+        .and_then(|omp| block_on(crate::omp::usage::default_model(&omp)));
+    match offered {
+        Some(model) => {
+            text = set_key(&text, "lead", "model", &model);
+            items.push(Item::new(
+                "lead",
+                format!("{model} (OMP's default model)"),
+                true,
+            ));
+        }
+        None => items.push(Item::new(
+            "lead",
+            "none: OMP names no default model; messages wait until `cataly setup --lead-model provider/id`",
+            false,
+        )),
+    }
+    text
+}
+
+/// The home backup: kept as configured, switched off or on by `--backup`, or planned with `gh`.
+fn backup(
+    p: &Parsed,
+    paths: &Paths,
+    planned: &Config,
+    mut text: String,
+    items: &mut Vec<Item>,
+) -> Result<(String, Option<super::home::Home>), Failure> {
+    let flag = switch(p, "--backup")?;
+    let repo = p.value("--backup-repo");
+    let section = format!("jobs.{}", super::home::JOB);
+    let job = planned.jobs.get(super::home::JOB);
+    match (job, flag, repo) {
+        (Some(j), Some(false), _) if j.enabled => {
+            text = set_rendered(&text, &section, "enabled", "false");
+            items.push(Item::new("backup", "off (job home switched off)", true));
+        }
+        (_, Some(false), _) => items.push(Item::new("backup", "off", false)),
+        (Some(j), Some(true), None) if !j.enabled => {
+            text = set_rendered(&text, &section, "enabled", "true");
+            items.push(Item::new("backup", "on (job home switched on)", true));
+        }
+        (Some(j), _, None) => items.push(Item::new(
+            "backup",
+            if j.enabled {
+                "on (job home)"
+            } else {
+                "off (job home is switched off)"
+            },
+            false,
+        )),
+        (_, asked, repo) => match block_on(super::home::plan(repo, paths)) {
+            Ok(h) => {
+                text = h.config(&text);
+                items.push(Item::new("backup", h.summary(), true));
+                return Ok((text, Some(h)));
+            }
+            Err(e) if asked == Some(true) || repo.is_some() => return Err(Failure::Refused(e)),
+            Err(e) => items.push(Item::new(
+                "backup",
+                format!("off: {e}; later `cataly setup --backup on`"),
+                false,
+            )),
+        },
+    }
+    Ok((text, None))
+}
+
+/// The health and pressure jobs, each named after its kind, added when no job of that kind exists.
+fn jobs(planned: &Config, mut text: String, notices: bool, items: &mut Vec<Item>) -> String {
+    let mut added = false;
+    for kind in JOBS {
+        if planned.jobs.values().any(|j| j.kind() == kind) || planned.jobs.contains_key(kind) {
+            continue;
+        }
+        let section = format!("jobs.{kind}");
+        text = set_key(&text, &section, "kind", kind);
+        if notices {
+            let ops = toml_string(discord::OPS);
+            text = set_rendered(&text, &section, "destinations", &format!("[{ops}]"));
+        }
+        added = true;
+    }
+    items.push(Item::new(
+        "jobs",
+        format!("{} with their defaults", JOBS.join(", ")),
+        added,
+    ));
+    text
+}
+
+/// The user service: kept, enabled (with `[omp] path` pinned, since the service's PATH is not the
+/// shell's) or, with `--service off`, removed.
+fn service(
+    p: &Parsed,
+    planned: &Config,
+    mut text: String,
+    items: &mut Vec<Item>,
+) -> Result<(String, ServiceStep), Failure> {
+    let flag = switch(p, "--service")?;
+    let layout = Layout::of_running().map_err(Failure::Refused)?;
+    let exists = layout.service_marker().exists();
+    let installed = layout.current_version().is_some();
+    let manager = if cfg!(target_os = "macos") {
+        "launchd agent"
+    } else {
+        "systemd user service"
     };
-    let home = home.as_ref().map(|h| (h, p.flag("--create")));
-    finish(paths, &before, creating, &text, home, as_json, &plan)
+    let step = match (flag, exists, installed) {
+        (Some(false), true, _) => {
+            items.push(Item::new(
+                "service",
+                format!("off ({manager} to remove)"),
+                true,
+            ));
+            ServiceStep::Disable(layout)
+        }
+        (Some(false), false, _) => {
+            items.push(Item::new("service", "off", false));
+            ServiceStep::Keep
+        }
+        (_, true, _) => {
+            items.push(Item::new("service", format!("on ({manager})"), false));
+            ServiceStep::Keep
+        }
+        (_, false, true) => {
+            if let Some(omp) = crate::omp::resolve(&planned.omp.path)
+                && !Path::new(&planned.omp.path).is_absolute()
+            {
+                text = set_key(&text, "omp", "path", &omp.display().to_string());
+            }
+            items.push(Item::new(
+                "service",
+                format!("{manager}, to enable and start"),
+                true,
+            ));
+            ServiceStep::Enable(layout)
+        }
+        (Some(true), false, false) => {
+            return Err(Failure::Refused(
+                "install Cataly first; the service runs the installed command".into(),
+            ));
+        }
+        (None, false, false) => {
+            items.push(Item::new(
+                "service",
+                "off: this cataly is not an installed release; install.sh, then `cataly setup`",
+                false,
+            ));
+            ServiceStep::Keep
+        }
+    };
+    Ok((text, step))
+}
+
+/// The one short summary.
+fn print_summary(paths: &Paths, items: &[Item], creating: bool, pending: bool) {
+    let state = if creating { " (new)" } else { "" };
+    out::line(&format!(
+        "Cataly setup: {}{state}",
+        paths.config_file.display()
+    ));
+    for i in items {
+        let mark = if i.change { "+" } else { " " };
+        out::line(&format!("{mark} {:<10} {}", i.what, i.value));
+    }
+    if pending {
+        out::line("+ marks what this run changes.");
+    } else {
+        out::line("Everything is set; nothing to change.");
+    }
+    out::line(
+        "Change later with cataly setup --lead-model provider/id, --approvals off, --backup off, \
+         --service off, --profile, or by editing the file.",
+    );
+}
+
+/// Carries out what was decided, in order: the Discord channels, the profile, the home backup, the
+/// config file, the service, and a reload of a running hub. Returns the config text written.
+fn apply(
+    paths: &Paths,
+    before: &Snapshot,
+    planned: &Config,
+    decided: &mut Decided,
+    notes: &mut Vec<String>,
+) -> Result<String, Failure> {
+    let mut text = decided.text.clone();
+    if let Some(d) = &mut decided.discord {
+        let (lead, ops) = block_on(d.create_missing()).map_err(Failure::Refused)?;
+        text = discord::config_text(planned, text, d, lead, ops);
+        if !decided.profile.is_empty() {
+            match block_on(d.set_profile(&paths.state_dir, &decided.profile)) {
+                Ok(()) => notes.push(format!("bot {} set", decided.profile.join(" and "))),
+                Err(e) => notes.push(format!(
+                    "bot profile not set ({e}); `cataly setup --profile` tries again"
+                )),
+            }
+        }
+    }
+    if let Some(h) = &decided.home {
+        block_on(h.apply()).map_err(Failure::Refused)?;
+    }
+    config::parse(&text).map_err(|e| {
+        Failure::Refused(format!(
+            "the result would not be a valid config: {}",
+            config::describe(&e)
+        ))
+    })?;
+    let changed = before.bytes.as_deref() != Some(text.as_bytes());
+    if changed {
+        publish(&paths.config_file, before, text.as_bytes())?;
+        notes.push(format!("written: {}", paths.config_file.display()));
+    }
+    match &decided.service {
+        ServiceStep::Enable(layout) => {
+            let config = config::parse(&text).unwrap_or_default();
+            let (file, more) = block_on(super::install::enable_service(layout, paths, &config))
+                .map_err(Failure::Refused)?;
+            notes.push(format!("service written to {} and started", file.display()));
+            notes.extend(more.into_iter().map(|n| format!("  {n}")));
+            return Ok(text);
+        }
+        ServiceStep::Disable(layout) => {
+            if let Some(file) =
+                block_on(crate::sys::service::disable(layout)).map_err(Failure::Refused)?
+            {
+                notes.push(format!("service stopped and {} removed", file.display()));
+            }
+        }
+        ServiceStep::Keep => {}
+    }
+    if changed && let Ok(mut hub) = super::client::Client::connect(&paths.socket) {
+        match hub.call(method::CONFIG_RELOAD, json!({}), CALL_TIMEOUT) {
+            Ok(_) => notes.push("the running hub applied it".into()),
+            Err(e) => notes.push(format!(
+                "the running hub did not apply it ({e}); run `cataly config reload`"
+            )),
+        }
+    }
+    Ok(text)
+}
+
+/// The `--json` report.
+fn report(
+    paths: &Paths,
+    before: &Snapshot,
+    written: &[u8],
+    applied: bool,
+    decided: &Decided,
+    notes: &[String],
+) -> Value {
+    let text = if applied {
+        String::from_utf8_lossy(written).into_owned()
+    } else {
+        decided.text.clone()
+    };
+    let after = sha256_hex(text.as_bytes());
+    let action = if before.bytes.is_none() {
+        "create"
+    } else if after == before.digest() {
+        "keep"
+    } else {
+        "update"
+    };
+    let hub = super::client::Client::connect(&paths.socket)
+        .ok()
+        .and_then(|mut c| c.call(method::STATUS, json!({}), CALL_TIMEOUT).ok())
+        .and_then(|v| serde_json::from_value::<Status>(v).ok());
+    let summary: Vec<Value> = decided
+        .items
+        .iter()
+        .map(|i| json!({ "item": i.what, "value": i.value, "change": i.change }))
+        .collect();
+    json!({
+        "file": paths.config_file.display().to_string(),
+        "action": action,
+        "applied": applied,
+        "before": before.digest(),
+        "after": after,
+        "valid": config::parse(&text)
+            .map_or_else(|e| Value::String(config::describe(&e)), |_| Value::Bool(true)),
+        "summary": summary,
+        "discord": decided.discord.as_ref().map(|d| d.found.report(None)),
+        "backup": decided.home.as_ref().map(super::home::Home::report),
+        "sources": sources(paths, &text, hub.as_ref(), &after),
+        "notes": notes,
+    })
 }
 
 /// The snapshot of the config file and its text (a new file's header when there is none).
@@ -544,150 +1102,6 @@ pub(super) fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<St
     Ok(text)
 }
 
-/// How one setup run writes and reports.
-pub(super) struct Plan<'a> {
-    pub(super) apply: bool,
-    /// The digest the preview showed; applying refuses a file that no longer has it.
-    pub(super) expect: Option<&'a str>,
-    /// The verb of the apply command the preview prints: `setup` or `setup discord`.
-    pub(super) command: &'static str,
-    /// The flags that repeat this run in that command.
-    pub(super) flags: String,
-    /// Offer the apply command even when the file stays as it is (it does more than write it).
-    pub(super) always_offer: bool,
-    /// A further section of the report: its key and value.
-    pub(super) extra: Option<(&'static str, Value)>,
-}
-
-/// Validates, writes when applying (after the home backup is prepared, `--create` given with it),
-/// and reports.
-pub(super) fn finish(
-    paths: &Paths,
-    before: &Snapshot,
-    creating: bool,
-    text: &str,
-    home: Option<(&super::home::Home, bool)>,
-    as_json: bool,
-    plan: &Plan<'_>,
-) -> Result<(), Failure> {
-    let path = &paths.config_file;
-    let after = sha256_hex(text.as_bytes());
-    let action = if creating {
-        "create"
-    } else if after == before.digest() {
-        "keep"
-    } else {
-        "update"
-    };
-    let valid = config::parse(text).map_err(|errors| config::describe(&errors));
-    if plan.apply {
-        if let Err(e) = &valid {
-            return Err(Failure::Refused(format!(
-                "the result would not be a valid config: {e}"
-            )));
-        }
-        if let Some(expect) = plan.expect
-            && expect != before.digest()
-        {
-            return Err(Failure::Refused(format!(
-                "{} changed since its snapshot (expected {expect}, found {}); your edit is kept, run setup again",
-                path.display(),
-                before.digest()
-            )));
-        }
-        if let Some((h, create)) = home {
-            super::install::block_on(h.apply(create)).map_err(Failure::Refused)?;
-        }
-        if action != "keep" {
-            publish(path, before, text.as_bytes())?;
-        }
-    }
-    let hub = super::client::Client::connect(&paths.socket)
-        .ok()
-        .and_then(|mut c| c.call(method::STATUS, json!({}), CALL_TIMEOUT).ok())
-        .and_then(|v| serde_json::from_value::<Status>(v).ok());
-    let mut report = json!({
-        "file": path.display().to_string(),
-        "action": action,
-        "applied": plan.apply,
-        "before": before.digest(),
-        "after": after,
-        "managed": MANAGED.iter().map(|(s, k, _)| format!("{s}.{k}")).collect::<Vec<_>>(),
-        "unknown_keys": "kept as they are",
-        "valid": valid.as_ref().map_or_else(|e| Value::String(e.clone()), |_| Value::Bool(true)),
-        "sources": sources(paths, text, hub.as_ref(), &after),
-        "backup": home.map(|(h, _)| h.report()),
-    });
-    if let Some((key, value)) = &plan.extra
-        && let Some(map) = report.as_object_mut()
-    {
-        map.insert((*key).to_string(), value.clone());
-    }
-    if as_json {
-        out::json(&report);
-        return Ok(());
-    }
-    let invalid = valid.as_ref().err().map(String::as_str);
-    print_report(&report, plan, action, &before.digest(), &after, invalid);
-    if let Some((h, _)) = home {
-        for l in h.lines(plan.apply) {
-            out::line(&l);
-        }
-    }
-    Ok(())
-}
-
-fn print_report(
-    report: &Value,
-    plan: &Plan<'_>,
-    action: &str,
-    before: &str,
-    after: &str,
-    invalid: Option<&str>,
-) {
-    let path = report
-        .get("file")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let verb = if plan.apply { "done" } else { "preview" };
-    out::line(&format!("setup {verb}: {action} {path}"));
-    out::line(&format!("  before {before}"));
-    out::line(&format!("  after  {after}"));
-    out::line(&format!(
-        "  managed: {}; tokens stay in their owner-only files; other keys and comments are kept",
-        managed_summary()
-    ));
-    if let Some(e) = invalid {
-        out::line(&format!("  the result is not a valid config: {e}"));
-    }
-    if !plan.apply && (action != "keep" || plan.always_offer) {
-        out::line(&format!(
-            "  write it with: cataly {} --apply --expect {before}{}",
-            plan.command, plan.flags
-        ));
-    }
-    let text = |s: &Value, k: &str| {
-        s.get(k)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    if let Some(sources) = report.get("sources").and_then(Value::as_array) {
-        for s in sources {
-            let note = s
-                .get("note")
-                .and_then(Value::as_str)
-                .map_or_else(String::new, |n| format!("; {n}"));
-            out::line(&format!(
-                "  {:<20} {} ({}{note})",
-                text(s, "setting"),
-                text(s, "value"),
-                text(s, "source")
-            ));
-        }
-    }
-}
-
 /// Re-checks the snapshot, writes atomically (never overwriting a file that appeared meanwhile), and
 /// reads the result back.
 fn publish(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), Failure> {
@@ -716,22 +1130,6 @@ fn publish(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), Failure> 
     }
 }
 
-/// The managed settings as one line, grouped by section, built from [`MANAGED`].
-fn managed_summary() -> String {
-    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
-    for (section, key, _) in MANAGED {
-        match groups.last_mut() {
-            Some((s, keys)) if *s == section => keys.push(key),
-            _ => groups.push((section, vec![key])),
-        }
-    }
-    groups
-        .iter()
-        .map(|(s, keys)| format!("{s}.{}", keys.join("/")))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,21 +1150,6 @@ mod tests {
         let out = set_key("[omp]\n# keep\n\n[hub]\n", "omp", "path", "omp");
         assert_eq!(out, "[omp]\n# keep\npath = \"omp\"\n\n[hub]\n");
         assert!(config::parse(&set_key(NEW_FILE, "hub", "log_level", "info")).is_ok());
-    }
-
-    #[test]
-    fn managed_summary_lists_every_managed_setting() {
-        let line = managed_summary();
-        assert!(line.contains("fallback.on"), "{line}");
-        assert!(line.contains("fallback.chains.default"), "{line}");
-        assert!(
-            line.contains("telegram.token_file/owner/group/topic"),
-            "{line}"
-        );
-        assert_eq!(
-            line.matches('/').count() + line.matches(", ").count() + 1,
-            MANAGED.len()
-        );
     }
 
     #[test]

@@ -55,8 +55,8 @@ pub(crate) type Events = Arc<dyn Fn(Emit) + Send + Sync>;
 pub(crate) struct Env<R: Runtime> {
     pub(crate) config: watch::Receiver<Arc<Config>>,
     pub(crate) omp: Arc<Omp>,
-    /// Whether the quota gate holds new session starts now (OJ-08).
-    pub(crate) gate_held: Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Why the quota gate holds a new session on this model now, if it does (OJ-08).
+    pub(crate) quota_hold: crate::jobs::owner::quota::QuotaHold,
     /// Whether the bridge link in OMP's extension folder is current (DESIGN 4.2, 12.2 C19).
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     pub(crate) events: Events,
@@ -444,7 +444,7 @@ impl<R: Runtime> Lead<R> {
     }
 
     /// Why a start must wait now, if it must (HOST req. 89-90; OJ-08; DESIGN 3.4).
-    async fn admission(&self, config: &Config) -> Result<PathBuf, String> {
+    async fn admission(&self, config: &Config, model: &str) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -452,10 +452,8 @@ impl<R: Runtime> Lead<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if (self.env.gate_held)() {
-            return Err(
-                "the quota gate holds new session starts; `cataly quota lift` lifts it".into(),
-            );
+        if let Some(why) = (self.env.quota_hold)(model) {
+            return Err(why);
         }
         (self.env.bridge_link)()?;
         let live = usize::from(self.current().is_some_and(|s| s.alive()));
@@ -512,7 +510,7 @@ impl<R: Runtime> Lead<R> {
         let Some(settings) = config.lead.clone() else {
             return Err("no [lead] section in the config".into());
         };
-        let exe = self.admission(&config).await?;
+        let exe = self.admission(&config, &settings.model).await?;
         let cwd = settings
             .cwd
             .clone()

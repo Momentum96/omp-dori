@@ -154,13 +154,8 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
             .map_or(paths.config_file.as_path(), Path::new);
         return config_check(file, as_json);
     }
-    if p.is(&["setup", "discord"]) {
-        return setup_discord::run(p, paths, as_json);
-    }
     if p.is(&["setup"]) {
-        if p.flag("--apply") {
-            owner_only(paths)?;
-        }
+        owner_only(paths)?;
         return setup::run(p, paths, as_json);
     }
     if matches!(
@@ -488,7 +483,11 @@ fn print_gate(g: &GateView) {
         .map(|c| format!("{} until {}", c.limit, instant_text(c.release_ms)))
         .collect();
     let line = match (g.held, causes.is_empty(), g.lifted_until_ms) {
-        (true, false, _) => format!("closed: new sessions wait ({})", causes.join(", ")),
+        (true, false, _) => format!(
+            "holding new sessions on {}; others start as usual ({})",
+            g.providers.join(", "),
+            causes.join(", ")
+        ),
         (false, false, Some(until)) => {
             format!(
                 "lifted by the owner until {} ({})",

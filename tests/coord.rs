@@ -236,7 +236,7 @@ fn plan(hub: &TestHub) -> String {
 
 fn usage(percent: u32) -> String {
     json!({
-        "generatedAt": 1, "reports": [{ "provider": "acme", "fetchedAt": 1,
+        "generatedAt": 1, "reports": [{ "provider": "fake", "fetchedAt": 1,
             "limits": [{ "id": "five", "label": "5h", "resetsAt": 4_102_444_800_000_i64,
                          "amount": { "used": percent, "limit": 100, "unit": "percent" } }] }],
         "accountsWithoutUsage": [], "disabledCredentials": [], "capacity": {}
@@ -325,7 +325,8 @@ fn planner_limits_questions_and_merged_items() {
             .contains("failed to start twice"),
         "{fourth}\n{c}"
     );
-    // The quota gate holds planner starts: a live quota tick at the next hub start closes it.
+    // The quota gate holds planner starts on the lanes' provider: a live quota tick at the next hub
+    // start closes it for `fake`; a session on another provider is still admitted.
     lane(
         &hub,
         "item-add",
@@ -342,7 +343,25 @@ fn planner_limits_questions_and_merged_items() {
     });
     let gated = plan(&hub);
     assert!(gated.contains("quota gate"), "{gated}");
+    gate_holds_only_fake(&hub);
     assert!(hub.stop().success());
+}
+
+/// The quota gate holds new sessions on the provider at its limit only: `cataly quota` and `cataly
+/// status` name it, a `fake/…` session waits and one on another provider is admitted.
+fn gate_holds_only_fake(hub: &TestHub) {
+    assert_eq!(hub.json(&["quota", "--json"])["providers"], json!(["fake"]));
+    let held = lane(hub, "admission", &json!({ "model": "fake/primary" })).unwrap();
+    assert_eq!(held["admit"], false, "{held}");
+    assert!(
+        held["detail"].as_str().unwrap().contains("on fake"),
+        "{held}"
+    );
+    let other = lane(hub, "admission", &json!({ "model": "other/model" })).unwrap();
+    assert_eq!(other["admit"], true, "{other}");
+    let status = hub.cli(&["status"]);
+    let text = String::from_utf8_lossy(&status.stdout);
+    assert!(text.contains("holding new sessions on fake"), "{text}");
 }
 
 /// Check 4: the merge check refuses without an approving verdict at the current head, with no

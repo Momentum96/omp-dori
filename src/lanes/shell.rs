@@ -417,7 +417,7 @@ mod tests {
             "echo \"$(cataly lead send hi)\"",
             "if true; then cataly discord release r; fi",
             "cata\\ly job enable a --ack",
-            "x=1 /opt/bin/cataly setup --apply",
+            "x=1 /opt/bin/cataly setup --yes",
             "o=omp; $o usage reset",
         ] {
             assert!(rule_zero(cmd), "{cmd}");

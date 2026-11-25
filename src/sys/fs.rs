@@ -48,17 +48,54 @@ impl fmt::Display for FsError {
 impl std::error::Error for FsError {}
 
 /// Creates `path` (and missing parents) and checks that the final directory is the owner's, not a
-/// symlink and has mode 0700 or stricter.
+/// symlink and has mode 0700 or stricter. Every folder created here gets mode 0700 whatever the
+/// umask says.
 pub(crate) fn ensure_private_dir(path: &Path) -> Result<(), FsError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| FsError::io(parent, e))?;
-    }
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(FsError::io(path, e)),
-    }
+    create_private_dirs(path)?;
     check_private_dir(path)
+}
+
+/// [`ensure_private_dir`] for a folder that is Cataly's own by name (its config, secrets and state
+/// folders): an existing one that is the owner's real directory but open to group or others (an
+/// earlier run under a loose umask made it so) is tightened to 0700 instead of refused. Returns
+/// whether it was tightened.
+pub(crate) fn claim_private_dir(path: &Path) -> Result<bool, FsError> {
+    create_private_dirs(path)?;
+    let meta = fs::symlink_metadata(path).map_err(|e| FsError::io(path, e))?;
+    let tighten = meta.is_dir()
+        && !meta.file_type().is_symlink()
+        && meta.uid() == super::own_uid()
+        && meta.mode() & 0o077 != 0;
+    if tighten {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|e| FsError::io(path, e))?;
+    }
+    check_private_dir(path)?;
+    Ok(tighten)
+}
+
+/// Creates the missing folders of `path`, each with mode 0700 regardless of the umask.
+fn create_private_dirs(path: &Path) -> Result<(), FsError> {
+    let mut missing = Vec::new();
+    let mut at = Some(path);
+    while let Some(dir) = at.filter(|d| !d.as_os_str().is_empty()) {
+        match fs::symlink_metadata(dir) {
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(dir),
+            Err(e) => return Err(FsError::io(dir, e)),
+        }
+        at = dir.parent();
+    }
+    for dir in missing.into_iter().rev() {
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            // The umask may have taken bits away: set the mode itself.
+            Ok(()) => fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+                .map_err(|e| FsError::io(dir, e))?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(FsError::io(dir, e)),
+        }
+    }
+    Ok(())
 }
 
 /// Checks that an existing directory is the owner's, not a symlink and has mode 0700 or stricter: the
@@ -341,5 +378,27 @@ pub(crate) mod tests {
         fs::create_dir(&open).unwrap();
         fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(ensure_private_dir(&open).is_err());
+    }
+
+    #[test]
+    fn own_folders_are_created_and_tightened_to_0700() {
+        let dir = scratch("fs-claim");
+        let deep = dir.join("a/b/c");
+        ensure_private_dir(&deep).unwrap();
+        for d in [dir.join("a"), dir.join("a/b"), deep] {
+            assert_eq!(fs::metadata(&d).unwrap().mode() & 0o777, 0o700, "{d:?}");
+        }
+        let loose = dir.join("loose");
+        fs::create_dir(&loose).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(claim_private_dir(&loose).unwrap(), "tightened");
+        assert_eq!(fs::metadata(&loose).unwrap().mode() & 0o777, 0o700);
+        assert!(!claim_private_dir(&loose).unwrap(), "already private");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&loose, &link).unwrap();
+        assert!(
+            claim_private_dir(&link).is_err(),
+            "a symlink is never claimed"
+        );
     }
 }
