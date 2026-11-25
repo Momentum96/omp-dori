@@ -338,11 +338,12 @@ test("a mirrored form takes the first answer and withdraws the other (check 4)",
 	const hub: { push?: (cmd: any) => void } = {};
 	const state = { idle: false, aborts: 0, shutdowns: 0, goal: "inactive" };
 	bridge(pi, { env: { CATALY_LAUNCH: "t" }, connect: ternHub(sent, hub), uid: () => 1 });
-	let aborted = false;
+	let [aborted, shown]: [boolean, unknown] = [false, undefined];
 	const ctx: any = ternCtx(pi, state);
 	ctx.ui = {
 		...ctx.ui,
-		askDialog: (_input: any, o: { signal: AbortSignal }) => {
+		askDialog: (questions: unknown, o: { signal: AbortSignal }) => {
+			shown = questions;
 			const local = Promise.withResolvers<unknown>();
 			o.signal.addEventListener("abort", () => ((aborted = true), local.resolve(undefined)));
 			return local.promise;
@@ -358,6 +359,8 @@ test("a mirrored form takes the first answer and withdraws the other (check 4)",
 	expect(result.block).toBe(true);
 	expect(result.reason).toContain('"Red"');
 	expect(aborted).toBe(true);
+	// Stock OMP's `ui.askDialog` takes the question list itself.
+	expect(shown).toEqual(input.questions);
 	expect(sent.find(m => m.params?.kind === "form_closed").params).toMatchObject({ call: "f1", by: "Discord" });
 	hub.push?.({ n: 2, op: "form", call: "f1", answer: {} });
 	expect(replies(sent).find(r => r.n === 2).refused).toContain("already answered");

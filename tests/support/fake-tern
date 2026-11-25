@@ -26,7 +26,10 @@ done
 shift
 cd "$cwd" || exit 3
 id="b$$"
+# Measurements type into the block through the named pipe tern-data/input when it exists.
+input=/dev/null
+[ -p "$dir/input" ] && input=$dir/input
 TERM=${TERM:-xterm-256color} nohup python3 -c 'import pty, sys; pty.spawn(sys.argv[1:])' "$@" \
-    > "$dir/block-$id.out" 2>&1 < /dev/null &
+    > "$dir/block-$id.out" 2>&1 < "$input" &
 echo $! > "$dir/block-$id.pid"
 printf '{"id":"%s"}\n' "$id"

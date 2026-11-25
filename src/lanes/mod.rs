@@ -919,6 +919,7 @@ impl<R: Runtime> Lanes<R> {
             },
             spend: None,
             priority: v.priority,
+            runtime: config.sessions.runtime,
         }
     }
 
@@ -1120,7 +1121,7 @@ impl<R: Runtime> Lanes<R> {
             Ok(r) => rev = r,
             Err(e) => return self.start_failed(rec, rev, None, &e).await,
         }
-        let runtime = (self.env.make)(config, &exe);
+        let runtime = (self.env.make)(config, &exe, rec.runtime);
         let budget = config.lanes.start_budget;
         let started = tokio::time::timeout(budget, runtime.start(spec)).await;
         let (session, started) = match started {

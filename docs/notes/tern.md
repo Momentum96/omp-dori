@@ -62,10 +62,21 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
   (extensions.md), so records sent before a clear are still found in the file and count as delivered; the
   clear is reported as a notice. A reload with the same session ID and file changes nothing the hub tracks:
   sent records keep their 30 s confirmation window. Neither needs extra state.
-- **A stored session stays on its runtime (HOST req. 91)** is not enforced for resumes: the runtime is taken
-  from the config at each start. The lead row records which runtime ran.
-- **`ctx.ui.askDialog` signature** (questions object, `{ signal }`) is taken from the docs' method list and
-  verified only against the bridge test's fake; stock OMP's TUI form path is not exercised by a contract case.
+- **A stored session stays on its runtime (HOST req. 91)** is enforced since the follow-up: a resume (owner
+  start, automatic restart, lane resume or reopen) uses the runtime stored with the session (lead: its session
+  row; lane: `runtime` in the lane record, the config's when the lane is opened), whatever `[sessions] runtime`
+  says now; only new sessions take the config's. A stored name this build does not know refuses the resume with
+  a hint to start fresh. The factory takes the runtime as an argument (`Factory(config, exe, kind)`).
+- **`ctx.ui.askDialog`** in stock OMP 19.1.1 takes the question list itself (`ui.askDialog(questions,
+  { signal })`, checked in the installed product); the bridge passed the whole tool input, so the local dialog
+  would have been empty. Fixed; `tests/contract_tern.rs` now runs the form path in stock OMP's TUI.
+- **Tern lanes cannot set their goal.** A lane start ends with `goal create`, which the tern runtime refuses
+  (pause and resume only), so a tern lane starts "unconfirmed" and held. Stock OMP 19.1.1 has
+  `ctx.sessionModes.set({ mode: "goal", action: "enter", objective })`, but refuses it while the kickoff turn
+  runs ("busy"); wiring it needs a start step that waits for the turn end. Not done in this follow-up; the
+  lost/restored link of such a lane works (check 5 contract case).
+- **The bridge's goal reply** treats only a `"busy"` status as refused; stock OMP answers `{ ok: false, code,
+  message }` for every refusal. Left as is with the item above.
 - **Spec 30 "set model refused while a turn is running"** holds; `goal` takes only pause and resume from the hub
   (TUI session modes), as DESIGN 4.3 says.
 - One `sed -i` was used on `src/hub/bridge.rs` for a one-line type path fix, against the edit-tool rule.
@@ -76,6 +87,12 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
   and "not current" (check 2), interrupt/model/goal/shutdown, approvals never answered and mirrored forms
   answered (check 4), lost and restored link, identity rules (check 5), user switch.
 - `extension/cataly.test.ts`: commands, de-duplicated delivery IDs, switch guard, first-answer-wins form.
-- `tests/tern.rs` (hub + Tern stand-in in a pty + fake OMP TUI mode + a test bridge client): checks 1, 2, 3, 6.
-- `tests/contract_tern.rs` (stock OMP TUI in the stand-in's pty, loopback model): check 1 and the wake (check
-  2) end to end, and the measurements.
+- `tests/tern.rs` (hub + Tern stand-in in a pty + fake OMP TUI mode + a test bridge client): checks 1, 2, 3, 6,
+  and HOST req. 91 both ways (a tern lead resumes in Tern with `headless` configured; a headless lead resumes
+  headless with `tern` configured, while a fresh start takes the configured tern).
+- `tests/contract_tern.rs` (stock OMP TUI in the stand-in's pty, loopback model, OMP setup wizard off): check 1,
+  check 2 end to end, check 4 (an approval blocks the lead, `lead answer` is refused, the tool never runs; an
+  `ask` form is posted to the fake Discord and shown in the TUI, the owner's press ends the tool call with the
+  Discord answer and the reply is posted), check 5 (a tern lane's OMP stopped with SIGSTOP is marked lost at
+  45 s; after SIGCONT the same process's bridge reconnects with the same session and the lane is restored), the
+  wake by stage against headless, and the bridge's own cost.

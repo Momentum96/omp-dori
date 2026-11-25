@@ -21,6 +21,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::cli::exit;
+use crate::config::session::RuntimeKind;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
 use crate::host::hosted::Hosted;
@@ -516,8 +517,8 @@ fn sessions(
     )
 }
 
-/// How the hub starts a session (DESIGN 4.1-4.3); the lead and every lane use it. The config in
-/// force picks the runtime of each new session (HOST-30).
+/// How the hub starts a session (DESIGN 4.1-4.3); the lead and every lane use it. A new session
+/// runs on the config's runtime, a resumed one on the runtime it was started with (HOST req. 91).
 fn runtime(
     paths: &Paths,
     agent_start: &Latency,
@@ -531,8 +532,8 @@ fn runtime(
     );
     let agent_start = agent_start.clone();
     let links = Arc::clone(links);
-    Box::new(move |config: &Config, exe: &Path| {
-        if config.sessions.runtime == crate::config::session::RuntimeKind::Tern {
+    Box::new(move |config: &Config, exe: &Path, kind: RuntimeKind| {
+        if kind == RuntimeKind::Tern {
             return Hosted::Tern(crate::host::tern::Tern {
                 program: crate::omp::resolve(&config.sessions.tern),
                 block_session: config.sessions.tern_session.clone(),

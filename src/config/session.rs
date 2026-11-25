@@ -63,12 +63,32 @@ pub(crate) struct SessionSettings {
     pub(crate) tern_session: Option<String>,
 }
 
-/// Which runtime starts new sessions (DESIGN 4.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Which runtime starts a session (DESIGN 4.1). New sessions take the config's; a stored session
+/// keeps the one it was started with (HOST req. 91).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum RuntimeKind {
     #[default]
     Headless,
     Tern,
+}
+
+impl RuntimeKind {
+    /// The name stored with each session (`headless`, `tern`).
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::Tern => "tern",
+        }
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "headless" => Some(Self::Headless),
+            "tern" => Some(Self::Tern),
+            _ => None,
+        }
+    }
 }
 
 impl Default for SessionSettings {
@@ -157,10 +177,10 @@ pub(crate) fn extra_flag_error(flag: &str) -> Option<String> {
 
 /// `runtime`, `tern` and `tern_session` of `[sessions]` (HOST-30, HOST req. 92-93).
 fn runtime(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, sessions: &mut SessionSettings) {
-    match s.string(errors, "runtime") {
-        None | Some("headless") => {}
-        Some("tern") => sessions.runtime = RuntimeKind::Tern,
-        Some(_) => errors.push(s.error("runtime", "expected headless or tern")),
+    match s.string(errors, "runtime").map(RuntimeKind::from_name) {
+        None => {}
+        Some(Some(kind)) => sessions.runtime = kind,
+        Some(None) => errors.push(s.error("runtime", "expected headless or tern")),
     }
     if let Some(tern) = s.string(errors, "tern") {
         if tern.trim().is_empty() {

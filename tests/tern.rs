@@ -110,38 +110,53 @@ fn write_entry(file: &Path, text: &str, id: &str) {
     writeln!(f, "{entry}").unwrap();
 }
 
-fn tern_hub(tern: Option<&Path>) -> (TestHub, PathBuf) {
+/// Writes the config with `runtime`, the fake OMP and `tern` as the Tern executable.
+fn configure(hub: &TestHub, runtime: &str, tern: &Path) -> PathBuf {
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[sessions]\nruntime = \"{runtime}\"\ntern = \"{}\"\n\
+         [lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        hub.root.join("bin/omp").display(),
+        tern.display(),
+        work.display()
+    ));
+    work
+}
+
+fn hub_on(runtime: &str, tern: Option<&Path>) -> (TestHub, PathBuf) {
     let mut hub = TestHub::new("");
-    let omp = hub.install_fake("omp");
+    hub.install_fake("omp");
     // The probe's health check needs the fake's rpc-ui peer; the block runs its TUI mode.
     hub.fixture("omp", "rpc", Some(""));
     hub.fixture("omp", "tui", Some(""));
     let tern = tern.map_or_else(|| hub.install_fake("tern"), Path::to_path_buf);
-    let work = hub.root.join("work");
-    std::fs::create_dir_all(&work).unwrap();
-    hub.write_config(&format!(
-        "[omp]\npath = \"{}\"\n[sessions]\nruntime = \"tern\"\ntern = \"{}\"\n\
-         [lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
-        omp.display(),
-        tern.display(),
-        work.display()
-    ));
+    let work = configure(&hub, runtime, &tern);
     hub.start();
     (hub, work)
 }
 
+fn tern_hub(tern: Option<&Path>) -> (TestHub, PathBuf) {
+    hub_on("tern", tern)
+}
+
 /// The first block the fake OMP recorded: what the bridge in it would present.
 fn block_of(hub: &TestHub) -> Value {
+    nth_block(hub, 0)
+}
+
+/// Block `n` (from 0) the fake OMP recorded.
+fn nth_block(hub: &TestHub, n: usize) -> Value {
     let tui = hub.root.join("bin/omp-data/tui.jsonl");
     let started = Instant::now();
     loop {
         let text = std::fs::read_to_string(&tui).unwrap_or_default();
-        if let Some(Ok(v)) = text.lines().next().map(serde_json::from_str) {
+        if let Some(Ok(v)) = text.lines().nth(n).map(serde_json::from_str) {
             return v;
         }
         assert!(
             started.elapsed() < Duration::from_secs(20),
-            "no block: {}",
+            "no block {n}: {}",
             hub.json(&["lead", "status", "--json"])
         );
         std::thread::sleep(Duration::from_millis(100));
@@ -302,4 +317,142 @@ fn a_missing_tern_executable_refuses_starts_with_an_install_hint() {
         (!text.contains("not been probed")).then_some(text)
     });
     assert!(text.contains("install Tern"), "{text}");
+}
+
+/// A transcript OMP could resume: the session header in the lead's session directory.
+fn lead_transcript(hub: &TestHub, work: &Path, id: &str) -> PathBuf {
+    let file = hub
+        .state()
+        .join("sessions/lead")
+        .join(format!("2026-11-25T10-00-00-000Z_{id}.jsonl"));
+    let header = json!({ "type": "session", "version": 3, "id": id,
+        "cwd": std::fs::canonicalize(work).unwrap() });
+    std::fs::write(&file, format!("{header}\n")).unwrap();
+    file
+}
+
+/// HOST req. 91: a tern lead resumes in a Tern block although the config now names headless.
+#[test]
+fn a_tern_lead_resumes_in_tern_whatever_the_config_says() {
+    let (hub, work) = tern_hub(None);
+    let block = block_of(&hub);
+    let id = "0b6f2c1e-5a4d-4c3b-9a2e-1f0e9d8c7b6a";
+    let file = lead_transcript(&hub, &work, id);
+    let pid = block["pid"].as_u64().unwrap();
+    let mut bridge = Bridge::connect(&hub.socket());
+    let token = block["token"].as_str().unwrap();
+    let welcome = bridge.request("bridge.hello", &hello(token, id, &file, pid));
+    assert_eq!(welcome["role"], "lead", "{welcome}");
+    hub.until(Duration::from_secs(20), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live").then_some(())
+    });
+    // A clean stop through the bridge.
+    let quiet = |args: &[&str]| {
+        hub.command(args)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut stopping = quiet(&["lead", "stop", "--json"]);
+    let state = json!({ "idle": true, "session": id, "file": file });
+    let cmd = bridge.command(&state);
+    assert_eq!(cmd["op"], "shutdown", "{cmd}");
+    bridge.reply(&cmd, json!({}));
+    bridge.event(id, "session_shutdown", &json!({}));
+    assert!(stopping.wait().unwrap().success());
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+
+    configure(&hub, "headless", &hub.root.join("bin/tern"));
+    assert!(hub.cli(&["config", "reload"]).status.success());
+    let mut starting = quiet(&["lead", "start", "--json"]);
+    let again = nth_block(&hub, 1);
+    let args = again["args"].as_str().unwrap();
+    assert!(
+        args.contains(&format!("--resume={}", file.display())),
+        "{args}"
+    );
+    let pid = again["pid"].as_u64().unwrap();
+    let mut bridge = Bridge::connect(&hub.socket());
+    let token = again["token"].as_str().unwrap();
+    let welcome = bridge.request("bridge.hello", &hello(token, id, &file, pid));
+    assert_eq!(welcome["role"], "lead", "{welcome}");
+    assert!(starting.wait().unwrap().success());
+    let live = hub.json(&["lead", "status", "--json"]);
+    assert_eq!(
+        (
+            live["phase"].as_str(),
+            live["session"]["runtime"].as_str(),
+            live["session"]["session_id"].as_str()
+        ),
+        (Some("live"), Some("tern"), Some(id)),
+        "{live}"
+    );
+    let calls = std::fs::read_to_string(hub.root.join("bin/tern-data/calls.log")).unwrap();
+    assert_eq!(
+        calls.lines().filter(|l| l.starts_with("new tab")).count(),
+        2,
+        "{calls}"
+    );
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+}
+
+/// HOST req. 91: a headless lead resumes headless although the config now names tern.
+#[test]
+fn a_headless_lead_resumes_headless_whatever_the_config_says() {
+    let (hub, work) = hub_on("headless", None);
+    let first = hub.until(Duration::from_secs(20), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live").then_some(v)
+    });
+    assert_eq!(first["session"]["runtime"], "headless", "{first}");
+    let stopped = hub.json(&["lead", "stop", "--json"]);
+    assert_eq!(stopped["phase"], "stopped", "{stopped}");
+
+    configure(&hub, "tern", &hub.root.join("bin/tern"));
+    assert!(hub.cli(&["config", "reload"]).status.success());
+    let again = hub.json(&["lead", "start", "--json"]);
+    assert_eq!(
+        (
+            again["session"]["runtime"].as_str(),
+            again["session"]["session_id"].as_str(),
+            again["session"]["session_file"].as_str()
+        ),
+        (
+            Some("headless"),
+            first["session"]["session_id"].as_str(),
+            first["session"]["session_file"].as_str()
+        ),
+        "{again}"
+    );
+    assert!(!hub.root.join("bin/tern-data/calls.log").exists());
+    // A fresh lead takes the configured runtime.
+    let stopped = hub.json(&["lead", "stop", "--json"]);
+    assert_eq!(stopped["phase"], "stopped", "{stopped}");
+    let mut fresh = hub
+        .command(&["lead", "start", "--fresh"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let block = block_of(&hub);
+    assert!(
+        !block["args"].as_str().unwrap().contains("--resume"),
+        "{block}"
+    );
+    let pid = block["pid"].as_u64().unwrap();
+    let mut bridge = Bridge::connect(&hub.socket());
+    let token = block["token"].as_str().unwrap();
+    let file = work.join("s3.jsonl");
+    let welcome = bridge.request("bridge.hello", &hello(token, "s3", &file, pid));
+    assert_eq!(welcome["role"], "lead", "{welcome}");
+    assert!(fresh.wait().unwrap().success());
+    let live = hub.json(&["lead", "status", "--json"]);
+    assert_eq!(live["session"]["runtime"], "tern", "{live}");
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
 }

@@ -11,7 +11,7 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use http_body_util::BodyExt;
 use hyper::body::{Bytes, Frame, Incoming};
@@ -42,6 +42,8 @@ pub struct FakeModel {
     seen: Arc<Mutex<Vec<String>>>,
     /// The request bodies, in order (system prompt, tools, messages).
     bodies: Arc<Mutex<Vec<Value>>>,
+    /// When each request arrived, in order (wake measurements).
+    arrivals: Arc<Mutex<Vec<Instant>>>,
 }
 
 /// The `models.yml` naming this provider with the given model IDs.
@@ -66,7 +68,12 @@ impl FakeModel {
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let bodies = Arc::new(Mutex::new(Vec::new()));
-        let shared = (Arc::clone(&seen), Arc::clone(&bodies));
+        let arrivals = Arc::new(Mutex::new(Vec::new()));
+        let shared = (
+            Arc::clone(&seen),
+            Arc::clone(&bodies),
+            Arc::clone(&arrivals),
+        );
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -88,7 +95,12 @@ impl FakeModel {
                 }
             });
         });
-        Self { port, seen, bodies }
+        Self {
+            port,
+            seen,
+            bodies,
+            arrivals,
+        }
     }
 
     pub fn seen(&self) -> Vec<String> {
@@ -97,6 +109,10 @@ impl FakeModel {
 
     pub fn bodies(&self) -> Vec<Value> {
         self.bodies.lock().unwrap().clone()
+    }
+
+    pub fn arrivals(&self) -> Vec<Instant> {
+        self.arrivals.lock().unwrap().clone()
     }
 }
 
@@ -125,18 +141,24 @@ fn last_user_text(body: &Value) -> String {
     }
 }
 
-/// What the server records: model IDs and request bodies.
-type Records = (Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Value>>>);
+/// What the server records: model IDs, request bodies and arrival times.
+type Records = (
+    Arc<Mutex<Vec<String>>>,
+    Arc<Mutex<Vec<Value>>>,
+    Arc<Mutex<Vec<Instant>>>,
+);
 
 async fn answer(
     req: Request<Incoming>,
-    (seen, bodies): Records,
+    (seen, bodies, arrivals): Records,
 ) -> Result<Response<ChannelBody>, Infallible> {
+    let arrived = Instant::now();
     let bytes = req.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     let model = body["model"].as_str().unwrap_or_default().to_string();
     seen.lock().unwrap().push(model.clone());
     bodies.lock().unwrap().push(body.clone());
+    arrivals.lock().unwrap().push(arrived);
     let (tx, rx) = mpsc::channel(64);
     if model == "limited" {
         let error = json!({"error": {

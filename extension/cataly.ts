@@ -467,7 +467,7 @@ export class Bridge {
 		const forms = Promise.withResolvers<unknown>();
 		this.forms.set(call, forms.resolve);
 		const remote = forms.promise.then(answer => ({ by: "Discord", answer }));
-		const here = Promise.resolve(safe(() => ask.call(ctx.ui, e.input, { signal: local.signal })))
+		const here = Promise.resolve(safe(() => ask.call(ctx.ui, (e.input as Json)?.questions, { signal: local.signal })))
 			.catch(() => undefined)
 			.then(answer => ({ by: "the terminal", answer }));
 		const won = await Promise.race([here, remote]);
