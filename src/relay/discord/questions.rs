@@ -27,6 +27,8 @@ use crate::relay::text::DISCORD_LIMIT;
 use crate::store::relay::{QueueRow, RelayWrite};
 
 mod panel;
+/// The longest excerpt of a waiting dialog in its local notice.
+const NOTICE_DETAIL: usize = 300;
 /// The question summary may be at most this long (DISC-OUT req. 63).
 const SUMMARY_MAX: usize = 1500;
 /// Buttons at most: 5 rows of 5 (DISC-OUT req. 67).
@@ -252,6 +254,64 @@ fn card_of(
         )),
         _ => None,
     }
+}
+
+/// The notice for a dialog that waits on the machine: what it is, why it is not here, and the
+/// command that answers it there.
+fn local_notice(dialog: &Dialog, remote_approvals: bool) -> String {
+    let approval = dialog.kind == DialogKind::Approval;
+    let what = if approval {
+        "a permission request from the lead"
+    } else {
+        "a question from the lead"
+    };
+    let why = if dialog.secret {
+        "it asks for a secret"
+    } else if approval && !remote_approvals {
+        "remote approvals are off"
+    } else {
+        "it cannot be answered here"
+    };
+    let raw: Vec<&str> = [&dialog.title, &dialog.message]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    let raw = raw.join(" ");
+    let mut detail: String = raw.chars().take(NOTICE_DETAIL).collect();
+    if detail.len() < raw.len() {
+        detail.push('…');
+    }
+    let mut text = format!("**Waiting on the machine:** {what}");
+    if !detail.is_empty() {
+        let _ = write!(text, ": {}", neutral(&detail));
+    }
+    let _ = write!(text, " ({why}). Answer it there: ");
+    let id = &dialog.id;
+    let plain_id = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+    if !plain_id {
+        text.push_str("`cataly lead status` shows its ID, `cataly lead answer` answers it.");
+    } else if approval {
+        let has = |o: &str| dialog.options.iter().flatten().any(|x| x == o);
+        let approve = if has("Approve Once") {
+            "Approve Once"
+        } else {
+            "Approve"
+        };
+        let _ = write!(
+            text,
+            "`cataly lead answer {id} '{{\"value\":\"{approve}\"}}'` or `cataly lead answer {id} '{{\"value\":\"Deny\"}}'`."
+        );
+    } else {
+        let _ = write!(
+            text,
+            "`cataly lead answer {id} '<answer as JSON>'`; `cataly lead status` shows what it asks."
+        );
+    }
+    text
 }
 
 /// A form with several editable fields (DISC-OUT req. 63): its text, then per field the name, label,
@@ -746,6 +806,37 @@ impl<T: Runtime> Intake<T> {
         false
     }
 
+    /// Marks a dialog local only and says so once, in the room of the request that started the run
+    /// (else the home channel): what waits and how to answer it on the machine (review 6). A dialog
+    /// left local without a notice would block the run with nothing said in the chat.
+    async fn stay_local(&self, dialog: &Dialog) {
+        if !self.cards.lock().skipped.insert(dialog.id.clone()) {
+            return;
+        }
+        let room = match self.route(true).await {
+            Some(r) => Some(r),
+            None => self.settings.home().map(|c| (c, None)),
+        };
+        let Some((channel, reply_to)) = room else {
+            return;
+        };
+        let mut create = json!({
+            "content": local_notice(dialog, self.settings.remote_approvals),
+            "nonce": nonce(&format!("local:{}:{}", self.bot, dialog.id), 0),
+        });
+        if let Some(source) = reply_to {
+            super::put(
+                &mut create,
+                "message_reference",
+                json!({"message_id": source.to_string(),
+                "channel_id": channel.to_string(), "fail_if_not_exists": false}),
+            );
+        }
+        if let Err(e) = self.rest.create(channel, create).await {
+            log::warn("local dialog notice not posted", &[("error", &e)]);
+        }
+    }
+
     /// Posts one dialog, or marks it local only.
     async fn post_card(self: &Arc<Self>, dialog: &Dialog) {
         let skip = |me: &Self| {
@@ -754,7 +845,7 @@ impl<T: Runtime> Intake<T> {
         let Some((kind, head, choices, recommended)) =
             card_of(dialog, self.settings.remote_approvals)
         else {
-            return skip(self);
+            return self.stay_local(dialog).await;
         };
         let approval = kind == Kind::Approval;
         let route = self.route(approval).await;
@@ -769,8 +860,9 @@ impl<T: Runtime> Intake<T> {
         if body.chars().count() > SUMMARY_MAX {
             if approval {
                 self.deny(dialog, "the request is too long to show").await;
+                return skip(self);
             }
-            return skip(self);
+            return self.stay_local(dialog).await;
         }
         let panel = matches!(kind, Kind::Fields { .. } | Kind::Asks { .. });
         let multi = matches!(
@@ -791,7 +883,7 @@ impl<T: Runtime> Intake<T> {
             .unwrap_or_default();
         if panel && (!self.buttons || pages.is_empty()) {
             // Without components such a question cannot be answered on Discord; it stays local.
-            return skip(self);
+            return self.stay_local(dialog).await;
         }
         let components = if panel {
             Some(pages.remove(0))
@@ -1260,5 +1352,29 @@ mod tests {
         cc.kind = Kind::Confirm;
         assert_eq!(typed_answer(&cc, "2").unwrap(), json!({"confirmed": false}));
         assert!(typed_answer(&cc, "maybe").is_err());
+    }
+
+    #[test]
+    fn a_local_dialog_notice_names_what_waits_and_the_command() {
+        let approval = dialog_of(&json!({"id": "a-1", "method": "select",
+            "title": "Run bash: rm -rf @everyone *now*", "options": ["Approve Once", "Deny"]}))
+        .unwrap();
+        let text = local_notice(&approval, false);
+        assert!(text.starts_with("**Waiting on the machine:** a permission request"), "{text}");
+        assert!(text.contains("@\u{200b}everyone \\*now\\*"), "{text}");
+        assert!(text.contains("(remote approvals are off)"), "{text}");
+        assert!(
+            text.contains(r#"`cataly lead answer a-1 '{"value":"Approve Once"}'`"#),
+            "{text}"
+        );
+        assert!(text.contains(r#"'{"value":"Deny"}'"#), "{text}");
+        assert!(text.encode_utf16().count() <= DISCORD_LIMIT);
+        let long = dialog_of(&json!({"id": "we`ird", "method": "confirm", "title": "x".repeat(5000)}))
+            .unwrap();
+        let text = local_notice(&long, true);
+        assert!(text.contains("…"), "{text}");
+        assert!(text.contains("(it cannot be answered here)"), "{text}");
+        assert!(!text.contains("we`ird"), "{text}");
+        assert!(text.encode_utf16().count() <= DISCORD_LIMIT);
     }
 }

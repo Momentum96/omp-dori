@@ -220,6 +220,9 @@ pub(crate) struct Status {
     #[serde(default)]
     pub(crate) sessions_refused: Option<String>,
     pub(crate) quota_gate: GateView,
+    /// The lead's model and phase; `None` when the config has no `[lead]`.
+    #[serde(default)]
+    pub(crate) lead: Option<String>,
 }
 
 /// `stats` reply.

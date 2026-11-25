@@ -430,6 +430,13 @@ fn print_status(s: &Status) {
     if let Some(why) = &s.sessions_refused {
         out::line(&format!("sessions refused: {why}"));
     }
+    // Always shown, so a missing lead is never silent.
+    match &s.lead {
+        Some(lead) => out::line(&format!("lead     {lead}")),
+        None => out::line(
+            "lead     no lead configured: messages wait; set one with cataly setup --lead-model provider/id",
+        ),
+    }
     print_gate(&s.quota_gate);
     if s.task_restarts > 0 || s.panics > 0 {
         out::line(&format!(

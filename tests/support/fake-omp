@@ -17,7 +17,9 @@
 #                               follow-up meanwhile waits for the turn end, as OMP's follow-up does);
 #                               omp-data/noentry answers the prompt and writes nothing; with omp-data/ask
 #                               a message containing ASK opens the HTML `form` dialog stock OMP's ask
-#                               tool sends, and the turn ends when it is answered: "picked <choice>".
+#                               tool sends, and the turn ends when it is answered: "picked <choice>";
+#                               with omp-data/approve a message containing APPROVE opens the approval
+#                               select stock OMP sends under always-ask, ended the same way.
 dir=$(cd "$(dirname "$0")" && pwd)/omp-data
 
 # One turn of the `turns` fixture for the command line $1 with ID $2.
@@ -37,6 +39,11 @@ turn() {
             return
         fi
         echo '{"type":"extension_ui_request","id":"d1","method":"form","html":"<form><fieldset><legend>Pick a color</legend><label><input type=\"radio\" name=\"color\" value=\"Red\"> Red</label><label><input type=\"radio\" name=\"color\" value=\"Blue\" checked> Blue</label></fieldset></form>"}'
+        return
+    fi
+    if [ -f "$dir/approve" ] && printf '%s' "$msg" | grep -q APPROVE; then
+        asked=$2
+        echo '{"type":"extension_ui_request","id":"approval-1","method":"select","title":"Approve this fake write?","options":["Approve Once","Approve for this session","Deny"]}'
         return
     fi
     answer='"ok"'

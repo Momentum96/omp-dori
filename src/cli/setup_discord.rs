@@ -25,6 +25,7 @@ use super::args::Parsed;
 use super::setup::{self, Plan};
 use super::{Failure, out};
 use crate::config::{self, Config, Destination};
+use crate::omp::transcript::model_selector;
 use crate::relay::discord::{API, ChannelRef, Rest, Snowflake};
 use crate::relay::http::Base;
 use crate::sys::paths::Paths;
@@ -238,13 +239,23 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
     };
     flow.found.stage = "ready";
     let creating = before.bytes.is_none();
-    let text = flow.config_text(setup::managed(p, text, creating)?, &ready);
+    let mut text = flow.config_text(setup::managed(p, text, creating)?, &ready);
+    let mut flags = format!(" --guild {} --owner {}", ready.guild, ready.owner);
+    if let Some(model) = flow.lead_model() {
+        text = setup::set_key(&text, "lead", "model", &model);
+        flags.push_str(" --lead-model ");
+        flags.push_str(&model);
+    }
+    if flow.remote_approvals() {
+        text = setup::set_rendered(&text, "discord", "remote_approvals", "true");
+        flags.push_str(" --remote-approvals");
+    }
     let digest = before.digest();
     let mut plan = Plan {
         apply: p.flag("--apply"),
         expect: p.value("--expect"),
         command: "setup discord",
-        flags: format!(" --guild {} --owner {}", ready.guild, ready.owner),
+        flags,
         always_offer: false,
         extra: Some(("discord", flow.found.report(None))),
     };
@@ -263,6 +274,52 @@ pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failur
 }
 
 impl Flow<'_> {
+    /// The lead's model to write: `--lead-model`, else, when the config has no lead, the answer at
+    /// the terminal, offering the model OMP itself starts with. `None` leaves `[lead]` as it is.
+    fn lead_model(&self) -> Option<String> {
+        if let Some(model) = self.p.value("--lead-model") {
+            return Some(model.trim().to_string());
+        }
+        if self.config.lead.is_some() {
+            return None;
+        }
+        let term = self.term.as_ref()?;
+        let offered = crate::omp::resolve(&self.config.omp.path)
+            .and_then(|omp| super::install::block_on(crate::omp::usage::default_model(&omp)));
+        self.say(
+            "No lead is set. The lead is the OMP session that answers your messages; without one \
+             they wait.",
+        );
+        let question = match &offered {
+            Some(m) => format!("The lead's model, as provider/id [{m}] (- for none):"),
+            None => "The lead's model, as provider/id (empty for none):".to_string(),
+        };
+        for _ in 0..TRIES {
+            let pick = match term.ask(&question)?.as_str() {
+                "" => offered.clone()?,
+                "-" => return None,
+                answer => answer.to_string(),
+            };
+            if model_selector(&pick) {
+                return Some(pick);
+            }
+            self.say("Expected provider/id, such as anthropic/claude-opus-5-5.");
+        }
+        None
+    }
+
+    /// Whether to turn remote approvals on: `--remote-approvals`, else the owner's yes at the
+    /// terminal. Only the owner's own button presses count; a request nobody answers stays waiting.
+    fn remote_approvals(&self) -> bool {
+        !self.config.discord.remote_approvals
+            && self.confirm(
+                "--remote-approvals",
+                "Approve OMP's permission requests (commands, file edits) with buttons in Discord? \
+                 Only your account can press them; without this they wait for `cataly lead answer` \
+                 on this machine.",
+            )
+    }
+
     fn say(&self, line: &str) {
         if !self.as_json {
             out::line(line);

@@ -184,6 +184,8 @@ pub(crate) const COMMANDS: [Spec; 55] = [
             "--slack-owner",
             "--fallback-on",
             "--fallback-chain",
+            "--lead-model",
+            "--lead-cwd",
             "--log-level",
             "--backup-repo",
         ],
@@ -192,12 +194,19 @@ pub(crate) const COMMANDS: [Spec; 55] = [
     Spec {
         path: &["setup", "discord"],
         args: &[],
-        flags: &["--json", "--apply", "--enable-intent", "--create-channels"],
-        values: &["--expect", "--guild", "--owner", "--wait"],
+        flags: &[
+            "--json",
+            "--apply",
+            "--enable-intent",
+            "--create-channels",
+            "--remote-approvals",
+        ],
+        values: &["--expect", "--guild", "--owner", "--wait", "--lead-model"],
         summary: "guided Discord setup: checks the bot token and its Message Content intent, prints the invite \
-                  link, waits for the bot to join, finds or creates #cataly and #cataly-ops, previews the config \
-                  (--apply --expect <hash> writes it); --guild <id>, --owner <id|app>, --wait 5m, \
-                  --enable-intent and --create-channels answer its questions in scripts",
+                  link, waits for the bot to join, finds or creates #cataly and #cataly-ops, offers the lead's \
+                  model and remote approvals, previews the config (--apply --expect <hash> writes it); \
+                  --guild <id>, --owner <id|app>, --wait 5m, --enable-intent, --create-channels, \
+                  --lead-model <provider/id> and --remote-approvals answer its questions in scripts",
     },
     Spec {
         path: &["health"],
