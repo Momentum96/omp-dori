@@ -79,9 +79,13 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
   and the kickoff turn then runs under the goal with OMP's interactive goal continuation; a headless lane keeps
   kickoff first, goal second. The bridge maps the hub's `create` to `enter` and reports every refusal as
   `<code>: <message>`. Tern lanes now start `running`; `tests/contract_tern.rs` checks it in stock OMP.
-- **Goal pause in a tern lane** is still refused by OMP while a turn runs, so holding a working tern lane
-  fails "not held" (the hold flow pauses the goal before it interrupts the turn). Spec 30 "set model refused
-  while a turn is running" holds.
+- **Hold of a working tern lane** (after the merge into main). OMP refuses a goal change while a turn runs, so
+  LANE req. 44's order (pause, record, interrupt) cannot hold in a terminal session. A tern hold interrupts the
+  turn, waits for the session to read idle, then pauses the goal and confirms the readback; a goal continuation
+  that starts a turn in between is interrupted again and a "busy" refusal is asked again, all within 15 s
+  (`lanes::life::pause_after_turn`). The record changes only after the confirmed pause, so any failed step
+  leaves the lane as it was and the caller is told "not held" (the turn may have been interrupted). Headless
+  lanes keep the spec's order. Spec 30 "set model refused while a turn is running" holds.
 - **Contract failures found in the second follow-up** (first-run screen already off): (1) after a tern wake
   the session read `idle` with nothing pending until the bridge's `agent_start` arrived, because OMP stores the
   delivery's `custom_message` before the turn starts (a headless prompt's user entry is stored when the turn
@@ -109,5 +113,5 @@ Scope: HOST-30, HOST-31, EXT-20, EXT-21, EXT-25, EXT-26, EXT-30, COORD-14, PATCH
   `ask` form is posted to the fake Discord and shown in the TUI, the owner's press ends the tool call with the
   Discord answer and the reply is posted), check 5 (a tern lane opens `running` with its goal set in OMP's goal
   mode; its OMP stopped with SIGSTOP is marked lost at 45 s; after SIGCONT the same process's bridge reconnects
-  with the same session and the lane is restored), the
-  wake by stage against headless, and the bridge's own cost.
+  with the same session and the lane is restored), a working tern lane (a long `bash` call) held and continued
+  with the goal read back paused, then active, the wake by stage against headless, and the bridge's own cost.

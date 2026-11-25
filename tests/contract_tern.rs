@@ -574,3 +574,83 @@ fn tern_lane_lost_and_restored_in_stock_omp() {
     assert!(hub.stop().success());
     kill(pid);
 }
+
+/// LANE req. 44 in a terminal session with stock OMP, which refuses a goal change while a turn
+/// runs: holding a working tern lane interrupts the turn, waits for it to end, then pauses the goal
+/// and confirms it; continuing resumes it.
+#[test]
+fn tern_lane_held_while_working_in_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let model = FakeModel::start();
+    let mut hub = sandbox(&model, "tern", "", &|_| String::new());
+    hub.start();
+    settled(&hub);
+    let brief = "Run this first.\nCALL bash {\"command\":\"sleep 60\"}";
+    let params = json!({ "key": "busy-1", "title": "Work busy-1", "brief": brief,
+        "checks": [{ "kind": "command", "argv": ["true"] }] });
+    let lane = |op: &str, p: Value| hub.cli(&["lane", op, "--json", "--params", &p.to_string()]);
+    let out = lane("open", params);
+    assert!(out.status.success(), "{out:?}");
+    let read = || {
+        let out = lane("read", json!({ "key": "busy-1", "count": 1 }));
+        serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null)
+    };
+    let state = || {
+        let all = hub.json(&["lane", "list", "--json", "--params", r#"{"all":true}"#]);
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["key"] == "busy-1")
+            .cloned()
+            .unwrap()
+    };
+    // The kickoff turn runs the long `bash` call under an active goal.
+    hub.until(WAIT, || {
+        let asked = model
+            .bodies()
+            .iter()
+            .any(|b| b.to_string().contains("[lane busy-1]"));
+        let r = read();
+        (asked && r["status"] == "working" && r["goal"]["status"] == "active").then_some(())
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(state()["state"], "running");
+    let asked = Instant::now();
+    let out = lane(
+        "pause",
+        json!({ "key": "busy-1", "reason": "owner said wait" }),
+    );
+    let took = asked.elapsed();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("held"),
+        "{out:?}"
+    );
+    assert!(took < Duration::from_secs(20), "held after {took:?}");
+    let held = state();
+    assert_eq!(held["state"], "held", "{held}");
+    let r = read();
+    assert_eq!(r["goal"]["status"], "paused", "{r}");
+    assert_ne!(r["status"], "working", "{r}");
+    // No goal continuation starts while the lane is held.
+    std::thread::sleep(Duration::from_secs(3));
+    let r = read();
+    assert_eq!(
+        (&r["goal"]["status"], &r["status"]),
+        (&json!("paused"), &json!("idle")),
+        "{r}"
+    );
+    let out = lane("resume", json!({ "key": "busy-1" }));
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(state()["state"], "running");
+    assert_eq!(read()["goal"]["status"], "active");
+    eprintln!(
+        "MEASURE tern_lane_hold_while_working_s={:.1}",
+        took.as_secs_f64()
+    );
+    let pid = state()["pid"].as_u64().unwrap();
+    assert!(hub.stop().success());
+    kill(pid);
+}

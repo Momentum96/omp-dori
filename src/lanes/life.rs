@@ -21,6 +21,10 @@ use crate::sys::now_ms;
 const EXIT_WAIT: Duration = Duration::from_secs(30);
 /// A hub-start restart waits this long for the lease to be free (decision 9).
 const LEASE_WAIT: Duration = Duration::from_secs(30);
+/// A tern hold waits this long in all for the running turn to end and the goal pause to land.
+const TURN_END_WAIT: Duration = Duration::from_secs(15);
+/// How soon a tern hold asks again after OMP refused the pause "busy".
+const PAUSE_RETRY: Duration = Duration::from_millis(200);
 
 /// Goal states that count as stopped for a hold (LANE req. 44).
 const STOPPED: [GoalStatus; 4] = [
@@ -70,9 +74,56 @@ async fn goal_to<S: Control>(
     }
 }
 
+/// A tern hold (LANE req. 44 in a terminal session). OMP refuses a goal change while a turn runs
+/// there (docs/notes/tern.md), so the turn is interrupted first and the pause follows once the
+/// session reads idle; a goal continuation that starts another turn in between is interrupted
+/// again. Everything is bounded by [`TURN_END_WAIT`]; `Ok` only when the goal reads back stopped.
+async fn pause_after_turn<S: Control>(session: &S) -> Result<GoalStatus, String> {
+    let until = Instant::now() + TURN_END_WAIT;
+    loop {
+        if session.snapshot().status == Status::Working {
+            session
+                .interrupt()
+                .await
+                .map_err(|e| format!("the running turn was not interrupted: {e}"))?;
+            let mut states = session.states();
+            let left = until.saturating_duration_since(Instant::now());
+            let ended = tokio::time::timeout(
+                left,
+                states.wait_for(|s| s.status != Status::Working || s.stop.is_some()),
+            )
+            .await;
+            if !matches!(ended, Ok(Ok(_))) {
+                return Err(format!(
+                    "the interrupted turn did not end within {} s",
+                    TURN_END_WAIT.as_secs()
+                ));
+            }
+        }
+        match session.goal("pause", None).await {
+            Err(e) if e.starts_with("busy") && Instant::now() < until => {
+                tokio::time::sleep(PAUSE_RETRY).await;
+            }
+            Err(e) => {
+                let goal = session.goal("get", None).await?;
+                return if STOPPED.contains(&goal.status) {
+                    Ok(goal.status)
+                } else {
+                    Err(format!("the goal was not paused ({e})"))
+                };
+            }
+            Ok(goal) if STOPPED.contains(&goal.status) => return Ok(goal.status),
+            Ok(goal) => {
+                return Err(format!("the goal reads back {:?}", goal.status).to_lowercase());
+            }
+        }
+    }
+}
+
 impl<R: Runtime> Lanes<R> {
     /// Hold (LANE req. 43-46): goal paused and confirmed first, then the record, then the turn is
-    /// interrupted.
+    /// interrupted. A tern lane's turn ends before the pause ([`pause_after_turn`]); when a step
+    /// fails the record is left as it was and the caller is told "not held".
     pub(super) async fn pause(&self, key: &str, by: &str, reason: &str) -> Result<String, String> {
         let _turn = self.turn(key).await?;
         let (rec, rev) = self.load(key).await?;
@@ -97,9 +148,12 @@ impl<R: Runtime> Lanes<R> {
         let session = self
             .session(&rec.key)
             .ok_or("not held: the lane has no live session")?;
-        goal_to(&*session, "pause", &STOPPED)
-            .await
-            .map_err(|e| format!("not held: {e}"))?;
+        let paused = if rec.runtime == crate::config::session::RuntimeKind::Tern {
+            pause_after_turn(&*session).await
+        } else {
+            goal_to(&*session, "pause", &STOPPED).await
+        };
+        paused.map_err(|e| format!("not held: {e}"))?;
         rec.prev = Some(rec.state);
         rec.state = State::Held;
         rec.held_by = Some(by.to_string());
