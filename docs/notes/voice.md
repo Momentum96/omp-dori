@@ -78,6 +78,25 @@ available since 2026-09-10; https://developers.openai.com/api/docs/models/gpt-li
 WebRTC standby ($0.02 per minute while inference is paused) is not used: provider standby stays
 dropped (`DESIGN.md` 5.2); idle close plus wake on speech covers it.
 
+## Finding: a WebRTC start takes seconds
+
+The first live WebRTC run failed with no audio played and nothing passed to the lead; the WebSocket
+run passed. Traced live runs (`docs/notes/voice-live-log.md`) showed the cause: the real API answers
+the session POST only after initializing the session (1.3 s and 2.4 s measured), and ICE, DTLS, SCTP
+and `session.started` take another 0.2 to 0.8 s. Owner audio keeps arriving all that time (frames
+queue while the POST is awaited), and the session queued it in the input pacer, which drains only
+once the session is live. Past 3 s of pending input the pacer's overflow rule (VOICE req. 62) failed
+the session and held voice, so a start slower than 3 s failed at once, before ICE had sent a check.
+The fake answered at once, so no offline test saw it.
+
+Fix (`session.rs`, `pace.rs`, shared by both transports; the WebRTC link itself was correct): while
+the session is starting, the pacer keeps the newest 3 s of input and drops the oldest, moving its
+clock past what it dropped so no silence replaces it; the overflow rule applies once the session is
+live, when input can drain. What waited goes out the moment `session.started` arrives, so a frame
+arriving before the next tick cannot overflow the full bucket. A wake session whose start takes over
+0.5 s loses the oldest part of its 2.5 s lead-in instead of failing. The fake now takes
+`start_delay_ms` to start a session late (`check3_slow_start`, both transports).
+
 ## Tests
 
 - `tests/voice_hub.rs` (voice builds): through the real hub, the fake Discord (REST, Gateway with
@@ -91,12 +110,12 @@ dropped (`DESIGN.md` 5.2); idle close plus wake on speech covers it.
   (hold across a hub restart, notices, no paid retry, `voice restart`); every call-level check over
   both transports. An ignored `measure_call_memory_and_cpu` gives the measures.
 - `crates/voice/tests/transports.rs`: the call against a fake host over both transports (checks 1,
-  3-6, 8). `tests/live_voice.rs`: the owner-gated live test, ignored, never run here.
+  3-6, 8), including a session the provider starts 4 s late. `tests/live_voice.rs`: the
+  owner-gated live test, ignored; `CATALY_LIVE_VOICE_TRANSPORTS` runs one transport. Runs and spend
+  are in `docs/notes/voice-live-log.md`.
 
 ## Not done here
 
-- The live test (`tests/live_voice.rs`) is written and was not run: it needs the owner's key,
-  approved limit and a recording of the owner's voice (no speech synthesiser on the build machine).
 - `cargo deny` is not installed on the build machine; `deny.toml` was written from the licence list
   of `cargo metadata` and not run.
 - Linux only so far; the macOS run belongs to CI.

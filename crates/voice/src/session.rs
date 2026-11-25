@@ -358,12 +358,27 @@ impl<H: VoiceHost> Session<H> {
         if loud {
             self.last_owner_speech = now;
         }
-        if matches!(self.state, State::Closing | State::Closed) {
-            return;
+        match self.state {
+            State::Closing | State::Closed => {}
+            // Nothing drains input before the provider starts the session, which takes seconds over
+            // WebRTC (session initialization, then ICE, DTLS and SCTP): keep the newest 3 s.
+            State::Starting => self.pacer.keep_newest(pcm),
+            State::Live | State::WindingDown => {
+                if self.pacer.push(pcm).is_err() {
+                    self.fail("over 3 s of input audio pending (buffer overflow)".into());
+                }
+            }
         }
-        if self.pacer.push(pcm).is_err() {
-            self.fail("over 3 s of input audio pending (buffer overflow)".into());
+    }
+
+    /// Sends the input the pacer lets out now; false after a failure.
+    fn send_input(&mut self, now: Instant) -> bool {
+        let out = self.pacer.pull(now);
+        if !out.is_empty() && !self.link.audio(out) {
+            self.fail("the realtime link is stuck or gone".into());
+            return false;
         }
+        true
     }
 
     /// Whether anything blocks idle close (VOICE req. 67).
@@ -414,12 +429,8 @@ impl<H: VoiceHost> Session<H> {
         if self.ended {
             return;
         }
-        if matches!(self.state, State::Live | State::WindingDown) {
-            let out = self.pacer.pull(now);
-            if !out.is_empty() && !self.link.audio(out) {
-                self.fail("the realtime link is stuck or gone".into());
-                return;
-            }
+        if matches!(self.state, State::Live | State::WindingDown) && !self.send_input(now) {
+            return;
         }
         match self.state {
             State::Starting if now.saturating_duration_since(self.opened) > START => {
@@ -589,6 +600,8 @@ impl<H: VoiceHost> Session<H> {
             "session.started" => {
                 if self.state == State::Starting {
                     self.state = State::Live;
+                    // What waited for the start goes out at once, before more input arrives.
+                    self.send_input(now);
                 }
             }
             "session.closed" => {
