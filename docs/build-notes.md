@@ -1002,6 +1002,21 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   `tern_lane_lost_and_restored_in_stock_omp` ("goal not set: the bridge did not answer goal within
   10 s") in its first 25 s, while three stock OMPs started together: these are the load-dependent
   cases, not fixed here.
+- Under load the stock-OMP tern cases fail at the lane's goal: the hub's `goal` command through
+  the bridge (OMP `sessionModes.set`) gets no answer within the 10 s command bound
+  (`host::tern` `COMMAND_WAIT`), the lane is held by the hub, and the kickoff is never sent
+  (CI dispatch 45609104039, macOS; the same reason in the local three-copy run). Not fixed here:
+  why OMP's mode change takes over 10 s while several TUIs start is still open.
+
+## Scope added from the design review
+
+- `release.yml` builds with `--features voice` on both targets (coordinator decision: releases
+  ship with voice).
+- The contract job runs every contract binary on pull requests, pushes and release calls against
+  pinned stock OMP 19.1.1, and nightly (or on dispatch) against the latest release; Bun is set up
+  in it. The Tern runtime cases use the test's Tern stand-in, so nothing is skipped.
+- A `cargo deny check` job (EmbarkStudios/cargo-deny-action pinned by commit), and a bridge
+  type-check step that runs `bun run typecheck` once `extension/package.json` defines it.
 
 ## Local runs
 
