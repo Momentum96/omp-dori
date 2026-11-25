@@ -637,7 +637,7 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// The lane whose current run holds this session handle.
-    async fn key_of(&self, handle: &str) -> Option<String> {
+    pub(crate) async fn key_of(&self, handle: &str) -> Option<String> {
         let rows = self.env.store.read(|r| r.lanes(false)).await.ok()?;
         rows.into_iter().find_map(|row| {
             let rec: Record = serde_json::from_str(&row.record).ok()?;

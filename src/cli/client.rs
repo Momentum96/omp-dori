@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::proto::{self, ErrorBody, MAX_LINE, Request, Response};
+use crate::sys::fs::FsError;
 
 /// Connecting must succeed within this time.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -21,6 +22,8 @@ pub(crate) enum ClientError {
     Io(std::io::Error),
     Protocol(String),
     Remote(ErrorBody),
+    /// The socket's directory is not the owner's private one; nothing was sent.
+    Unsafe(String),
 }
 
 impl fmt::Display for ClientError {
@@ -30,18 +33,41 @@ impl fmt::Display for ClientError {
             Self::Io(e) => write!(f, "control socket: {e}"),
             Self::Protocol(e) => write!(f, "control socket: {e}"),
             Self::Remote(body) => f.write_str(&body.message),
+            Self::Unsafe(e) => write!(f, "control socket not used: {e}"),
         }
     }
+}
+
+/// Refuses a socket whose directory is not the owner's private one (DESIGN 8): another user who
+/// created it first must never receive a request. A missing directory means no hub.
+pub(crate) fn check_socket(path: &Path) -> Result<(), ClientError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("/"));
+    match crate::sys::fs::check_private_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(FsError::Io { source, .. }) if source.kind() == ErrorKind::NotFound => {
+            Err(ClientError::NoHub)
+        }
+        Err(e) => Err(ClientError::Unsafe(e.to_string())),
+    }
+}
+
+/// The launch token this process carries, when it runs inside a session the hub started.
+pub(crate) fn launch_token() -> Option<String> {
+    std::env::var("CATALY_LAUNCH")
+        .ok()
+        .filter(|t| !t.is_empty())
 }
 
 pub(crate) struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     next_id: u64,
+    launch: Option<String>,
 }
 
 impl Client {
     pub(crate) fn connect(path: &Path) -> Result<Self, ClientError> {
+        check_socket(path)?;
         let stream = UnixStream::connect(path).map_err(|e| match e.kind() {
             ErrorKind::NotFound | ErrorKind::ConnectionRefused => ClientError::NoHub,
             _ => ClientError::Io(e),
@@ -54,6 +80,7 @@ impl Client {
             reader: BufReader::new(stream),
             writer,
             next_id: 1,
+            launch: launch_token(),
         })
     }
 
@@ -65,6 +92,7 @@ impl Client {
             id,
             method,
             params,
+            launch: self.launch.as_deref(),
         };
         let mut line =
             serde_json::to_string(&request).map_err(|e| ClientError::Protocol(e.to_string()))?;
@@ -147,5 +175,39 @@ impl Client {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn a_socket_outside_a_private_directory_is_never_used() {
+        let scratch = crate::sys::fs::tests::scratch("client");
+        assert!(check_socket(&scratch.join("hub.sock")).is_ok());
+        assert!(matches!(
+            check_socket(&scratch.join("absent/hub.sock")),
+            Err(ClientError::NoHub)
+        ));
+        let open = scratch.join("open");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            check_socket(&open.join("hub.sock")),
+            Err(ClientError::Unsafe(_))
+        ));
+        let link = scratch.join("link");
+        std::os::unix::fs::symlink(&*scratch, &link).unwrap();
+        assert!(matches!(
+            check_socket(&link.join("hub.sock")),
+            Err(ClientError::Unsafe(_))
+        ));
+        assert!(matches!(
+            Client::connect(&open.join("hub.sock")),
+            Err(ClientError::Unsafe(_))
+        ));
     }
 }

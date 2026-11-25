@@ -2,6 +2,7 @@
 //! subprocesses, host readers, service-manager notification, the stall detector, secret masking and
 //! latency rings.
 
+pub(crate) mod ancestry;
 pub(crate) mod command;
 pub(crate) mod fs;
 pub(crate) mod host;

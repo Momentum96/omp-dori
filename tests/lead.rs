@@ -222,3 +222,70 @@ fn lead_resumes_through_a_symlinked_state_directory() {
     );
     assert!(hub.stop().success());
 }
+
+/// DESIGN 8: a process inside the lead's session (a child of its OMP) has the lead's role on the
+/// control socket, even without its launch token, and is refused every owner-only method; it reads
+/// status, and finds the hub through `CATALY_SOCKET` alone. A plain shell is the owner. A caller
+/// that carries a launch token but descends from no session fails closed.
+#[test]
+fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    let bin = support::BIN;
+    hub.fixture(
+        "omp",
+        "child",
+        Some(&format!(
+            "{bin} quota lift; echo \"lift=$?\"\n\
+             {bin} job enable x --ack; echo \"enable=$?\"\n\
+             {bin} setup --apply --expect 0; echo \"setup=$?\"\n\
+             {bin} status --json > /dev/null; echo \"status=$?\"\n\
+             env -u CATALY_LAUNCH {bin} voice restart; echo \"untokened=$?\"\n\
+             echo done\n"
+        )),
+    );
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        omp.display(),
+        work.display()
+    ));
+    hub.start();
+    live(&hub, &Value::Null);
+    let out = hub.root.join("bin/omp-data/child.out");
+    let text = hub.until(Duration::from_secs(20), || {
+        std::fs::read_to_string(&out)
+            .ok()
+            .filter(|t| t.contains("done"))
+    });
+    for refused in ["lift=1", "enable=1", "setup=1", "untokened=1"] {
+        assert!(text.contains(refused), "{refused}: {text}");
+    }
+    assert!(text.contains("status=0"), "{text}");
+    assert!(text.contains("owner's alone"), "{text}");
+    assert!(text.contains("only the owner may run this"), "{text}");
+
+    // The test process is a plain shell of the owner.
+    let lifted = hub.cli(&["quota", "lift"]);
+    assert!(
+        lifted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&lifted.stderr)
+    );
+    let me = hub.request(r#"{"v":1,"id":1,"method":"whoami"}"#);
+    assert_eq!(me["ok"]["role"], "owner", "{me}");
+    // A launch token outside every session: reads only.
+    let tokened = hub.request(r#"{"v":1,"id":2,"method":"quota.lift","launch":"t"}"#);
+    assert!(
+        tokened["err"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unplaced"),
+        "{tokened}"
+    );
+    let read = hub.request(r#"{"v":1,"id":3,"method":"status","launch":"t"}"#);
+    assert!(read["ok"].is_object(), "{read}");
+    assert!(hub.stop().success());
+}

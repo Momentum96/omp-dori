@@ -15,6 +15,7 @@ use tokio::sync::{Semaphore, broadcast};
 
 use super::Hub;
 use super::dispatch::{self, Authority};
+use crate::host::Role;
 use crate::log;
 use crate::proto::{self, EventsParams, MAX_LINE, Response, code, method};
 use crate::store::EventRecord;
@@ -196,7 +197,7 @@ pub(crate) async fn serve(
         log::debug("control connection", &[("pid", &peer.pid.unwrap_or(0))]);
         let hub = Arc::clone(&hub);
         tokio::spawn(async move {
-            connection(&hub, stream).await;
+            connection(&hub, stream, peer.pid).await;
             drop(permit);
         });
     }
@@ -240,10 +241,44 @@ async fn send(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
     )
 }
 
-async fn connection(hub: &Arc<Hub>, stream: UnixStream) {
+/// Where a control connection's process stands (DESIGN 8): inside a session the hub runs, by its
+/// own process or an ancestor being that session's OMP process, or outside every session.
+struct Placement(Option<Authority>);
+
+impl Placement {
+    async fn of(hub: &Hub, pid: Option<i32>) -> Self {
+        let Some(pid) = pid.and_then(|p| u32::try_from(p).ok()) else {
+            return Self(None);
+        };
+        let chain = crate::sys::ancestry::chain(pid).await;
+        if !chain.complete {
+            log::debug("control caller ancestry incomplete", &[("pid", &pid)]);
+        }
+        Self(match hub.links.place(&chain.pids) {
+            Some((_, Role::Lead)) => Some(Authority::Lead),
+            Some((handle, Role::Lane)) => Some(Authority::Lane(
+                hub.lanes.key_of(&handle).await.unwrap_or(handle),
+            )),
+            None => None,
+        })
+    }
+
+    /// The caller's authority. A caller that carries a launch token runs inside a session; when its
+    /// session cannot be placed it fails closed and is not the owner.
+    fn authority(&self, launch: bool) -> Authority {
+        match &self.0 {
+            Some(role) => role.clone(),
+            None if launch => Authority::Unplaced,
+            None => Authority::Owner,
+        }
+    }
+}
+
+async fn connection(hub: &Arc<Hub>, stream: UnixStream, pid: Option<i32>) {
     let (read, writer) = stream.into_split();
     let mut writer = writer;
     let mut reader = BufReader::new(read);
+    let mut placement: Option<Placement> = None;
     loop {
         let line = match tokio::time::timeout(IDLE, read_line(&mut reader)).await {
             Ok(Line::Text(line)) => line,
@@ -278,17 +313,21 @@ async fn connection(hub: &Arc<Hub>, stream: UnixStream) {
             return;
         }
         if request.method == super::bridge::HELLO {
-            super::bridge::serve(hub, request.id, request.params, &mut reader, writer).await;
+            super::bridge::serve(hub, request.id, request.params, &mut reader, writer, pid).await;
             return;
         }
+        if placement.is_none() {
+            placement = Some(Placement::of(hub, pid).await);
+        }
+        let caller = placement.as_ref().map_or(Authority::Unplaced, |p| {
+            p.authority(request.launch.is_some())
+        });
         let started = Instant::now();
         let task_hub = Arc::clone(hub);
         let reply =
-            tokio::spawn(
-                async move { dispatch::dispatch(&task_hub, request, Authority::Owner).await },
-            )
-            .await
-            .unwrap_or_else(|_| Response::err(0, code::INTERNAL, "request handler failed"));
+            tokio::spawn(async move { dispatch::dispatch(&task_hub, request, caller).await })
+                .await
+                .unwrap_or_else(|_| Response::err(0, code::INTERNAL, "request handler failed"));
         hub.control_latency.record(started.elapsed());
         if !send(&mut writer, &reply).await {
             return;

@@ -118,6 +118,11 @@ rpc() {
     fi
     # The launch token, so a test can speak for this session's bridge.
     [ -n "$CATALY_LAUNCH" ] && printf '%s %s %s\n' "$CATALY_LAUNCH" "$id" "$$" >> "$dir/launch"
+    # omp-data/child: a shell script a hosted session (one with a launch token) runs once as its own
+    # child (a shell or test code inside the session); its output goes to omp-data/child.out.
+    if [ -n "$CATALY_LAUNCH" ] && [ -f "$dir/child" ] && mv "$dir/child" "$dir/child.run" 2>/dev/null; then
+        sh "$dir/child.run" < /dev/null > "$dir/child.out" 2>&1 &
+    fi
     # omp-data/background-<id>: the session runs one turn by itself, as OMP does when a background
     # job's result arrives (no prompt, no prompt_result). The poller ends with this process: a killed
     # process stays a zombie until the hub reaps it, and the hub reaps only after this poller lets go

@@ -1011,7 +1011,10 @@ fn onboarding_consent_is_stored_and_writes_wait() {
         !why.contains("onboarding"),
         "writes are allowed again: {why}"
     );
-    assert_eq!(shell(&mut b, "cataly lead send hello")["allow"], true);
+    // Onboarding has ended, but rule 0 still refuses the lead's own mutating `cataly` command
+    // (DESIGN 9.2); reads pass.
+    assert_eq!(shell(&mut b, "cataly lead send hello")["allow"], false);
+    assert_eq!(shell(&mut b, "cataly status")["allow"], true);
     drop(b);
     hub.stop();
     start(&mut hub);

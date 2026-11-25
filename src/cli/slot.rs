@@ -89,6 +89,7 @@ fn parse(words: &[String]) -> Result<Request, String> {
 type Conn = (Lines<BufReader<OwnedReadHalf>>, OwnedWriteHalf);
 
 async fn connect(socket: &Path, params: Value) -> std::io::Result<Conn> {
+    super::client::check_socket(socket).map_err(|e| std::io::Error::other(e.to_string()))?;
     let stream = UnixStream::connect(socket).await?;
     let (read, mut write) = stream.into_split();
     let line = format!(

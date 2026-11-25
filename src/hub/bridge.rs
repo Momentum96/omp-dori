@@ -36,6 +36,10 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const LEAD_GUIDANCE: &str = include_str!("../../assets/lead.md");
 /// Obligations listed in one stop notice (DISC-OUT req. 35).
 const STOP_LIST: usize = 5;
+/// What the lead sees when rule 0 refuses its shell command (DESIGN 9.2).
+const LEAD_RULE_ZERO: &str = "No command ran: built-in shell rule 0 refuses `omp usage reset`, \
+setting a reset option with `omp config set`, and every `cataly` command that changes anything. \
+Use the cataly tool; spending a reset is never allowed.";
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -99,10 +103,16 @@ async fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String
         ));
     }
     if hello.agent == "sub" {
-        // A worker in its own realm takes its parent lane's role for shell rules only (EXT req. 9).
-        return match hub.lanes.handle_of_session(&hello.parent).await {
-            Some(handle) => Ok((handle, Role::Lane, false)),
-            None => Err("unknown parent".into()),
+        // A worker takes its parent session's role for shell rules only (EXT req. 9).
+        let parent = root_session(&hello.parent);
+        if let Some(handle) = hub.lanes.handle_of_session(parent).await {
+            return Ok((handle, Role::Lane, false));
+        }
+        return match hub.lead.snapshot() {
+            Some(s) if !parent.is_empty() && s.session_id.as_deref() == Some(parent) => {
+                Ok((s.handle.clone(), Role::Lead, false))
+            }
+            _ => Err("unknown parent".into()),
         };
     }
     if let Some(token) = hello.token.as_deref().filter(|t| !t.is_empty()) {
@@ -126,6 +136,22 @@ async fn decide(hub: &Hub, hello: &Hello) -> Result<(String, Role, bool), String
     Err("not a session of this hub".into())
 }
 
+/// The root session a subagent's `parent` names: a session ID as sent, or (from a worker in its own
+/// realm) its header's parent file, whose stamped file or artifact directory carries the ID; OMP keeps
+/// nested subagent files below that directory.
+fn root_session(parent: &str) -> &str {
+    std::path::Path::new(parent)
+        .components()
+        .find_map(|c| {
+            let name = c.as_os_str().to_str()?;
+            let stem = name.strip_suffix(".jsonl").unwrap_or(name);
+            let id =
+                crate::omp::transcript::session_file_id(&format!("{stem}.jsonl")).map(str::len)?;
+            stem.get(stem.len().checked_sub(id)?..)
+        })
+        .unwrap_or(parent)
+}
+
 async fn write(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
     let line = response.to_line();
     matches!(
@@ -134,13 +160,16 @@ async fn write(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
     )
 }
 
-/// Serves one bridge connection from its hello until it closes or falls silent (EXT req. 15).
+/// Serves one bridge connection from its hello until it closes or falls silent (EXT req. 15). `pid`
+/// is the connecting process (OMP itself): once accepted, its descendants act in the session's role.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
     hub: &Arc<Hub>,
     id: u64,
     params: Value,
     reader: &mut R,
     mut writer: OwnedWriteHalf,
+    pid: Option<i32>,
 ) {
     let raw = params.clone();
     let hello: Hello = serde_json::from_value(params).unwrap_or_default();
@@ -168,6 +197,18 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         Ok(found) => found,
         Err(reason) => return refuse(hub, &mut writer, id, hello.ext != PROTOCOL, reason).await,
     };
+    if let Some(pid) = pid.and_then(|p| u32::try_from(p).ok()) {
+        // A process that started the hub (one of its ancestors) is the owner's environment, which
+        // every owner command shares, not a session's: it is never placed in the session's role.
+        // A session's child that carries a launch token and is left unplaced still fails closed.
+        if !crate::sys::ancestry::chain(std::process::id())
+            .await
+            .pids
+            .contains(&pid)
+        {
+            hub.links.adopt(pid, &handle, role);
+        }
+    }
     if !sub {
         hub.links.connect(&handle, role, &key, &hello.session);
     }
@@ -305,14 +346,15 @@ fn welcome(key: &str, sub: bool, lane: Option<&(String, String)>, notes: bool) -
             "role": "lead",
             "key": key,
             // The owner notes are named only when they exist, never embedded (COORD req. 48).
-            "guidance": if notes {
-                format!("{LEAD_GUIDANCE}\n{NOTES_LINE}")
-            } else {
-                LEAD_GUIDANCE.to_string()
+            "guidance": match (sub, notes) {
+                (true, _) => String::new(),
+                (false, true) => format!("{LEAD_GUIDANCE}\n{NOTES_LINE}"),
+                (false, false) => LEAD_GUIDANCE.to_string(),
             },
-            "tools": [super::tool::definition()],
-            // The hub judges the lead's shell calls only for onboarding's read-only rule (OPC-68).
+            "tools": if sub { json!([]) } else { json!([super::tool::definition()]) },
+            // The hub judges the lead's shell calls by the built-in rule 0 (DESIGN 9.2).
             "shell": true,
+            "sub": sub,
             "status": "",
         }),
     }
@@ -320,7 +362,7 @@ fn welcome(key: &str, sub: bool, lane: Option<&(String, String)>, notes: bool) -
 
 /// Answers a request off the read loop, so a slow lane action never stalls the connection. Shell
 /// and spawn calls and the model barrier carry facts the hub judges (EXT req. 32-35, 38-39; the
-/// lead has no shell rules and no pin); tool calls and the stop gate go to their owners.
+/// lead has only rule 0 and no pin); tool calls and the stop gate go to their owners.
 fn answer_later(
     hub: &Arc<Hub>,
     tx: &mpsc::Sender<Response>,
@@ -340,12 +382,10 @@ fn answer_later(
             ("bridge.model", None) => verdict((true, String::new())),
             ("bridge.shell", None) => {
                 let command = request.params.get("command").and_then(Value::as_str);
-                match command {
-                    Some(c) => match super::onboarding::shell_blocks(&hub, c).await {
-                        Some(why) => verdict((false, why)),
-                        None => verdict((true, String::new())),
-                    },
-                    None => verdict((true, String::new())),
+                if command.is_some_and(crate::lanes::shell::rule_zero) {
+                    verdict((false, LEAD_RULE_ZERO.to_string()))
+                } else {
+                    verdict((true, String::new()))
                 }
             }
             ("bridge.shell", Some(_)) => verdict(hub.lanes.veto(&handle, &request.params).await),
@@ -495,4 +535,21 @@ pub(crate) fn owed_line(room: &str, message: &str, at_ms: i64, text: &str) -> St
         crate::jobs::instant_text(at_ms),
         quoted.replace('\n', " ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subagents_parent_resolves_to_its_root_session() {
+        let id = "0b5c1d2e-3f40-4a51-8b62-7c83d94ea5f6";
+        let file = format!("/h/sessions/--w--/2026-11-25T01-02-03-004Z_{id}.jsonl");
+        assert_eq!(root_session(id), id);
+        assert_eq!(root_session(&file), id);
+        let nested = format!("/h/sessions/--w--/2026-11-25T01-02-03-004Z_{id}/0-Worker.jsonl");
+        assert_eq!(root_session(&nested), id);
+        assert_eq!(root_session("/h/x/0-Worker.jsonl"), "/h/x/0-Worker.jsonl");
+        assert_eq!(root_session(""), "");
+    }
 }

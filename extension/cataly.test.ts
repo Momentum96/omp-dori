@@ -2,52 +2,7 @@
 // `bun test extension/`.
 import { expect, test } from "bun:test";
 import { bridge, type Deps, fingerprint, socketPath, type Wire } from "./cataly";
-
-type Handler = (event: any, ctx: any) => any;
-
-function fakePi() {
-	const handlers = new Map<string, Handler[]>();
-	const tools: any[] = [];
-	const entries: any[] = [];
-	let active = ["read", "bash"];
-	return {
-		handlers,
-		tools,
-		entries,
-		active: () => active,
-		on(name: string, h: Handler) {
-			handlers.set(name, [...(handlers.get(name) ?? []), h]);
-		},
-		registerTool(def: any) {
-			tools.push(def);
-		},
-		getActiveTools: () => active,
-		setActiveTools(names: string[]) {
-			active = names;
-		},
-		appendEntry(customType: string, data: unknown) {
-			entries.push({ type: "custom", customType, data });
-		},
-		async emit(name: string, event: any, ctx: any) {
-			let out: any;
-			for (const h of handlers.get(name) ?? []) out = (await h(event, ctx)) ?? out;
-			return out;
-		},
-	};
-}
-
-function ctxOf(pi: ReturnType<typeof fakePi>, kind = "main") {
-	return {
-		agent: { kind, id: "a1" },
-		cwd: "/work",
-		mode: "rpc",
-		sessionManager: { getSessionId: () => "s1", getSessionFile: () => "/s/s1.jsonl", getBranch: () => pi.entries },
-		ui: { notify() {}, setStatus() {} },
-		isIdle: () => true,
-		setInterval: () => 0,
-		setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
-	};
-}
+import { ctxOf, fakePi, laneCtx, laneHub } from "./fakes";
 
 /** A fake hub: answers hello with `role`, tools with an echo, stop with a reminder. */
 function fakeHub(role: string, sent: any[], connects: { n: number }): Deps["connect"] {
@@ -138,41 +93,6 @@ test("fingerprints ignore timing and the socket path follows the hub's rule", ()
 	expect(socketPath({ env: {}, connect: fakeHub("x", [], { n: 0 }), uid: () => 7 })).toBe("/tmp/cataly-7/hub.sock");
 });
 
-/** A fake hub for a lane: the pin, and verdicts as the hub gives them (it blocks `git push`, a
- * spawn from an unsaved session and any model but the pin or the announced fallback). */
-function laneHub(sent: any[], wires: { close?: () => void }): Deps["connect"] {
-	return async (_path, onLine, onClose): Promise<Wire> => {
-		wires.close = onClose;
-		return {
-			write(line: string) {
-				const msg = JSON.parse(line);
-				sent.push(msg);
-				const reply = (ok: unknown) => queueMicrotask(() => onLine(JSON.stringify({ v: 1, id: msg.id, ok })));
-				const p = msg.params;
-				if (msg.method === "bridge.hello")
-					reply({
-						role: "lane",
-						key: "k2",
-						guidance: "LANE",
-						tools: [{ name: "cataly_lane", parameters: { type: "object" }, timeout_ms: 10_000 }],
-						pin: "fake/primary",
-						shell: true,
-					});
-				if (msg.method === "bridge.shell") {
-					const allow = p.tool === "task" ? p.saved : typeof p.command === "string" && !p.command.includes("git push");
-					reply({ allow, reason: allow ? "" : "Blocked by shell rule 1 (command sha256 ab)" });
-				}
-				if (msg.method === "bridge.model") reply({ allow: p.model === "fake/primary" || p.model === p.fallback });
-			},
-			close() {},
-		};
-	};
-}
-
-function laneCtx(pi: ReturnType<typeof fakePi>, model: { provider: string; id: string }, aborts: { n: number }) {
-	return { ...ctxOf(pi), models: { current: () => model }, abort: () => (aborts.n += 1) };
-}
-
 test("a lane gets its tool, its shell veto fails closed, and the model barrier allows only the pin or the announced fallback", async () => {
 	const pi = fakePi();
 	const sent: any[] = [];
@@ -240,8 +160,8 @@ function ternCtx(pi: ReturnType<typeof fakePi>, state: { idle: boolean; aborts: 
 		isIdle: () => state.idle,
 		abort: () => (state.aborts += 1),
 		shutdown: () => (state.shutdowns += 1),
-		models: { current: () => ({ provider: "fake", id: "primary" }) },
-		modelRegistry: { find: (provider: string, id: string) => (provider === "fake" ? { provider, id } : undefined) },
+		// `ctx.models.resolve` accepts a thinking suffix and returns the base model.
+		models: { current: () => ({ provider: "fake", id: "primary" }), resolve: (spec: string) => (spec.startsWith("fake/") ? { provider: "fake", id: spec.slice(5).split(":")[0] } : undefined) },
 		// As stock OMP 19.1.1: a mode change is refused while a turn runs.
 		sessionModes: {
 			getState: () => ({ goal: { status: state.goal, objective: state.objective } }),
