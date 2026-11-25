@@ -101,6 +101,8 @@ fn status_stats_and_usage_errors() {
         text.starts_with("hub ") && text.contains("jobs     1 configured"),
         "{text}"
     );
+    assert!(text.contains("\nlead     no lead configured"), "{text}");
+    assert!(status["lead"].is_null());
     for _ in 0..5 {
         hub.cli(&["status"]);
     }
@@ -329,6 +331,65 @@ fn setup_sets_the_fallback_chain() {
     );
     assert!(
         text.contains("[fallback.chains]\ndefault = [\"fake/backup\", \"other/model\"]\n"),
+        "{text}"
+    );
+    let check = hub.cli(&["config", "check"]);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+}
+
+/// `cataly setup --lead-model --lead-cwd` writes `[lead]` (review 5): a bad value names its flag, and
+/// the applied file passes `config check`.
+#[test]
+fn setup_sets_the_lead() {
+    let hub = TestHub::new("[hub]\nlog_level = \"info\"\n");
+    let dir = hub.config_path().parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    for bad in [["--lead-model", "opus"], ["--lead-cwd", "work"]] {
+        let out = hub.cli(&["setup", bad[0], bad[1]]);
+        assert!(!out.status.success(), "{bad:?} refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(bad[0]),
+            "{bad:?}: the error names the flag"
+        );
+    }
+    let preview = hub.json(&["setup", "--json"]);
+    let lead = |report: &serde_json::Value| {
+        report["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["setting"] == "lead.model")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(lead(&preview)["value"], "-");
+    assert!(
+        lead(&preview)["note"].as_str().unwrap().contains("no lead"),
+        "{preview}"
+    );
+    let args = [
+        "setup",
+        "--lead-model",
+        "anthropic/claude-opus-5-5",
+        "--lead-cwd",
+        "/srv/work",
+        "--json",
+    ];
+    let preview = hub.json(&args);
+    assert_eq!(preview["valid"], true);
+    let expect = preview["before"].as_str().unwrap().to_string();
+    let mut apply = args.to_vec();
+    apply.extend(["--apply", "--expect", &expect]);
+    let applied = hub.json(&apply);
+    assert_eq!(applied["applied"], true);
+    assert_eq!(lead(&applied)["value"], "anthropic/claude-opus-5-5");
+    let text = std::fs::read_to_string(hub.config_path()).unwrap();
+    assert!(
+        text.contains("[lead]\nmodel = \"anthropic/claude-opus-5-5\"\ncwd = \"/srv/work\"\n"),
         "{text}"
     );
     let check = hub.cli(&["config", "check"]);

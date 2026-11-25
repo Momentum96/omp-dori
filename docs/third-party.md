@@ -57,3 +57,16 @@ servers; dev-dependencies never enter a release build.
 | hyper | 1.13 | MIT | https://crates.io/crates/hyper | `server`, `http1`: the fake Discord REST server in `tests/support/discord.rs` (`DESIGN.md` 10.2 dev list) |
 
 The fake `gh` and fake `omp` in `tests/support/` are POSIX shell scripts written here.
+
+## Notices shipped with a release
+
+`scripts/third-party-notices.sh [target-triple] [output-file]` writes `THIRD-PARTY-NOTICES.txt` from
+`cargo metadata --locked --features voice` for one target: every crate linked into the release
+binary (normal dependencies, not build scripts, proc macros or dev-dependencies), its version and
+licence, and the licence and notice files the crate ships. It needs cargo and jq. The release
+workflow should run it once per target before packing, adding this step to the build job and the
+file to the archive:
+
+```yaml
+      - run: sh scripts/third-party-notices.sh ${{ matrix.target }} dist/THIRD-PARTY-NOTICES.txt
+```

@@ -19,7 +19,7 @@ use crate::sys::fs::{create_atomic, read_private, write_atomic};
 use crate::sys::paths::Paths;
 
 /// The settings setup manages: (section, key, flag).
-const MANAGED: [(&str, &str, &str); 15] = [
+const MANAGED: [(&str, &str, &str); 17] = [
     ("hub", "log_level", "--log-level"),
     ("omp", "path", "--omp"),
     ("discord", "token_file", "--discord-token-file"),
@@ -35,6 +35,8 @@ const MANAGED: [(&str, &str, &str); 15] = [
     ("slack", "owner", "--slack-owner"),
     ("fallback", "on", "--fallback-on"),
     ("fallback.chains", "default", "--fallback-chain"),
+    ("lead", "model", "--lead-model"),
+    ("lead", "cwd", "--lead-cwd"),
 ];
 const CONFIG_MAX: u64 = 1024 * 1024;
 
@@ -105,6 +107,8 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         ("fallback.chains", _) => {
             !comma_list(v).is_empty() && comma_list(v).iter().all(|m| model_selector(m))
         }
+        ("lead", "model") => model_selector(v),
+        ("lead", "cwd") => Path::new(v).is_absolute(),
         _ => true,
     };
     (!ok).then_some(match (section, key) {
@@ -118,6 +122,8 @@ fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
         ("fallback.chains", _) => {
             "expected the models to fall back to, in order, as provider/id separated by commas"
         }
+        ("lead", "model") => "expected the lead's model as provider/id",
+        ("lead", _) => "expected the lead's working folder as an absolute path",
         _ => "expected app or member",
     })
 }
@@ -318,6 +324,25 @@ fn value_of(
                     .to_string(),
             ),
         ),
+        ("lead", "model") => (
+            config
+                .lead
+                .as_ref()
+                .map_or_else(|| "-".to_string(), |l| l.model.clone()),
+            Some(if config.lead.is_some() {
+                "the standing lead session answers your messages".to_string()
+            } else {
+                "no lead: messages to Cataly wait until [lead] model is set".to_string()
+            }),
+        ),
+        ("lead", _) => (
+            config
+                .lead
+                .as_ref()
+                .and_then(|l| l.cwd.as_ref())
+                .map_or_else(|| "-".to_string(), |c| c.display().to_string()),
+            Some("the lead's working folder; default your home folder".to_string()),
+        ),
         _ => {
             let path = crate::jobs::owner::health::token_path(config, &paths.config_file);
             let note = match read_private(&path, 4096) {
@@ -477,6 +502,29 @@ pub(super) fn load(paths: &Paths) -> Result<(Snapshot, String), Failure> {
         None => NEW_FILE.to_string(),
     };
     Ok((before, text))
+}
+
+/// Writes one setting outside a setup run (`cataly service enable` pins `[omp] path`), under the same
+/// snapshot, validity, atomic-write and read-back rules.
+pub(super) fn write_one(
+    paths: &Paths,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let refused = |f: Failure| match f {
+        Failure::Refused(m) | Failure::Usage(m) | Failure::Status(_, m) => m,
+        Failure::Client(e) => e.to_string(),
+    };
+    let (before, text) = load(paths).map_err(refused)?;
+    let text = set_key(&text, section, key, value);
+    config::parse(&text).map_err(|e| {
+        format!(
+            "the result would not be a valid config: {}",
+            config::describe(&e)
+        )
+    })?;
+    publish(&paths.config_file, &before, text.as_bytes()).map_err(refused)
 }
 
 /// Sets the managed settings the flags name (a new file gets the ones OMP and the hub need).

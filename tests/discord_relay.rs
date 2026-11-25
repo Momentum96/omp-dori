@@ -629,6 +629,46 @@ fn questions_are_answered_by_the_owner_once() {
     assert!(hub.stop().success());
 }
 
+/// Review 6: an approval that stays local (remote approvals off) posts one notice in the request's
+/// room with the command that answers it on the machine; answering it there ends the turn.
+#[test]
+fn a_local_approval_is_announced_once_in_the_request_room() {
+    let fake = FakeDiscord::start();
+    let mut hub = relay_hub(&fake, &["approve"], "");
+    hub.start();
+    ready(&hub);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_081,
+        OWNER,
+        "please APPROVE this",
+    ));
+    let is_notice = |c: &support::discord::Seen| {
+        c.body["content"]
+            .as_str()
+            .is_some_and(|t| t.contains("Waiting on the machine"))
+    };
+    let notice = fake.wait(WAIT, |f| f.creates().into_iter().find(is_notice));
+    let content = notice.body["content"].as_str().unwrap();
+    assert!(content.contains("Approve this fake write?"), "{content}");
+    assert!(content.contains("remote approvals are off"), "{content}");
+    assert!(
+        content.contains(r#"`cataly lead answer approval-1 '{"value":"Approve Once"}'`"#),
+        "{content}"
+    );
+    assert_eq!(reference(&notice).as_deref(), Some("800000000000000081"));
+    let local = hub.cli(&["lead", "answer", "approval-1", r#"{"value":"Deny"}"#]);
+    assert!(local.status.success(), "{local:?}");
+    fake.wait(WAIT, |f| {
+        f.creates().into_iter().find(|c| {
+            reference(c).as_deref() == Some("800000000000000081")
+                && c.body["content"] == "picked cancelled"
+        })
+    });
+    assert_eq!(fake.creates().into_iter().filter(is_notice).count(), 1);
+    assert!(hub.stop().success());
+}
+
 /// Check 7: a single recommended choice is submitted after the quiet time, and the question says so.
 #[test]
 fn recommended_choice_is_used_after_the_quiet_time() {

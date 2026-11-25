@@ -266,3 +266,43 @@ fn missing_channels_are_created_once_after_confirmation() {
     assert_eq!(again["discord"]["channels"][1]["state"], "existing");
     assert_eq!(creates(&fake).len(), 1, "a second run creates nothing");
 }
+
+#[test]
+fn the_lead_model_and_remote_approvals_are_written_when_asked() {
+    let (hub, fake) = sandbox(Some(TOKEN));
+    fake.join(GUILD, "home");
+    fake.named(LEAD, "cataly", 0, GUILD);
+    fake.named(OPS, "cataly-ops", 0, GUILD);
+    let (ok, report, stderr) = setup(&hub, &["--owner", "app", "--lead-model", "opus"]);
+    assert!(!ok && stderr.contains("--lead-model"), "{stderr} {report}");
+
+    let flags = [
+        "--owner",
+        "app",
+        "--lead-model",
+        "anthropic/claude-opus-5-5",
+        "--remote-approvals",
+    ];
+    let mut apply = flags.to_vec();
+    apply.push("--apply");
+    let (ok, done, stderr) = setup(&hub, &apply);
+    assert!(ok, "{stderr}");
+    assert_eq!(done["applied"], true);
+    let text = std::fs::read_to_string(hub.config_path()).unwrap();
+    assert!(text.contains("remote_approvals = true\n"), "{text}");
+    assert!(
+        text.contains("[lead]\nmodel = \"anthropic/claude-opus-5-5\"\n"),
+        "{text}"
+    );
+    let check = hub.cli(&["config", "check"]);
+    assert!(check.status.success(), "{check:?}");
+
+    // Set already: the same flags change nothing, and without them nothing is asked or removed.
+    let (ok, again, _) = setup(&hub, &apply);
+    assert!(ok);
+    assert_eq!(again["action"], "keep");
+    let (ok, again, _) = setup(&hub, &[]);
+    assert!(ok);
+    assert_eq!(again["action"], "keep");
+    assert_eq!(std::fs::read_to_string(hub.config_path()).unwrap(), text);
+}

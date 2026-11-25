@@ -78,31 +78,56 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
         ),
         Err(e) => check("bridge", "warn", e, Some("cataly status --install")),
     });
-    if config
+    let discord_out = config
         .destinations
         .values()
-        .any(|d| matches!(d, Destination::Discord { .. }))
-    {
+        .any(|d| matches!(d, Destination::Discord { .. }));
+    if config.discord.intake() || discord_out {
         let path = token_path(config, &ctx.config_file);
-        out.push(match crate::sys::fs::read_private(&path, 4096) {
-            Ok(Some(t)) if !t.trim_ascii().is_empty() => {
-                check("discord.token", "ok", "present", None)
-            }
-            Ok(_) => check(
-                "discord.token",
-                "warn",
-                format!("absent: {}", path.display()),
-                Some("put the bot token in that file with mode 0600"),
-            ),
-            Err(e) => check(
-                "discord.token",
-                "warn",
-                e.to_string(),
-                Some("chmod 600 the token file"),
-            ),
-        });
+        out.push(token_check("discord.token", &path));
+    }
+    for (name, on, configured, file) in [
+        (
+            "telegram.token",
+            config.telegram.intake(),
+            config.telegram.token_file.as_ref(),
+            "telegram-token",
+        ),
+        (
+            "slack.token",
+            config.slack.intake(),
+            config.slack.token_file.as_ref(),
+            "slack-tokens",
+        ),
+    ] {
+        if on {
+            let path = crate::relay::intake::secret_path(configured, &ctx.config_file, file);
+            out.push(token_check(name, &path));
+        }
+    }
+    let intake = config.discord.intake() || config.telegram.intake() || config.slack.intake();
+    if intake && config.lead.is_none() {
+        out.push(check(
+            "lead",
+            "warn",
+            "intake configured but no lead: your messages wait with nobody to answer them",
+            Some("cataly setup --lead-model provider/id, then cataly config reload"),
+        ));
     }
     out
+}
+
+/// Whether a relay's token file holds a token.
+fn token_check(name: &str, path: &Path) -> Check {
+    match crate::relay::intake::read_secret(path) {
+        Ok(_) => check(name, "ok", "present", None),
+        Err(e) => check(
+            name,
+            "warn",
+            e,
+            Some("put the token in that file, owned by you with mode 600"),
+        ),
+    }
 }
 
 /// Every check, in a fixed order.
@@ -275,5 +300,38 @@ mod tests {
         );
         let events = ctx.store.read(|r| r.events_after(0, 10)).await.unwrap();
         assert!(events[0].text.contains("missing"), "{}", events[0].text);
+    }
+
+    #[tokio::test]
+    async fn intake_without_a_lead_or_token_warns() {
+        let find = |checks: &[super::Check], name: &str| {
+            checks
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| (c.level.clone(), c.detail.clone()))
+        };
+        let intake =
+            "[discord]\nowner = \"100000000000000001\"\nchannels = [\"100000000000000002\"]\n";
+        let (ctx, _stop, _dir) = ctx_with(intake, "health-intake");
+        let checks = super::hub_checks(&ctx, &ctx.config());
+        let (level, detail) = find(&checks, "lead").unwrap();
+        assert_eq!(level, "warn");
+        assert!(detail.contains("intake configured but no lead"), "{detail}");
+        let (level, detail) = find(&checks, "discord.token").unwrap();
+        assert_eq!(level, "warn", "intake alone needs the token: {detail}");
+
+        let with_lead = format!("{intake}[lead]\nmodel = \"p/m\"\n");
+        let (ctx, _stop, dir) = ctx_with(&with_lead, "health-lead");
+        let secrets = dir.join("secrets");
+        crate::sys::fs::ensure_private_dir(&secrets).unwrap();
+        crate::sys::fs::create_atomic(&secrets.join("discord-token"), b"t0k\n").unwrap();
+        let checks = super::hub_checks(&ctx, &ctx.config());
+        assert_eq!(find(&checks, "lead"), None);
+        assert_eq!(find(&checks, "discord.token").unwrap().0, "ok");
+
+        let (ctx, _stop, _dir) = ctx_with("", "health-quiet");
+        let checks = super::hub_checks(&ctx, &ctx.config());
+        assert_eq!(find(&checks, "lead"), None, "no intake, no lead needed");
+        assert_eq!(find(&checks, "discord.token"), None);
     }
 }

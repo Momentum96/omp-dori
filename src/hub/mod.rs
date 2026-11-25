@@ -86,6 +86,22 @@ impl Hub {
             Some(r) => r.sessions().err(),
             None => Some("OMP has not been probed yet".into()),
         };
+        let model = self
+            .config_tx
+            .borrow()
+            .lead
+            .as_ref()
+            .map(|l| l.model.clone());
+        let lead = match model {
+            Some(model) => {
+                let phase = serde_json::to_value(self.lead.view().await.phase)
+                    .ok()
+                    .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
+                    .unwrap_or_default();
+                Some(format!("{model}, {phase}"))
+            }
+            None => None,
+        };
         Ok(Status {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol: crate::proto::VERSION,
@@ -109,6 +125,7 @@ impl Hub {
             omp,
             sessions_refused: sessions,
             quota_gate: self.jobs.gate(),
+            lead,
         })
     }
 

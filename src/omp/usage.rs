@@ -1,5 +1,6 @@
-//! Parsers for `omp usage --json` and `omp session lease --json` (DESIGN 3.3), and the one
-//! account-limits reader with its cache (WS req. 37-39, OJ req. 20).
+//! Parsers for `omp usage --json` and `omp session lease --json` (DESIGN 3.3), the one
+//! account-limits reader with its cache (WS req. 37-39, OJ req. 20), and the read of OMP's default
+//! model (`omp config get modelRoles --json`) that setup offers for the lead.
 //!
 //! Verified against omp 19.1.1 (an isolated profile with no accounts, and an extension usage provider):
 //! top level `generatedAt`, `reports`, `accountsWithoutUsage`, `disabledCredentials`, `capacity`;
@@ -22,6 +23,8 @@ const USAGE_TIMEOUT: Duration = Duration::from_secs(15);
 /// `omp session lease --json`: 10 s, 1 MiB.
 const LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 const OUTPUT_CAP: u64 = 1024 * 1024;
+/// `omp config get modelRoles --json`: 10 s.
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Provider names shown as they are; anything else shows as "unknown" (WS req. 37).
 const KNOWN_PROVIDERS: [&str; 12] = [
@@ -285,6 +288,26 @@ pub(crate) async fn lease(omp: &Path, ids: &[&str]) -> Result<Lease, String> {
     parse_lease(&read_command(omp, &args, LEASE_TIMEOUT).await?)
 }
 
+/// The model OMP starts with when none is named: `modelRoles.default` of `omp config get
+/// modelRoles --json` (verified against omp 19.1.1: `{"key": "modelRoles", "value": {"default":
+/// "provider/id:thinking", ...}}`), without its thinking suffix. `None` when OMP names none.
+pub(crate) fn parse_default_model(bytes: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    let model = v.get("value")?.get("default")?.as_str()?.trim();
+    let model = match model.rsplit_once(':') {
+        Some((m, level)) if crate::config::session::THINKING.contains(&level) => m,
+        _ => model,
+    };
+    super::transcript::model_selector(model).then(|| model.to_string())
+}
+
+/// [`parse_default_model`] of OMP's answer; `None` when OMP cannot say.
+pub(crate) async fn default_model(omp: &Path) -> Option<String> {
+    let words = ["config", "get", "modelRoles", "--json"];
+    let bytes = read_command(omp, &words, CONFIG_TIMEOUT).await.ok()?;
+    parse_default_model(&bytes)
+}
+
 /// A usage answer with its age.
 #[derive(Debug, Clone)]
 pub(crate) struct Snapshot {
@@ -426,5 +449,26 @@ pub(crate) mod tests {
         assert_eq!(lease.held, ["a"]);
         assert!(parse_lease(br#"{"held":[1],"unknown":[]}"#).is_err());
         assert!(parse_lease(br#"{"held":[]}"#).is_err());
+    }
+
+    #[test]
+    fn the_default_model_drops_its_thinking_level() {
+        let verified = br#"{"key": "modelRoles", "value": {"smol": "x/y:low",
+            "default": "anthropic/claude-opus-5-5:high"}, "type": "record", "description": ""}"#;
+        assert_eq!(
+            parse_default_model(verified).as_deref(),
+            Some("anthropic/claude-opus-5-5")
+        );
+        let plain = br#"{"value": {"default": "openai/gpt-5.2"}}"#;
+        assert_eq!(
+            parse_default_model(plain).as_deref(),
+            Some("openai/gpt-5.2")
+        );
+        assert_eq!(parse_default_model(br#"{"value": {"smol": "x/y"}}"#), None);
+        assert_eq!(
+            parse_default_model(br#"{"value": {"default": "opus"}}"#),
+            None
+        );
+        assert_eq!(parse_default_model(b"Unknown setting"), None);
     }
 }

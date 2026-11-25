@@ -72,7 +72,7 @@ pub(crate) fn run(p: &Parsed, paths: &Paths) -> Option<Result<(), Failure>> {
         ["update"] => block_on(update(p, paths)),
         ["rollback"] => block_on(rollback(p, paths)),
         ["uninstall"] => block_on(uninstall(p, paths)),
-        ["service", verb @ ("enable" | "disable")] => block_on(service(*verb == "enable")),
+        ["service", verb @ ("enable" | "disable")] => block_on(service(*verb == "enable", paths)),
         _ => return None,
     };
     Some(outcome.into())
@@ -594,30 +594,108 @@ async fn uninstall(p: &Parsed, paths: &Paths) -> Outcome {
 }
 
 /// `cataly service enable|disable` (IR req. 40).
-async fn service(enable: bool) -> Outcome {
+async fn service(enable: bool, paths: &Paths) -> Outcome {
     let l = match Layout::of_running() {
         Ok(l) => l,
         Err(e) => return Outcome::Held(e),
     };
-    if enable {
-        if l.current_version().is_none() {
-            return Outcome::Held(
-                "install Cataly first; the service runs the installed command".into(),
-            );
-        }
-        match crate::sys::service::enable(&l).await {
-            Ok(path) => Outcome::Done(format!("service written to {} and started", path.display())),
-            Err(e) => Outcome::Held(e),
-        }
-    } else {
-        match crate::sys::service::disable(&l).await {
+    if !enable {
+        return match crate::sys::service::disable(&l).await {
             Ok(Some(path)) => {
                 Outcome::Done(format!("service stopped and {} removed", path.display()))
             }
             Ok(None) => Outcome::Done("no service created by Cataly; nothing changed".into()),
             Err(e) => Outcome::Held(e),
-        }
+        };
     }
+    if l.current_version().is_none() {
+        return Outcome::Held(
+            "install Cataly first; the service runs the installed command".into(),
+        );
+    }
+    let config = match crate::config::load(&paths.config_file) {
+        Ok(c) => c,
+        Err(e) => {
+            return Outcome::Held(format!(
+                "{} is not a valid config ({}); fix it first",
+                paths.config_file.display(),
+                crate::config::describe(&e)
+            ));
+        }
+    };
+    let Some(omp) = crate::omp::resolve(&config.omp.path) else {
+        return Outcome::Held(format!(
+            "OMP ('{}') is not an executable file or on PATH; install it or set [omp] path",
+            config.omp.path
+        ));
+    };
+    // The service's PATH is not the shell's: a bare name would not be found there.
+    let mut notes = Vec::new();
+    if !Path::new(&config.omp.path).is_absolute() {
+        let value = omp.display().to_string();
+        if let Err(e) = super::setup::write_one(paths, "omp", "path", &value) {
+            return Outcome::Held(e);
+        }
+        notes.push(format!("[omp] path set to {value}"));
+    }
+    // The folders of the tools the hub runs, as found now.
+    let tools = [
+        config.omp.path.as_str(),
+        "bun",
+        "gh",
+        "git",
+        &config.sessions.tern,
+    ];
+    let found: Vec<PathBuf> = tools
+        .iter()
+        .filter_map(|t| crate::omp::resolve(t))
+        .filter_map(|p| p.parent().map(Path::to_path_buf))
+        .collect();
+    let path_line = crate::sys::service::path_line(found.iter().map(PathBuf::as_path));
+    let env_path = service_env_file(paths);
+    let keys = match crate::sys::service::env_file(&env_path, &config.sessions.credentials, |k| {
+        std::env::var(k).ok()
+    }) {
+        Ok(k) => k,
+        Err(e) => return Outcome::Held(e),
+    };
+    let unit = crate::sys::service::Unit {
+        command: &l.command,
+        path: &path_line,
+        env_file: &env_path,
+    };
+    let file = match crate::sys::service::enable(&l, &unit).await {
+        Ok(path) => path,
+        Err(e) => return Outcome::Held(e),
+    };
+    notes.push(format!("PATH={path_line}"));
+    let verb = if keys.created {
+        "written to"
+    } else {
+        "read from"
+    };
+    notes.push(format!("provider keys {verb} {}", env_path.display()));
+    if !keys.missing.is_empty() {
+        notes.push(format!(
+            "{} not set there: add NAME=value lines, then restart the service",
+            keys.missing.join(", ")
+        ));
+    }
+    Outcome::Done(format!(
+        "service written to {} and started\n  {}",
+        file.display(),
+        notes.join("\n  ")
+    ))
+}
+
+/// The owner-only environment file the service reads its provider keys from.
+fn service_env_file(paths: &Paths) -> PathBuf {
+    paths
+        .config_file
+        .parent()
+        .unwrap_or(Path::new("/"))
+        .join("secrets")
+        .join("service.env")
 }
 
 /// `cataly check [--tag <tag>]` (IR req. 18, 32): changes nothing.

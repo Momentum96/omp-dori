@@ -13,6 +13,7 @@ always matches this build.
 | State folder (store `cataly.db`, `logs/`, `files/`, `backup/`, `hub.lock`) | `~/.local/state/cataly` | `$XDG_STATE_HOME/cataly` |
 | Control socket | `$XDG_RUNTIME_DIR/cataly/hub.sock` | falls back to `/tmp/cataly-<uid>/hub.sock` when `XDG_RUNTIME_DIR` is unset or the path is too long for a socket |
 | Token files | `secrets/` next to the config file | the `token_file` / `key_file` key of each section |
+| Provider keys for the service | `secrets/service.env` next to the config file | none (see [`cataly service enable`](#cataly-service-enable)) |
 
 `HOME` must be set to an absolute path. An `XDG_*` variable that is not an absolute path is ignored,
 as the XDG rules require. `cataly setup` shows which of these came from the environment.
@@ -80,6 +81,7 @@ group or others.
 | `--telegram-token-file`, `--telegram-owner`, `--telegram-group`, `--telegram-topic` | `[telegram] token_file`, `owner`, `group`, `topic` |
 | `--slack-token-file`, `--slack-role`, `--slack-owner` | `[slack] token_file`, `role`, `owner` |
 | `--fallback-on` | `[fallback] on` |
+| `--lead-model` (`provider/id`), `--lead-cwd` (absolute folder) | `[lead] model`, `cwd` |
 | `--fallback-chain` (comma-separated `provider/id`) | `[fallback.chains] default` |
 | `--backup [--backup-repo owner/name] [--create]` | the `[jobs.home]` backup job (see [Home backup](#home-backup)) |
 
@@ -125,12 +127,33 @@ What setup does, in order, reading everything again on each run:
   `kind = "discord"` and the `cataly-ops` channel. A setting is written only when the file says
   something else, so a second run changes nothing. At a terminal setup shows the preview and asks
   before writing; a script writes with `--apply --expect <hash>`.
+- **Lead**: when the config has no `[lead]`, setup asks for the lead's model as `provider/id`,
+  offering the model OMP itself starts with (`--lead-model <provider/id>` in scripts; `-` for
+  none). Without a lead your messages wait with nobody to answer them.
+- **Remote approvals**: setup asks whether OMP's permission requests (commands, file edits) may be
+  approved with buttons in Discord (`--remote-approvals` in scripts), writing
+  `[discord] remote_approvals = true`. Only your own presses count. Without it a request posts
+  one notice in the room and waits for `cataly lead answer` on this machine.
 
 `--json` never asks and prints one JSON report: the `cataly setup` report with a `discord` section
 (`stage`, `next`, bot, application, `message_content`, `invite`, `guilds`, `guild`, `channels`
 with `existing` or `created`, `owner` with its source). A step that still needs you ends the run
 with exit status 1, `stage` naming it (`token`, `intent`, `guild`, `channels`, `owner`) and `next`
 saying what to do; run setup again afterwards.
+
+### `cataly service enable`
+
+Writes and starts the user service (systemd user unit on Linux, launchd agent on macOS). A service
+does not see your shell's environment, so it:
+
+- sets `[omp] path` to the absolute path of OMP when the config names it bare;
+- writes one `PATH=` line into the unit, made of the folders where `omp`, `bun`, `gh`, `git` and
+  the Tern executable are found now, then `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`;
+  repeats and folders with `:`, `"`, `\` or control characters are left out. The line is printed;
+- reads provider keys from `secrets/service.env` next to the config file (owner-only, mode `600`).
+  A new file gets each `[sessions] credentials` name found in your current environment as
+  `NAME=value`, and the others as commented lines to fill in. An existing file is never changed;
+  the names it lacks are printed. Restart the service after editing it.
 
 ## Value formats
 
@@ -518,6 +541,18 @@ warn_percent = 80
 | Key | Type | Default | What it does |
 |---|---|---|---|
 | `ignore` | list of strings | `[]` | Check names left out of the health status and the `health` job, such as `bridge`, `omp`, `config`, `discord.token`, `job.<name>`, `file.<path>`. |
+
+Each check reports `ok`, `info` or `warn`, and a warning names its fix:
+
+| Check | Warns when | Fix it names |
+|---|---|---|
+| `config` | the file on disk is invalid and not applied | fix the file, then `cataly config reload` |
+| `omp` | the OMP found cannot host sessions | install OMP 19.1.1 or newer, or set `[omp] path` |
+| `bridge` | OMP's extension folder does not link this version's bridge | `cataly status --install` |
+| `discord.token`, `telegram.token`, `slack.token` | a messenger is configured but its token file is missing, empty or not owner-only | put the token in that file, mode `600` |
+| `lead` | a messenger is configured but there is no `[lead]`: messages wait with nobody to answer | `cataly setup --lead-model provider/id`, then `cataly config reload` |
+| `job.<name>` | a scheduled job has had no good tick for twice its cadence | `cataly job list` and the hub log |
+| `file.<path>` | a file watched by a `health` job is missing or older than its limit | check the path in the health job |
 
 ```toml
 [health]
