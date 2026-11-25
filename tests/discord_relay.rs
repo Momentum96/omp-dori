@@ -772,11 +772,10 @@ fn several_fields_use_a_select_a_modal_and_submit() {
     };
     fake.interact(OWNER, CH, &qid, 5, &note("too long"));
     let refused = callbacks(&fake, 4)[3].body.clone();
-    assert!(
-        refused["data"]["content"]
-            .as_str()
-            .unwrap()
-            .contains("characters"),
+    // `[hub] language` defaults to Korean; the label is the field's own.
+    assert_eq!(
+        refused["data"]["content"],
+        "받지 못했어요: Note: 0자에서 4자까지 써 주세요. Fill in을 다시 눌러 주세요.",
         "{refused}"
     );
     fake.interact(OWNER, CH, &qid, 5, &note("ship"));

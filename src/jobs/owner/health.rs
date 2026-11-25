@@ -63,7 +63,11 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
                 "omp",
                 "warn",
                 format!("{e} ({})", r.summary()),
-                Some("install OMP 19.1.1 or newer, or set [omp] path"),
+                Some(if r.retry.is_some() {
+                    "the hub probes again by itself and starts sessions once a probe works; if it keeps failing, check omp --version or set [omp] path"
+                } else {
+                    "install OMP 19.1.1 or newer, or set [omp] path"
+                }),
             ),
             Ok(()) if r.untested => check("omp", "info", r.summary(), None),
             Ok(()) => check("omp", "ok", r.summary(), None),

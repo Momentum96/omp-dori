@@ -106,16 +106,11 @@ impl Limits {
         })
     }
 
-    /// Checks one answer; the error names the field.
-    pub(crate) fn check(&self, name: &str, value: &str) -> Result<(), String> {
+    /// Checks one answer; the caller words the misfit in the owner's language.
+    pub(crate) fn check(&self, value: &str) -> Result<(), Misfit> {
         let count = value.chars().count();
         if self.min_len.is_some_and(|m| count < m) || self.max_len.is_some_and(|m| count > m) {
-            return Err(format!(
-                "{name} takes {} to {} characters",
-                self.min_len.unwrap_or(0),
-                self.max_len
-                    .map_or_else(|| "any number of".into(), |m| m.to_string())
-            ));
+            return Err(Misfit::Length);
         }
         if !self.number || value.is_empty() {
             return Ok(());
@@ -125,17 +120,24 @@ impl Limits {
             .parse::<f64>()
             .ok()
             .filter(|n| n.is_finite())
-            .ok_or(format!("{name} takes a number"))?;
+            .ok_or(Misfit::NotNumber)?;
         let bound = |b: &Option<String>| b.as_deref().and_then(|v| v.parse::<f64>().ok());
         if bound(&self.min).is_some_and(|m| n < m) || bound(&self.max).is_some_and(|m| n > m) {
-            return Err(format!(
-                "{name} takes a number from {} to {}",
-                self.min.as_deref().unwrap_or("any"),
-                self.max.as_deref().unwrap_or("any")
-            ));
+            return Err(Misfit::Range);
         }
         Ok(())
     }
+}
+
+/// How an answer misses a field's [`Limits`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Misfit {
+    /// Fewer or more characters than `min_len` / `max_len` allow.
+    Length,
+    /// Not a number in a number field.
+    NotNumber,
+    /// A number outside `min` / `max`.
+    Range,
 }
 
 /// A readable form.

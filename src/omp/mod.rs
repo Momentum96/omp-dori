@@ -1,6 +1,6 @@
 //! The OMP boundary (DESIGN 3): the rpc-ui transport, the probe with its minimum version, and the
-//! usage and lease readers. This milestone starts no session; the probe result is cached here, shown
-//! by health and `status`, and re-taken when the configured executable changes on disk.
+//! usage and lease readers. The probe result is cached here, shown by health and `status`, re-taken
+//! when the configured executable changes on disk, and retried by itself after a failure.
 
 pub(crate) mod extension;
 pub(crate) mod launch;
@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::log;
@@ -25,6 +26,24 @@ pub(crate) const MINIMUM: Version = Version(19, 1, 1);
 pub(crate) const TESTED: Version = Version(19, 1, 1);
 /// How often the executable's identity is compared with the probed one.
 const RECHECK: Duration = Duration::from_secs(60);
+/// Waits before probing again after one, two and three failed probes in a row.
+const RETRY: [Duration; 3] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(45),
+];
+/// The wait after more failed probes in a row.
+const RETRY_STEADY: Duration = Duration::from_secs(300);
+
+/// The wait before the next probe after `failures` failed probes in a row (at least one).
+fn retry_after(failures: u32) -> Duration {
+    usize::try_from(failures)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| RETRY.get(i))
+        .copied()
+        .unwrap_or(RETRY_STEADY)
+}
 
 /// An OMP release number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,8 +146,10 @@ impl Omp {
     }
 
     /// Probes at start, then re-probes when the configured setting or the executable's path, size
-    /// or modification time changes; one metadata read per minute otherwise. Session starts never
-    /// spawn a probe.
+    /// or modification time changes; one metadata read per minute otherwise. A failed probe is
+    /// retried after 5 s, 15 s and 45 s, then every 5 minutes, until one succeeds (an OMP that
+    /// starts slowly just after an update); the report names the retry. Session starts never spawn
+    /// a probe.
     pub(crate) async fn watch(
         self: Arc<Self>,
         mut config: watch::Receiver<Arc<Config>>,
@@ -136,6 +157,9 @@ impl Omp {
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), String> {
         let mut probed: Option<(String, Option<Identity>)> = None;
+        // Failed probes in a row of the same executable, and when the next one is due.
+        let mut failures: u32 = 0;
+        let mut retry_at: Option<Instant> = None;
         loop {
             let setting = config.borrow_and_update().omp.path.clone();
             let resolved = match &probed {
@@ -144,18 +168,39 @@ impl Omp {
                 _ => resolve(&setting),
             };
             let now = resolved.as_deref().and_then(identity);
-            if probed.as_ref() != Some(&(setting.clone(), now.clone())) {
+            let changed = probed.as_ref() != Some(&(setting.clone(), now.clone()));
+            if changed || retry_at.is_some_and(|at| Instant::now() >= at) {
+                if changed {
+                    failures = 0;
+                }
                 self.path
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .clone_from(&resolved);
-                let report = probe::probe(resolved.as_deref(), Some(&stderr_log)).await;
+                let mut report = probe::probe(resolved.as_deref(), Some(&stderr_log)).await;
+                retry_at = None;
+                if report.error.is_some() {
+                    failures = failures.saturating_add(1);
+                    let wait = retry_after(failures);
+                    retry_at = Instant::now().checked_add(wait);
+                    report.retry = Some(probe::Retry {
+                        attempt: failures.saturating_add(1),
+                        after_s: wait.as_secs(),
+                        at_ms: crate::sys::now_ms()
+                            .saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
+                    });
+                } else {
+                    failures = 0;
+                }
                 log::info("omp probed", &[("result", &report.summary())]);
                 self.report.send_replace(Some(Arc::new(report)));
                 probed = Some((setting, now));
             }
+            let wait = retry_at.map_or(RECHECK, |at| {
+                at.saturating_duration_since(Instant::now()).min(RECHECK)
+            });
             tokio::select! {
-                () = tokio::time::sleep(RECHECK) => {}
+                () = tokio::time::sleep(wait) => {}
                 changed = config.changed() => if changed.is_err() {
                     return Ok(());
                 },
@@ -194,5 +239,12 @@ mod tests {
         assert!(resolve("/nonexistent/omp").is_none());
         assert!(resolve("sh").is_some());
         assert!(resolve("cataly-no-such-tool").is_none());
+    }
+
+    #[test]
+    fn failed_probes_back_off_to_every_five_minutes() {
+        let waits: Vec<u64> = (1..=6).map(|n| retry_after(n).as_secs()).collect();
+        assert_eq!(waits, [5, 15, 45, 300, 300, 300]);
+        assert_eq!(retry_after(u32::MAX), RETRY_STEADY);
     }
 }

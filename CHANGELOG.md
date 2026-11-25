@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3 (Unreleased)
+
+- A failed OMP probe is tried again by itself after 5 s, 15 s and 45 s, then every 5 minutes,
+  instead of waiting until the OMP executable changes. Just after an OMP update the first start
+  can take longer than the probe allows; the lead now starts as soon as a later probe works.
+  `cataly status` and `cataly health` say when the next try runs.
+- The limits a Discord form checks (number ranges, text lengths, required fields) are worded in
+  your language (`[hub] language`), in the Fill in placeholder, a refused Fill in and a refused
+  Submit, like the rest of the question card.
+
 ## 0.1.2 (2026-11-26)
 
 - The lead resumes after an update or restart even when its session was started in another folder

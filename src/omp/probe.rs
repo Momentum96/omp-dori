@@ -67,6 +67,38 @@ pub(crate) struct Report {
     /// Why the probe failed, if it did.
     pub(crate) error: Option<String>,
     pub(crate) at_ms: i64,
+    /// The automatic next probe after a failed one.
+    #[serde(default)]
+    pub(crate) retry: Option<Retry>,
+}
+
+/// The next probe the hub runs by itself after a failed one (5 s, 15 s, 45 s, then every 5
+/// minutes), so a slow first start after an OMP update does not hold sessions until the
+/// executable changes again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Retry {
+    /// The number of the next probe in this series of failures (2 after the first failure).
+    pub(crate) attempt: u32,
+    /// The wait the hub planned after this probe.
+    pub(crate) after_s: u64,
+    /// When the next probe is due.
+    pub(crate) at_ms: i64,
+}
+
+impl Retry {
+    fn text(self, in_s: u64) -> String {
+        if in_s == 0 {
+            format!("probing again now (attempt {})", self.attempt)
+        } else {
+            format!("probing again in {in_s} s (attempt {})", self.attempt)
+        }
+    }
+
+    /// Seconds until the next probe, rounded up.
+    fn remaining_s(self) -> u64 {
+        let ms = self.at_ms.saturating_sub(now_ms()).max(0);
+        u64::try_from(ms).unwrap_or(0).div_ceil(1000)
+    }
 }
 
 impl Report {
@@ -85,6 +117,7 @@ impl Report {
             features: Vec::new(),
             error: None,
             at_ms: now_ms(),
+            retry: None,
         }
     }
 
@@ -95,7 +128,10 @@ impl Report {
                 "OMP {v} is below the minimum {}; no session can start",
                 self.minimum
             )),
-            (_, Some(e)) => Err(format!("OMP probe failed: {e}")),
+            (_, Some(e)) => Err(match self.retry {
+                Some(r) => format!("OMP probe failed: {e}; {}", r.text(r.after_s)),
+                None => format!("OMP probe failed: {e}"),
+            }),
             (None, None) => Err("OMP has not been probed yet".into()),
             (Some(_), None) => Ok(()),
         }
@@ -104,8 +140,12 @@ impl Report {
     /// One line for `status` and health.
     pub(crate) fn summary(&self) -> String {
         let path = self.path.as_deref().unwrap_or("(not found)");
+        let retry = self
+            .retry
+            .map_or_default(|r| format!("; {}", r.text(r.remaining_s())));
         let Some(version) = &self.version else {
-            return format!("{path}: {}", self.error.as_deref().unwrap_or("not probed"));
+            let error = self.error.as_deref().unwrap_or("not probed");
+            return format!("{path}: {error}{retry}");
         };
         let mut line = format!("{path} {version}");
         if !self.meets_minimum {
@@ -132,7 +172,7 @@ impl Report {
             let _ = write!(line, ", features {}", self.features.join(" "));
         }
         if let Some(e) = &self.error {
-            let _ = write!(line, "; probe failed: {e}");
+            let _ = write!(line, "; probe failed: {e}{retry}");
         }
         line
     }
@@ -331,7 +371,28 @@ mod tests {
         assert!(r.sessions().is_ok());
         assert!(r.summary().contains("untested above 19.1.1"));
         r.error = Some("x".into());
-        assert!(r.sessions().is_err());
+        assert_eq!(r.sessions().unwrap_err(), "OMP probe failed: x");
+        r.retry = Some(Retry {
+            attempt: 2,
+            after_s: 5,
+            at_ms: now_ms() + 4_500,
+        });
+        assert_eq!(
+            r.sessions().unwrap_err(),
+            "OMP probe failed: x; probing again in 5 s (attempt 2)"
+        );
+        assert!(
+            r.summary()
+                .ends_with("; probe failed: x; probing again in 5 s (attempt 2)"),
+            "{}",
+            r.summary()
+        );
+        r.version = None;
+        r.retry = r.retry.map(|t| Retry {
+            at_ms: now_ms() - 1,
+            ..t
+        });
+        assert_eq!(r.summary(), "/x/omp: x; probing again now (attempt 2)");
     }
 
     #[tokio::test]

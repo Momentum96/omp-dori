@@ -133,6 +133,56 @@ fn lead_restarts_on_its_session_after_omp_exits() {
     assert_eq!(pids.lines().count(), 4, "{pids}");
 }
 
+/// Just after an OMP update the first probe can outlast its bound under load. A failed probe is
+/// tried again by itself after 5 s, with no change to the executable; status, health and the
+/// sessions refusal name the retry, and the lead starts as soon as a probe works.
+#[test]
+fn a_failed_probe_is_retried_and_the_lead_starts() {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    hub.fixture("omp", "slow-start", Some(""));
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        omp.display(),
+        work.display()
+    ));
+    hub.start();
+    let status = hub.until(Duration::from_secs(40), || {
+        let s = hub.json(&["status", "--json"]);
+        s["omp"]["retry"].is_object().then_some(s)
+    });
+    let report = &status["omp"];
+    assert!(report["error"].is_string(), "{status}");
+    assert_eq!(report["retry"]["attempt"], 2, "{status}");
+    assert_eq!(report["retry"]["after_s"], 5, "{status}");
+    let refused = status["sessions_refused"].as_str().unwrap();
+    assert!(
+        refused.starts_with("OMP probe failed: ")
+            && refused.ends_with("; probing again in 5 s (attempt 2)"),
+        "{refused}"
+    );
+    let health = String::from_utf8(hub.cli(&["health"]).stdout).unwrap();
+    assert!(
+        health
+            .lines()
+            .any(|l| l.contains("omp") && l.contains("probing again")),
+        "{health}"
+    );
+
+    let lead = live(&hub, &Value::Null);
+    assert!(lead["session"]["session_id"].is_string(), "{lead}");
+    let status = hub.json(&["status", "--json"]);
+    assert!(
+        status["omp"]["error"].is_null() && status["omp"]["retry"].is_null(),
+        "{status}"
+    );
+    assert!(hub.root.join("bin/omp-data/slow-start.used").exists());
+    assert!(hub.stop().success());
+}
+
 /// Decision 15 writes early only what the caller knows was not written before (a relay message
 /// read live, or one its transcript lacks). A `lead send` with a request ID commits first: the
 /// crash point after an early write never fires, and a retry with the same ID after a crash finds
