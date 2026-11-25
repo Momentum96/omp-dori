@@ -68,7 +68,25 @@ impl Paths {
             .map(|dir| dir.join("cataly"))
             .filter(|dir| socket_fits(dir))
             .unwrap_or_else(|| PathBuf::from(format!("/tmp/cataly-{uid}")));
-        Ok(Self {
+        Ok(Self::layout(config_file, state_dir, runtime_dir))
+    }
+
+    /// The same layout with the state directory at its real location (symlinks resolved; it must
+    /// exist). The hub works from this, so every state path it records or hands to OMP is the one
+    /// `canonicalize` reports: the resume check refuses a recorded transcript path that differs
+    /// from its real location, and on macOS the temporary directories (`/tmp`, `/var/folders`) sit
+    /// behind a symlink into `/private`.
+    pub(crate) fn real_state(&self) -> std::io::Result<Self> {
+        let state_dir = std::fs::canonicalize(&self.state_dir)?;
+        Ok(Self::layout(
+            self.config_file.clone(),
+            state_dir,
+            self.runtime_dir.clone(),
+        ))
+    }
+
+    fn layout(config_file: PathBuf, state_dir: PathBuf, runtime_dir: PathBuf) -> Self {
+        Self {
             config_file,
             logs_dir: state_dir.join("logs"),
             files_dir: state_dir.join("files"),
@@ -76,7 +94,7 @@ impl Paths {
             socket: runtime_dir.join("hub.sock"),
             runtime_dir,
             state_dir,
-        })
+        }
     }
 
     /// `<state>/hub.lock`, the single-instance guard.
@@ -164,5 +182,29 @@ mod tests {
     #[test]
     fn missing_home_is_refused() {
         assert!(Paths::resolve(env(&[]), 1).is_err());
+    }
+
+    #[test]
+    fn real_state_resolves_a_symlinked_state_directory() {
+        let scratch = crate::sys::fs::tests::scratch("paths");
+        let real = std::fs::canonicalize(&*scratch).unwrap().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, scratch.join("link")).unwrap();
+        let home = scratch.join("home");
+        let state = scratch.join("link");
+        let p = Paths::resolve(
+            env(&[
+                ("HOME", home.to_str().unwrap()),
+                ("XDG_STATE_HOME", state.to_str().unwrap()),
+            ]),
+            1,
+        )
+        .unwrap();
+        std::fs::create_dir(&p.state_dir).unwrap();
+        let r = p.real_state().unwrap();
+        assert_eq!(r.state_dir, real.join("cataly"));
+        assert_eq!(r.logs_dir, real.join("cataly/logs"));
+        assert_eq!(r.db_file(), real.join("cataly/cataly.db"));
+        assert_eq!((r.config_file, r.socket), (p.config_file, p.socket));
     }
 }
