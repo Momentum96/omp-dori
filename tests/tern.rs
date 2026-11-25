@@ -319,6 +319,65 @@ fn a_missing_tern_executable_refuses_starts_with_an_install_hint() {
     assert!(text.contains("install Tern"), "{text}");
 }
 
+/// Safety finding 7: OMP gives a tern session's bridge no usage-limit view, so a tern lane is
+/// refused while the account limits report paid extra usage for its model's provider, and while
+/// they cannot be read; nothing is started and no lane is recorded.
+#[test]
+fn a_tern_lane_is_refused_while_its_provider_reports_extra_usage() {
+    let mut hub = TestHub::new("");
+    hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    hub.fixture("omp", "tui", Some(""));
+    let tern = hub.install_fake("tern");
+    let work = configure(&hub, "tern", &tern);
+    let text = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!(
+        "{text}[lanes]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        work.display()
+    ));
+    let limit = |id: &str, window: &str, unit: &str| {
+        json!({ "id": id, "label": id, "scope": { "provider": "fake", "windowId": window },
+                "amount": { "used": 1, "limit": 10, "unit": unit } })
+    };
+    let usage = |limits: Value| {
+        json!({ "generatedAt": 1, "reports": [{ "provider": "fake", "limits": limits }],
+                "accountsWithoutUsage": [], "disabledCredentials": [], "capacity": {} })
+        .to_string()
+    };
+    hub.start();
+    let params = json!({ "key": "t-1", "title": "T", "brief": "Do it.",
+                         "checks": [{ "kind": "command", "argv": ["true"] }] })
+    .to_string();
+    let open = || {
+        let out = hub.cli(&["lane", "open", "--json", "--params", &params]);
+        assert!(!out.status.success(), "{out:?}");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    // No account limits to read: refused (fail closed); a failed read caches nothing.
+    let unread = hub.until(Duration::from_secs(20), || {
+        let text = open();
+        (!text.contains("not been probed")).then_some(text)
+    });
+    assert!(unread.contains("could not be read"), "{unread}");
+    hub.fixture(
+        "omp",
+        "usage.json",
+        Some(&usage(json!([
+            limit("fake:5h", "5h", "percent"),
+            limit("fake:extra", "extra", "usd")
+        ]))),
+    );
+    let refused = open();
+    assert!(refused.contains("paid extra usage"), "{refused}");
+    let lanes = hub.json(&["lane", "list", "--json", "--params", r#"{"all":true}"#]);
+    assert_eq!(lanes, json!([]), "no lane recorded");
+    assert!(
+        !hub.state().join("sessions/lanes/t-1").exists(),
+        "no lane session started"
+    );
+    assert!(hub.stop().success());
+}
+
 /// A transcript OMP could resume: the session header in the lead's session directory.
 fn lead_transcript(hub: &TestHub, work: &Path, id: &str) -> PathBuf {
     let file = hub

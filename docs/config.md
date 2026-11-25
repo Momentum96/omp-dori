@@ -448,6 +448,10 @@ Named slots, the planner, the reviewer, lane event commands, publish folders and
 | `model` | string | OMP chooses | Model of the built-in reviewer. |
 | `command` | list of strings | none | A custom reviewer command that replaces the built-in one. Placeholders as for events. |
 
+The built-in reviewer reads only: it runs with the lanes' OMP overlay, the tools `read`, `grep` and
+`glob`, every other tool call refused, and a spend cap of `[lanes] ceiling_cost` (2 USD when unset).
+The hub fetches the pull request's text for it.
+
 `[coord.events]`: commands run on lane events, never through a shell. Each is a non-empty list of
 non-empty strings; elements may contain `{key}`, `{text}`, `{evidence}`, `{pr}`, `{repo}`,
 `{number}`, `{head}`.

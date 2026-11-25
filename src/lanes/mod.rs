@@ -55,8 +55,9 @@ const READ_MAX: usize = 40;
 const ANSWER_MAX: usize = 64 * 1024;
 /// Report text in the lead's wake line (EVR req. 17).
 const WAKE_TEXT: usize = 500;
-/// The look-only tool set (OPC-46).
-const LOOK_ONLY: &str = "read,grep,find,ls";
+/// The look-only tool set (OPC-46), also the reviewer's. OMP 19.1.1 refuses `--tools` naming an
+/// unknown tool (`ls`) or one unavailable in the session (`find` needs a native judge model).
+const LOOK_ONLY: &str = "read,grep,glob";
 
 pub(crate) type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -363,6 +364,36 @@ impl<R: Runtime> Lanes<R> {
         }
         self.overlay(config)?;
         Ok(exe)
+    }
+
+    /// DESIGN 9.2 for the terminal runtime. A headless lane is fenced when `get_state.usageLimit`
+    /// reports extra usage; OMP 19.1.1 gives extensions no view of that state, so the bridge cannot
+    /// report it from a tern session. A tern lane therefore starts only while a fresh account-limits
+    /// read shows no paid extra usage for its model's provider; an unreadable answer refuses too.
+    async fn tern_spend(&self, config: &Config, rec: &Record) -> Result<(), String> {
+        if rec.runtime != crate::config::session::RuntimeKind::Tern {
+            return Ok(());
+        }
+        let provider = rec.model.split_once('/').map_or("", |(p, _)| p);
+        let omp = &self.env.omp;
+        let read = omp
+            .usage
+            .read(omp.path().as_deref(), config.limits.cache, false)
+            .await;
+        let snapshot = read.snapshot.filter(|_| !read.stale).ok_or_else(|| {
+            format!(
+                "a tern lane starts only after the account limits rule out paid extra usage, and \
+                 they could not be read ({}); use the headless runtime",
+                read.error.as_deref().unwrap_or("stale answer")
+            )
+        })?;
+        if snapshot.usage.extra_usage(provider) {
+            return Err(format!(
+                "the {provider} account reports paid extra usage, and a tern session cannot be \
+                 fenced before a request bills it; use the headless runtime"
+            ));
+        }
+        Ok(())
     }
 
     /// Runs one operation for a caller; the answer is JSON for the CLI and the tools.
@@ -945,6 +976,7 @@ impl<R: Runtime> Lanes<R> {
         let config = self.cfg();
         let exe = self.admission(&config, &valid.cwd).await?;
         let mut rec = Self::build(&valid, &config, crate::host::random_hex(8));
+        self.tern_spend(&config, &rec).await?;
         if let Some(source) = thread_from {
             rec.thread = Some(self.thread_for(&rec.key, &rec.title, &source).await?);
         }

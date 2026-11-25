@@ -4,7 +4,7 @@
 //! or overrunning tick leaves the kind's state untouched and warns once per distinct reason; the
 //! first good tick after failures emits one recovery note. The first tick takes a baseline.
 
-mod backup;
+pub(crate) mod backup;
 mod github;
 pub(crate) mod health;
 mod items;

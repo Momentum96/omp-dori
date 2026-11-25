@@ -201,9 +201,10 @@ Choices made where `DESIGN.md` is silent, and deviations from it, with reasons.
   fenced; in-doubt rows are skipped and the lead is told once (COORD-13); fencing a Discord room is 2b.
 - The session state sits behind a short `std::sync::Mutex` per session (never held across an await)
   shared by the event task and the one in-flight operation; reads go through a watch channel.
-- Overlay (`<state>/omp-overlay.yml`, JSON is YAML) is written once per hub run. OMP 19.1.1 has one
-  saved-reset key, `codexResets.autoRedeem` (set `no`); the five keys in DESIGN 4.2 are not in its
-  schema. `goal.continuationModes` is `["interactive", "rpc"]`. `[fallback]` changes need a hub restart.
+- Overlay (`<state>/omp-overlay.yml`, JSON is YAML) is written once per hub run. It pins the five
+  saved-reset keys of OMP 19.1.1 (`codexResets.autoRedeem5h`/`autoRedeemWeekly`,
+  `claudeResets.autoRedeem5h`/`autoRedeemWeekly`/`autoRedeemFable`) to `no`; see "Spend fixes"
+  below. `goal.continuationModes` is `["interactive", "rpc"]`. `[fallback]` changes need a hub restart.
 - `-e <bridge>` and the role instructions text come with 2c; `--append-system-prompt` takes `[lead]
   instructions` when set. `set_event_filter` is not sent yet (all events are read).
 - The child environment is the runner's pass-through list plus listed credentials, `PI_*` profile
@@ -936,3 +937,73 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   declares `cmake_minimum_required` below 3.5, which the runners' CMake 4 refuses.
   `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` under `[env]`, so local builds and
   CI build it the same way (CMake 3.x ignores the variable).
+
+# Spend fixes (FixSpend, 2026-11-25)
+
+Release-review findings Safety 2 / Design 1, Design 8, Safety 7 and Safety 8. Everything about OMP
+here was read from the installed omp 19.1.1 (its binary's strings and `omp read omp://…`) or run
+against it in an isolated profile.
+
+## Saved-reset keys (Safety 2, Design 1)
+
+- The earlier note above was wrong: 19.1.1 has no `codexResets.autoRedeem`. Its schema has five
+  enum keys (`unset | yes | no`, default `unset`, no environment binding): `codexResets.autoRedeem5h`,
+  `codexResets.autoRedeemWeekly`, `claudeResets.autoRedeem5h`, `claudeResets.autoRedeemWeekly`,
+  `claudeResets.autoRedeemFable`. Its changelog says they replace each provider's `autoRedeem`.
+- Measured in an isolated profile whose global config said `yes` for Claude 5h and Fable: with the
+  old overlay (`codexResets.autoRedeem: no`) OMP migrated that key into the two Codex keys, but the
+  Claude keys stayed `yes` (layer `global`). With the new overlay all five read `no` (layer
+  `overlay`). Overlays outrank project and global config; only environment bindings and runtime
+  overrides rank higher, and these keys have neither.
+- `launch::overlay` writes the five keys from one list (`NO_REDEEM`); the old key is gone. The unit
+  test checks all five and the old key's absence. `contract_session::lead_end_to_end_and_resume`
+  starts stock OMP with the hub's own overlay, a global config saying `yes` to every key, and a test
+  extension that reads each key through OMP's public settings registry (`lookup(id).get` and
+  `.provenance` on `pi.pi.settings`); all five must read `["no", "overlay"]`.
+
+## Review gate (Design 8)
+
+- The built-in reviewer now runs `omp --print --no-session --approval-mode always-ask
+  --config=<lanes' overlay> --tools=read,grep,glob --max-cost=<usd> [--model=…] <prompt>`. In print
+  mode nobody can approve, so every call outside the read-only set is refused. The cost cap is the
+  lanes' `ceiling_cost`, else 2 USD.
+- With no shell, the reviewer cannot run `gh`; the hub fetches the PR (title, description, first 100
+  changed files with their patches) into a private file under `files/review/`, rechecks that the head
+  did not move, names the file in the prompt (marked as the author's text, not instructions) and
+  deletes it after the run.
+- Found on the way: 19.1.1 refuses `--tools` with an unknown name (`ls`) or a tool the session lacks
+  (`find` needs a native judge model): `Unknown tool in --tools: ls`. The look-only set
+  (`LOOK_ONLY`, OPC-46) was `read,grep,find,ls`, so a look-only lane could not start. It is now
+  `read,grep,glob`, shared by look-only lanes and the reviewer (checked by hand with `omp --print`).
+- Test: `review::tests::the_reviewer_runs_fenced` (exact argv) and
+  `review_text_lists_files_and_says_what_is_left_out`.
+
+## Tern and extra usage (Safety 7)
+
+- 19.1.1 keeps the usage-limit state (`getUsageLimitState`, the source of `get_state.usageLimit`) on
+  its session object; the extension context (`ctx`) built in the binary has no field or method for
+  it, and `omp://extensions.md` documents none. So the bridge cannot forward it, and a tern session
+  cannot be fenced before its next request the way a headless one is.
+- Instead a tern lane is refused at open, reopen and restart while the account-limits read (`omp usage
+  --json`, the existing cached reader) lists a paid limit for the lane model's provider, or cannot be
+  read. 19.1.1's Claude usage provider lists `anthropic:extra` (`scope.windowId: extra`, unit `usd`)
+  exactly while extra usage is enabled on the account; any `usd` limit (a prepaid extra balance)
+  counts too. Not verified against a live account with extra usage; the shape is read from the binary.
+  The headless runtime is unchanged and still fences on `get_state.usageLimit.extraUsage`.
+- Tests: `usage::tests::paid_extra_usage_is_told_apart_per_provider`;
+  `tests/tern.rs::a_tern_lane_is_refused_while_its_provider_reports_extra_usage` (unreadable limits,
+  then a provider with an `extra` window: both refused, nothing recorded or started).
+
+## Home backup visibility (Safety 8)
+
+- With `include_cataly`, every push first reads the push URL as configured and as git expands it
+  (`insteadOf`). Each must be a GitHub repository that `gh api repos/<owner>/<name>` reports
+  `private: true`, or a path on this machine (a local bare repository leaves nothing on GitHub).
+  Public, missing, unreadable or another host refuses the push with a `backup.push_failed` alert
+  (`refused: … is public …`), once per reason; the commit stays and the next tick checks again.
+- Setup and the job share one reader of `gh`'s answer (`backup::private`) and one repository-name
+  check (`backup::valid_repo`).
+- Tests: `backup::tests::remote_places_and_visibility_answers`; `tests/owner.rs`
+  `home_backup_setup_and_restore` keeps the GitHub URL, redirects it to a local bare repository with
+  `url.<bare>.insteadOf`, makes the fake `gh` report the repository public (push refused, nothing
+  in the bare repository), then private again (pushed).

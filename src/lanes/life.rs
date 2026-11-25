@@ -696,6 +696,7 @@ impl<R: Runtime> Lanes<R> {
         let exe = self
             .admission(&config, std::path::Path::new(&rec.cwd))
             .await?;
+        self.tern_spend(&config, &rec).await?;
         let now = now_ms();
         new_run(&mut rec, now);
         let write = LaneWrite::Save {
@@ -955,10 +956,14 @@ impl<R: Runtime> Lanes<R> {
             }
         }
         let config = self.cfg();
-        let exe = match self
+        let admitted = match self
             .admission(&config, std::path::Path::new(&rec.cwd))
             .await
         {
+            Ok(exe) => self.tern_spend(&config, &rec).await.map(|()| exe),
+            Err(e) => Err(e),
+        };
+        let exe = match admitted {
             Ok(exe) => exe,
             Err(e) => {
                 rec.lost = Some(format!("not restarted: {e}"));

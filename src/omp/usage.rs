@@ -56,6 +56,9 @@ pub(crate) struct Limit {
     /// Window length in ms (unverified field names; falls back to the label, like "5h" or "7d").
     pub(crate) window_ms: Option<i64>,
     pub(crate) fetched_ms: Option<i64>,
+    /// The limit counts money, not quota: Claude's extra usage (window `extra`) or a prepaid extra
+    /// balance (unit `usd`). OMP lists it only while the account has paid extra usage enabled.
+    pub(crate) paid: bool,
 }
 
 impl Limit {
@@ -81,6 +84,15 @@ pub(crate) struct Usage {
     /// Accounts OMP lists without usage data (count only; names are never kept).
     pub(crate) accounts_without_data: usize,
     pub(crate) disabled_credentials: usize,
+}
+
+impl Usage {
+    /// Whether an account of `provider` reports paid extra usage. omp 19.1.1's Claude usage provider
+    /// (read from its binary) lists `anthropic:extra`, `scope.windowId` `extra`, unit `usd`, exactly
+    /// while extra usage is enabled on the account.
+    pub(crate) fn extra_usage(&self, provider: &str) -> bool {
+        self.limits.iter().any(|l| l.paid && l.provider == provider)
+    }
 }
 
 fn instant_ms(v: &Value) -> Option<i64> {
@@ -200,6 +212,9 @@ pub(crate) fn parse_usage(bytes: &[u8]) -> Result<Usage, String> {
                 reset_ms,
                 window_ms,
                 fetched_ms,
+                paid: first(limit, &[&["scope", "windowId"]]).and_then(Value::as_str)
+                    == Some("extra")
+                    || first(limit, &[&["amount", "unit"]]).and_then(Value::as_str) == Some("usd"),
             });
         }
     }
@@ -382,6 +397,24 @@ pub(crate) mod tests {
         assert_eq!(u.limits[1].used_percent, Some(25.0));
         assert_eq!(u.limits[1].window_ms, Some(3_600_000));
         assert!(u.limits[1].reset_ms.is_some());
+    }
+
+    #[test]
+    fn paid_extra_usage_is_told_apart_per_provider() {
+        let text = r#"{"reports":[
+          {"provider":"anthropic","limits":[
+            {"id":"anthropic:5h","label":"5h","scope":{"provider":"anthropic","windowId":"5h"},"amount":{"used":10,"limit":100,"unit":"percent"}},
+            {"id":"anthropic:extra","label":"Claude Extra Usage","scope":{"provider":"anthropic","windowId":"extra"},"amount":{"used":3,"limit":50,"unit":"usd"}}]},
+          {"provider":"openai-codex","limits":[{"id":"w","label":"7d","amount":{"used":1,"limit":2,"unit":"percent"}}]}]}"#;
+        let u = parse_usage(text.as_bytes()).unwrap();
+        assert!(!u.limits[0].paid && u.limits[1].paid);
+        assert!(u.extra_usage("anthropic"));
+        assert!(!u.extra_usage("openai-codex"));
+        assert!(
+            !parse_usage(VERIFIED.as_bytes())
+                .unwrap()
+                .extra_usage("cyfake")
+        );
     }
 
     #[test]
