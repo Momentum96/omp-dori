@@ -932,3 +932,7 @@ CI runs 45571895529 and 45582137796 (darwin-arm64) failed three `tests/discord_r
   repository took git's default branch (`master` on the runners, `main` where it was written), so
   the clone of the pushed `main` was empty. The bare repository now starts on `main`.
 - `TestHub` prints the last 200 lines of the hub log when a test fails.
+- After the voice merge both CI jobs failed to build `audiopus_sys` 0.2.2: its bundled libopus
+  declares `cmake_minimum_required` below 3.5, which the runners' CMake 4 refuses.
+  `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` under `[env]`, so local builds and
+  CI build it the same way (CMake 3.x ignores the variable).
