@@ -252,7 +252,7 @@ impl<R: Runtime> Lanes<R> {
                 PathBuf::from(file),
                 root,
                 id,
-                PathBuf::from(&rec.cwd),
+                crate::omp::transcript::Folder::Exactly(PathBuf::from(&rec.cwd)),
             )
             .await;
             if !matches!(verified, Ok(Some(_))) {
@@ -680,7 +680,7 @@ impl<R: Runtime> Lanes<R> {
             PathBuf::from(&file),
             root,
             id.clone(),
-            PathBuf::from(&rec.cwd),
+            crate::omp::transcript::Folder::Exactly(PathBuf::from(&rec.cwd)),
         )
         .await;
         if !matches!(verified, Ok(Some(_))) {
@@ -909,7 +909,13 @@ impl<R: Runtime> Lanes<R> {
                     .with("detail", lines.join("; ")),
             );
         }
-        let resumed = self.live_map().values().filter(|s| s.alive()).count();
+        let mut resumed: Vec<String> = self
+            .live_map()
+            .iter()
+            .filter(|(_, s)| s.alive())
+            .map(|(key, _)| key.clone())
+            .collect();
+        resumed.sort();
         let _ = self.resumed.set(resumed);
         self.nudge.notify_one();
     }

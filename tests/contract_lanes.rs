@@ -339,7 +339,7 @@ fn update_resumes_the_lead_and_lanes_with_their_history() {
     let said = String::from_utf8_lossy(&out.stdout).into_owned();
     eprintln!("cataly update: {said}");
     assert!(
-        said.contains("lead와 lane 2개를 이어서 열었습니다."),
+        said.contains("lead를 이어서 열었습니다. lane 2개를 이어서 열었습니다: u-1, u-2."),
         "{said}"
     );
     let _ = old.wait();

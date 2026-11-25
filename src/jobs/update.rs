@@ -17,7 +17,7 @@ use super::event::{self, Emit, EventKind, Severity, TEXT_MAX, Template, one_line
 use super::memory::Memory;
 use crate::config::{Config, HOME_DESTINATION, Language};
 use crate::log;
-use crate::proto::Resumed;
+use crate::proto::{LeadStart, Resumed};
 use crate::store::{Apply, NewEvent};
 use crate::sys::install::Layout;
 use crate::sys::now_ms;
@@ -196,23 +196,63 @@ fn updated(previous: &str, resumed: Option<Resumed>, config: &Config) -> Option<
     Some(post(emit, &template, config))
 }
 
-/// One sentence on the sessions a hub resumed after an update, in the owner's language; empty when
-/// none came back (or it is not known yet).
+/// What the hub brought back after an update, in the owner's language: how the lead came back (a
+/// fresh lead says why) and the lanes running again by name; empty when nothing is known or there is
+/// nothing to say. A hub before 0.1.2 says only whether the lead runs and how many lanes do.
 pub(crate) fn resumed_text(language: Language, resumed: Option<Resumed>) -> String {
-    let Some(Resumed { lead, lanes }) = resumed else {
+    let Some(resumed) = resumed else {
         return String::new();
     };
-    match (language, lead, lanes) {
-        (_, false, 0) => String::new(),
-        (Language::Korean, true, 0) => "lead를 이어서 열었습니다.".into(),
-        (Language::Korean, true, n) => format!("lead와 lane {n}개를 이어서 열었습니다."),
-        (Language::Korean, false, n) => format!("lane {n}개를 이어서 열었습니다."),
-        (Language::English, true, 0) => "Resumed the lead.".into(),
-        (Language::English, true, 1) => "Resumed the lead and 1 lane.".into(),
-        (Language::English, true, n) => format!("Resumed the lead and {n} lanes."),
-        (Language::English, false, 1) => "Resumed 1 lane.".into(),
-        (Language::English, false, n) => format!("Resumed {n} lanes."),
-    }
+    let korean = language == Language::Korean;
+    let lead = match resumed.lead_start {
+        None if resumed.lead && korean => Some("lead가 실행 중입니다.".to_string()),
+        None if resumed.lead => Some("The lead is running.".to_string()),
+        None => None,
+        Some(how) => {
+            let lost = |ko: &str, en: &str| {
+                if korean {
+                    format!("lead는 이전 대화를 이어가지 못해 새로 시작했습니다({ko}).")
+                } else {
+                    format!(
+                        "The lead could not continue its earlier conversation and started fresh ({en})."
+                    )
+                }
+            };
+            Some(match (how, korean) {
+                (LeadStart::Resumed, true) => "lead를 이어서 열었습니다.".into(),
+                (LeadStart::Resumed, false) => "Resumed the lead.".into(),
+                (LeadStart::First, true) => "lead를 새로 시작했습니다(이전 대화 없음).".into(),
+                (LeadStart::First, false) => {
+                    "Started the lead fresh (no earlier conversation).".into()
+                }
+                (LeadStart::Asked, true) => "lead를 요청대로 새로 시작했습니다.".into(),
+                (LeadStart::Asked, false) => "Started the lead fresh, as asked.".into(),
+                (LeadStart::Gone, _) => lost("대화 기록 파일이 없음", "its transcript is gone"),
+                (LeadStart::Unverified, _) => lost(
+                    "대화 기록이 재개 검사를 통과하지 못함",
+                    "its transcript did not pass the resume check",
+                ),
+                (LeadStart::Ended, _) => lost(
+                    "이전 세션이 이어갈 수 없는 상태로 끝남",
+                    "the earlier session ended in a state that is not resumed",
+                ),
+                (LeadStart::NotRunning, true) => "lead는 실행 중이 아닙니다.".into(),
+                (LeadStart::NotRunning, false) => "The lead is not running.".into(),
+            })
+        }
+    };
+    let n = resumed.lanes.max(resumed.lane_names.len());
+    let names = resumed.lane_names.join(", ");
+    let lanes = match (n, names.is_empty(), korean) {
+        (0, _, _) => None,
+        (n, true, true) => Some(format!("lane {n}개를 이어서 열었습니다.")),
+        (n, false, true) => Some(format!("lane {n}개를 이어서 열었습니다: {names}.")),
+        (1, true, false) => Some("Resumed 1 lane.".into()),
+        (1, false, false) => Some(format!("Resumed 1 lane: {names}.")),
+        (n, true, false) => Some(format!("Resumed {n} lanes.")),
+        (n, false, false) => Some(format!("Resumed {n} lanes: {names}.")),
+    };
+    lead.into_iter().chain(lanes).collect::<Vec<_>>().join(" ")
 }
 
 /// The notice for `latest`, once per version, never for a silenced one or an older one (IR req. 37).
@@ -387,17 +427,35 @@ mod tests {
         let both = Some(Resumed {
             lead: true,
             lanes: 2,
+            lead_start: Some(LeadStart::Resumed),
+            lane_names: vec!["build".into(), "docs".into()],
         });
-        let event = updated(older, both, &config).unwrap();
+        let event = updated(older, both.clone(), &config).unwrap();
         assert_eq!(event.kind, "update.done");
         assert_eq!(event.destinations, [HOME_DESTINATION]);
         assert_eq!(
             event.text,
             format!(
                 "{v} 버전으로 업데이트했습니다. 보스, 감사합니다!\n{older} -> {v}\n\
-                 lead와 lane 2개를 이어서 열었습니다."
+                 lead를 이어서 열었습니다. lane 2개를 이어서 열었습니다: build, docs."
             )
         );
+        // The owner's 0.1.1 update: the lead started fresh, so the message says so and why.
+        let fresh = Some(Resumed {
+            lead: false,
+            lanes: 0,
+            lead_start: Some(LeadStart::Unverified),
+            lane_names: Vec::new(),
+        });
+        let event = updated(older, fresh, &config).unwrap();
+        assert!(
+            event.text.ends_with(
+                "\nlead는 이전 대화를 이어가지 못해 새로 시작했습니다(대화 기록이 재개 검사를 통과하지 못함)."
+            ),
+            "{}",
+            event.text
+        );
+        assert!(!event.text.contains("이어서 열었습니다"), "{}", event.text);
         let event = updated(newer, None, &config).unwrap();
         assert_eq!(event.kind, "update.rolled_back");
         assert_eq!(
@@ -408,12 +466,39 @@ mod tests {
         let english = config::parse(&format!("{DISCORD}[hub]\nlanguage = \"en\"\n")).unwrap();
         let lead = Some(Resumed {
             lead: true,
-            lanes: 0,
+            lanes: 1,
+            lead_start: Some(LeadStart::Resumed),
+            lane_names: vec!["build".into()],
         });
         let event = updated(older, lead, &english).unwrap();
         assert_eq!(
             event.text,
-            format!("Updated to {v}. Thanks, boss!\n{older} -> {v}\nResumed the lead.")
+            format!(
+                "Updated to {v}. Thanks, boss!\n{older} -> {v}\nResumed the lead. Resumed 1 lane: build."
+            )
+        );
+        assert_eq!(
+            resumed_text(
+                Language::English,
+                Some(Resumed {
+                    lead: false,
+                    lanes: 0,
+                    lead_start: Some(LeadStart::Gone),
+                    lane_names: Vec::new(),
+                })
+            ),
+            "The lead could not continue its earlier conversation and started fresh (its transcript is gone)."
+        );
+        // A 0.1.1 hub reports only that the lead runs: never claimed as resumed.
+        let old_hub = Some(Resumed {
+            lead: true,
+            lanes: 2,
+            lead_start: None,
+            lane_names: Vec::new(),
+        });
+        assert_eq!(
+            resumed_text(Language::Korean, old_hub),
+            "lead가 실행 중입니다. lane 2개를 이어서 열었습니다."
         );
         let event = updated(newer, None, &english).unwrap();
         assert!(event.text.starts_with("Rolled back to "), "{}", event.text);

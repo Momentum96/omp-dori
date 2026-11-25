@@ -132,9 +132,15 @@ impl Hub {
 
     /// The sessions brought back at start, once the lead and the lanes settled.
     fn resumed(&self) -> Option<crate::proto::Resumed> {
-        let lead = self.lead.settled()?;
-        let lanes = *self.lanes.resumed.get()?;
-        Some(crate::proto::Resumed { lead, lanes })
+        let how = self.lead.settled()?;
+        let lead_start = self.config_tx.borrow().lead.is_some().then_some(how);
+        let lane_names = self.lanes.resumed.get()?.clone();
+        Some(crate::proto::Resumed {
+            lead: lead_start == Some(crate::proto::LeadStart::Resumed),
+            lanes: lane_names.len(),
+            lead_start,
+            lane_names,
+        })
     }
 
     async fn stats(&self) -> Stats {

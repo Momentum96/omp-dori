@@ -30,7 +30,8 @@ use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 use crate::omp::Omp;
 use crate::omp::launch::Target;
-use crate::omp::transcript;
+use crate::omp::transcript::{self, Folder};
+use crate::proto::LeadStart;
 use crate::store::Store;
 use crate::store::host::{HostWrite, SessionRow, SessionUpdate};
 use crate::sys::latency::Latency;
@@ -94,13 +95,37 @@ pub(crate) struct View {
 /// How the next start goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Plan {
-    Fresh(String),
+    /// A fresh session, why (for the owner), and the reason in full (for the log).
+    Fresh(LeadStart, String),
     Resume {
         id: String,
         file: PathBuf,
         note: Option<String>,
     },
     Refuse(String),
+}
+
+/// The session a start opens, and where.
+struct Chosen {
+    target: Target,
+    /// The session ID a resume must bind.
+    expected: Option<String>,
+    note: Option<String>,
+    /// A resumed session's recorded working folder, else the default one.
+    cwd: PathBuf,
+    how: LeadStart,
+}
+
+impl Chosen {
+    fn fresh(dir: PathBuf, cwd: PathBuf, how: LeadStart) -> Self {
+        Self {
+            target: Target::Fresh(dir),
+            expected: None,
+            note: None,
+            cwd,
+            how,
+        }
+    }
 }
 
 /// The lease answer for one session ID.
@@ -141,13 +166,16 @@ pub(crate) fn plan(
         };
     }
     if fresh {
-        return Plan::Fresh("the owner asked for a fresh lead".into());
+        return Plan::Fresh(LeadStart::Asked, "the owner asked for a fresh lead".into());
     }
     let Some((row, id, file)) = resumable else {
-        return Plan::Fresh(match last {
-            None => "no earlier lead session".into(),
-            Some(_) => "the earlier lead has no transcript to resume".into(),
-        });
+        return match last {
+            None => Plan::Fresh(LeadStart::First, "no earlier lead session".into()),
+            Some(_) => Plan::Fresh(
+                LeadStart::Gone,
+                "the earlier lead has no transcript to resume".into(),
+            ),
+        };
     };
     match row.state.as_str() {
         "stopped" | "lost" => Plan::Resume {
@@ -171,7 +199,10 @@ pub(crate) fn plan(
         "starting" | "live" => Plan::Refuse(format!(
             "the earlier lead session {id} was not recovered yet"
         )),
-        other => Plan::Fresh(format!("the earlier lead ended as {other}")),
+        other => Plan::Fresh(
+            LeadStart::Ended,
+            format!("the earlier lead ended as {other}"),
+        ),
     }
 }
 
@@ -247,6 +278,8 @@ pub(crate) struct Lead<R: Runtime> {
     followers: broadcast::Sender<SessionEvent>,
     /// When the lead last read a turn start, before its followers see it (the relays' wake end).
     turn_started: Mutex<Option<Instant>>,
+    /// How the first start of this hub run went (the message after an update).
+    came: OnceLock<LeadStart>,
 }
 
 impl<R: Runtime> Lead<R> {
@@ -271,6 +304,7 @@ impl<R: Runtime> Lead<R> {
             confirm_latency: Latency::default(),
             followers: broadcast::channel(256).0,
             turn_started: Mutex::new(None),
+            came: OnceLock::new(),
         })
     }
 
@@ -511,16 +545,23 @@ impl<R: Runtime> Lead<R> {
             return Err("no [lead] section in the config".into());
         };
         let exe = self.admission(&config, &settings.model).await?;
-        let cwd = settings
+        // A new session's folder: `[lead] cwd`, else the home folder, never the hub's own.
+        let default = settings
             .cwd
             .clone()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .ok_or("no working directory: set [lead] cwd")?;
-        let cwd = std::fs::canonicalize(&cwd).map_err(|e| format!("lead cwd: {e}"))?;
+        let default = std::fs::canonicalize(&default).map_err(|e| format!("lead cwd: {e}"))?;
         let automatic = again.is_some();
-        let (target, expected, note) = match again {
-            Some((id, file)) => self.again(id, file, &cwd).await?,
-            None => self.target(&settings, fresh, &cwd).await?,
+        let Chosen {
+            target,
+            expected,
+            note,
+            cwd,
+            how,
+        } = match again {
+            Some((id, file)) => self.again(id, file, default).await?,
+            None => self.target(&settings, fresh, default).await?,
         };
         self.overlay(&config)?;
         let kind = match &expected {
@@ -590,8 +631,7 @@ impl<R: Runtime> Lead<R> {
         };
         match runtime.start(spec).await {
             Ok((session, started)) => {
-                self.bound(handle, session, &started, expected.is_some(), note)
-                    .await;
+                self.bound(handle, session, &started, how, note).await;
                 Ok(self.view().await)
             }
             Err(e) => Err(self.not_started(handle, &e, automatic).await),
@@ -603,8 +643,8 @@ impl<R: Runtime> Lead<R> {
         &self,
         settings: &crate::config::session::LeadSettings,
         fresh: bool,
-        cwd: &Path,
-    ) -> Result<(Target, Option<String>, Option<String>), String> {
+        default: PathBuf,
+    ) -> Result<Chosen, String> {
         let last = self
             .env
             .store
@@ -634,17 +674,31 @@ impl<R: Runtime> Lead<R> {
                 );
                 Err(reason)
             }
-            Plan::Fresh(reason) => {
+            Plan::Fresh(how, reason) => {
                 log::info("lead starts fresh", &[("reason", &reason)]);
-                Ok((Target::Fresh(dir), None, None))
+                Ok(Chosen::fresh(dir, default, how))
             }
             Plan::Resume { id, file, note } => {
-                let verified =
-                    transcript::verify(file.clone(), dir.clone(), id.clone(), cwd.to_path_buf())
-                        .await;
-                if matches!(verified, Ok(Some(_))) {
-                    return Ok((Target::Resume(file), Some(id), note));
-                }
+                let verified = transcript::verify(
+                    file.clone(),
+                    dir.clone(),
+                    id.clone(),
+                    Folder::Recorded(default.clone()),
+                )
+                .await;
+                let detail = match verified {
+                    Ok(Some(saved)) => {
+                        return Ok(Chosen {
+                            target: Target::Resume(file),
+                            expected: Some(id),
+                            note,
+                            cwd: saved.cwd,
+                            how: LeadStart::Resumed,
+                        });
+                    }
+                    Ok(None) => "a check refused it".to_string(),
+                    Err(e) => e.to_string(),
+                };
                 let reason = format!(
                     "the transcript of lead session {id} did not verify for an exact resume"
                 );
@@ -652,8 +706,11 @@ impl<R: Runtime> Lead<R> {
                     self.set_phase(Phase::Held, Some(reason.clone()));
                     return Err(reason);
                 }
-                log::warn("lead starts fresh", &[("reason", &reason)]);
-                Ok((Target::Fresh(dir), None, None))
+                log::warn(
+                    "lead starts fresh",
+                    &[("reason", &reason), ("detail", &detail)],
+                );
+                Ok(Chosen::fresh(dir, default, LeadStart::Unverified))
             }
         }
     }
@@ -664,7 +721,7 @@ impl<R: Runtime> Lead<R> {
         handle: String,
         session: Arc<R::Session>,
         started: &super::Started,
-        resumed: bool,
+        how: LeadStart,
         note: Option<String>,
     ) {
         self.update(SessionUpdate {
@@ -677,6 +734,7 @@ impl<R: Runtime> Lead<R> {
             stop: None,
         })
         .await;
+        let _ = self.came.set(how);
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
         self.closing.store(false, Ordering::Release);
         self.set_phase(Phase::Live, started.held.clone());
@@ -691,7 +749,14 @@ impl<R: Runtime> Lead<R> {
             Emit::new(EventKind::LeadStarted, Severity::Info, false, "lead")
                 .with("session", &started.session_id)
                 .with("model", started.model.as_deref().unwrap_or("unknown"))
-                .with("how", if resumed { "resumed" } else { "fresh" }),
+                .with(
+                    "how",
+                    if how == LeadStart::Resumed {
+                        "resumed"
+                    } else {
+                        "fresh"
+                    },
+                ),
         );
         if let Some(reason) = &started.held {
             self.emit(
@@ -743,19 +808,16 @@ impl<R: Runtime> Lead<R> {
     }
 
     /// The target of an automatic restart: exactly the session that exited (HOST req. 81).
-    async fn again(
-        &self,
-        id: String,
-        file: PathBuf,
-        cwd: &Path,
-    ) -> Result<(Target, Option<String>, Option<String>), String> {
+    async fn again(&self, id: String, file: PathBuf, default: PathBuf) -> Result<Chosen, String> {
         let dir = self.env.state_dir.join("sessions").join("lead");
-        match transcript::verify(file.clone(), dir, id.clone(), cwd.to_path_buf()).await {
-            Ok(Some(_)) => Ok((
-                Target::Resume(file),
-                Some(id),
-                Some("resumed after its OMP process exited by itself".into()),
-            )),
+        match transcript::verify(file.clone(), dir, id.clone(), Folder::Recorded(default)).await {
+            Ok(Some(saved)) => Ok(Chosen {
+                target: Target::Resume(file),
+                expected: Some(id),
+                note: Some("resumed after its OMP process exited by itself".into()),
+                cwd: saved.cwd,
+                how: LeadStart::Resumed,
+            }),
             _ => Err(format!(
                 "the transcript of lead session {id} did not verify for an exact resume"
             )),
@@ -1238,14 +1300,14 @@ impl<R: Runtime> Lead<R> {
         self.current().map(|s| s.snapshot())
     }
 
-    /// After start-up recovery and the automatic start: whether the lead runs. `None` while it may
-    /// still come up.
-    pub(crate) fn settled(&self) -> Option<bool> {
-        if self.snapshot().is_some() {
-            return Some(true);
+    /// After start-up recovery and the automatic start: how the lead came back in this hub run.
+    /// `None` while it may still come up.
+    pub(crate) fn settled(&self) -> Option<LeadStart> {
+        if let Some(how) = self.came.get() {
+            return Some(*how);
         }
         let coming = self.wants_autostart() || matches!(self.phase().0, Phase::Starting);
-        (self.recovered.load(Ordering::Acquire) && !coming).then_some(false)
+        (self.recovered.load(Ordering::Acquire) && !coming).then_some(LeadStart::NotRunning)
     }
 
     pub(crate) async fn view(&self) -> View {
@@ -1432,7 +1494,7 @@ mod tests {
         };
         assert!(matches!(
             plan(None, None, false, Lease::Free),
-            Plan::Fresh(_)
+            Plan::Fresh(LeadStart::First, _)
         ));
         let clean = row("stopped", Some("clean"), Some(&file));
         assert_eq!(
@@ -1441,7 +1503,7 @@ mod tests {
         );
         assert!(matches!(
             plan(Some(&clean), None, true, Lease::Unknown),
-            Plan::Fresh(_)
+            Plan::Fresh(LeadStart::Asked, _)
         ));
         let crashed = row("stopped", Some("exited"), Some(&file));
         assert_eq!(
@@ -1469,7 +1531,7 @@ mod tests {
         let gone = row("stopped", Some("clean"), Some(&dir.join("missing.jsonl")));
         assert!(matches!(
             plan(Some(&gone), None, false, Lease::Free),
-            Plan::Fresh(_)
+            Plan::Fresh(LeadStart::Gone, _)
         ));
         assert_eq!(
             plan(Some(&clean), Some("s1"), true, Lease::Free),

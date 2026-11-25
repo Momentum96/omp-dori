@@ -5,7 +5,8 @@
 //! Cases: prompt with `prompt_result` and `session_settled` and the delivery marker in the session
 //! file; follow-up; steer; abort; an approval dialog answered Deny; resume identity; lease. Then the
 //! hub end to end: the lead starts, a message is written and confirmed from the session file, the
-//! lead stops cleanly and resumes its session after a hub restart (acceptance check 12), and the
+//! lead stops cleanly and resumes its session after a hub restart (acceptance check 12), also in the
+//! folder its session recorded after the default folder changed, and the
 //! fallback chain moves a usage-limited lead to the backup model (acceptance check 9). The bridge
 //! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead. The lead's
 //! tool works as a direct call and as a `bash` tool command; the CLI and `eval` stay refused.
@@ -342,13 +343,18 @@ fn lead_hub(sandbox: &Sandbox, model: &str, extra: &str) -> TestHub {
     let mut hub = TestHub::new("");
     hub.env
         .push(("PI_CODING_AGENT_DIR".into(), sandbox.root.join("agent")));
-    hub.write_config(&format!(
-        "[omp]\npath = \"{}\"\n[sessions]\nextra_flags = [\"--no-skills\", \"--no-rules\", \"--no-context-files\"]\n\
-         [lead]\nmodel = \"{model}\"\ncwd = \"{}\"\n{extra}",
-        installed_omp().display(),
-        sandbox.root.join("work").display()
-    ));
+    hub.write_config(&lead_config(model, Some(&sandbox.root.join("work")), extra));
     hub
+}
+
+/// The lead's config with stock OMP; without `cwd` the lead's default folder is the hub's home.
+fn lead_config(model: &str, cwd: Option<&Path>, extra: &str) -> String {
+    let cwd = cwd.map_or_else(String::new, |c| format!("cwd = \"{}\"\n", c.display()));
+    format!(
+        "[omp]\npath = \"{}\"\n[sessions]\nextra_flags = [\"--no-skills\", \"--no-rules\", \"--no-context-files\"]\n\
+         [lead]\nmodel = \"{model}\"\n{cwd}{extra}",
+        installed_omp().display(),
+    )
 }
 
 fn wait_lead(hub: &TestHub, pred: impl Fn(&Value) -> bool) -> Value {
@@ -508,6 +514,83 @@ fn lead_end_to_end_and_resume() {
     );
     let refused = hub.cli(&["lead", "start"]);
     assert!(!refused.status.success());
+    assert!(hub.stop().success());
+}
+
+/// The newest request body the fake model received whose text contains `marker`, as JSON text.
+fn body_with(model: &FakeModel, marker: &str) -> Option<String> {
+    model
+        .bodies()
+        .iter()
+        .rev()
+        .map(Value::to_string)
+        .find(|b| b.contains(marker))
+}
+
+/// The owner's 0.1.1 update with stock OMP: a lead started in another folder than today's default,
+/// with OMP's per-session folder holding a subagent transcript next to its session file, resumes the
+/// same session in its recorded folder after a hub restart, its next request carries the earlier
+/// turn, and the hub reports it resumed.
+#[test]
+fn lead_resumes_in_its_recorded_folder_after_the_default_changed() {
+    if !enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new("lead-folder");
+    let mut hub = lead_hub(&sandbox, "fake/primary", "");
+    hub.start();
+    let live = wait_lead(&hub, |v| v["phase"] == "live");
+    assert!(
+        hub.cli(&["lead", "send", "remember OSPREY-1"])
+            .status
+            .success()
+    );
+    wait_lead(&hub, |v| {
+        v["sent"] == 0
+            && v["waiting"] == 0
+            && v["session"]["status"] == "idle"
+            && body_with(&sandbox.model, "OSPREY-1").is_some()
+    });
+    let file = PathBuf::from(live["session"]["session_file"].as_str().unwrap());
+    assert!(hub.stop().success());
+
+    // OMP's per-session folder with a subagent transcript, and a new default folder (the home).
+    let artifacts = file.with_extension("");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(
+        artifacts.join("Scout.jsonl"),
+        json!({"type": "session", "version": 3, "id": "sub", "cwd": sandbox.root.join("work")})
+            .to_string()
+            + "\n",
+    )
+    .unwrap();
+    hub.write_config(&lead_config("fake/primary", None, ""));
+    hub.start();
+    let again = wait_lead(&hub, |v| v["phase"] == "live");
+    for field in ["session_id", "session_file"] {
+        assert_eq!(again["session"][field], live["session"][field], "{again}");
+    }
+    assert_eq!(
+        again["session"]["cwd"].as_str().map(PathBuf::from),
+        Some(std::fs::canonicalize(sandbox.root.join("work")).unwrap()),
+        "{again}"
+    );
+    let resumed = hub.until(Duration::from_secs(60), || {
+        let r = hub.json(&["status", "--json"])["resumed"].clone();
+        r.is_object().then_some(r)
+    });
+    assert_eq!(resumed["lead_start"], "resumed", "{resumed}");
+    assert_eq!(resumed["lead"], true, "{resumed}");
+
+    assert!(
+        hub.cli(&["lead", "send", "and now OSPREY-2"])
+            .status
+            .success()
+    );
+    let next = hub.until(Duration::from_secs(60), || {
+        body_with(&sandbox.model, "OSPREY-2")
+    });
+    assert!(next.contains("OSPREY-1"), "the lead's history: {next}");
     assert!(hub.stop().success());
 }
 

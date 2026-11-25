@@ -137,8 +137,8 @@ pub(crate) struct Lanes<R: Runtime> {
     pub(crate) slots: Arc<slots::Slots>,
     /// One planner pass at a time (COORD req. 35).
     planning: AsyncMutex<()>,
-    /// Lanes live once start-up recovery finished (DESIGN decision 9); unset before.
-    pub(crate) resumed: OnceLock<usize>,
+    /// The lanes live once start-up recovery finished, by name (DESIGN decision 9); unset before.
+    pub(crate) resumed: OnceLock<Vec<String>>,
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {

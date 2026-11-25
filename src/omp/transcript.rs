@@ -67,6 +67,18 @@ type Result<T, E = TranscriptError> = std::result::Result<T, E>;
 pub(crate) struct Transcript {
     /// The model OMP restores on resume (`provider/id`), when the file names one.
     pub(crate) model: Option<String>,
+    /// The real working folder the header records; a resume runs there.
+    pub(crate) cwd: PathBuf,
+}
+
+/// The working folder a saved session may resume in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Folder {
+    /// Exactly this real folder (a lane's recorded worktree).
+    Exactly(PathBuf),
+    /// The folder the session recorded: this real default, or another real folder the user owns. OMP
+    /// resumes a session in the folder its header records, so a changed default never blocks a resume.
+    Recorded(PathBuf),
 }
 
 /// The session ID in an OMP session file name `<stamp>Z_<uuid>.jsonl`.
@@ -236,11 +248,13 @@ fn strictly_inside(root: &Path, file: &Path) -> bool {
 }
 
 /// Verifies a saved session file for an exact resume (HOST req. 9-10). `Ok(None)` is "not verified".
+/// Entries next to the file that are not session files (OMP's per-session artifact folder, its lock
+/// files) are not looked at.
 pub(crate) fn exact(
     path: &Path,
     root: &Path,
     session: &str,
-    cwd: &Path,
+    folder: &Folder,
 ) -> Result<Option<Transcript>> {
     let name = path
         .file_name()
@@ -289,15 +303,23 @@ pub(crate) fn exact(
         return Ok(None);
     };
     let header_cwd = head.get("cwd").and_then(Value::as_str).map(Path::new);
-    if head.get("id").and_then(Value::as_str) != Some(session)
-        || !header_cwd.is_some_and(Path::is_absolute)
-        || header_cwd.map(real).transpose()?.as_deref() != Some(cwd)
-    {
+    let Some(recorded) = header_cwd.filter(|c| c.is_absolute()) else {
+        return Ok(None);
+    };
+    let recorded = real(recorded)?;
+    let allowed = match folder {
+        Folder::Exactly(cwd) => recorded == *cwd,
+        Folder::Recorded(default) => {
+            recorded == *default
+                || fs::metadata(&recorded).is_ok_and(|m| m.is_dir() && m.uid() == uid)
+        }
+    };
+    if head.get("id").and_then(Value::as_str) != Some(session) || !allowed {
         return Ok(None);
     }
     // Only generated sibling headers can redirect OMP's resume target.
-    let folder = file.parent().unwrap_or(root.as_path());
-    for sibling in fs::read_dir(folder)? {
+    let dir = file.parent().unwrap_or(root.as_path());
+    for sibling in fs::read_dir(dir)? {
         let sibling = sibling?;
         let sibling_name = sibling.file_name();
         let Some(sibling_name) = sibling_name.to_str() else {
@@ -318,11 +340,12 @@ pub(crate) fn exact(
         }
     }
     handle.seek(SeekFrom::Start(0))?;
-    read_branch(handle)
+    read_branch(handle, recorded)
 }
 
-/// Reads every entry for the saved model; `None` when the transcript departed or holds a non-object line.
-fn read_branch(handle: File) -> Result<Option<Transcript>> {
+/// Reads every entry for the saved model; `None` when the transcript departed or holds a non-object
+/// line.
+fn read_branch(handle: File, cwd: PathBuf) -> Result<Option<Transcript>> {
     let mut reader = BufReader::new(handle);
     let mut entries: HashMap<String, BranchEntry> = HashMap::new();
     let mut leaf: Option<String> = None;
@@ -379,6 +402,7 @@ fn read_branch(handle: File) -> Result<Option<Transcript>> {
     };
     Ok(Some(Transcript {
         model: saved_model(&entries, start),
+        cwd,
     }))
 }
 
@@ -688,9 +712,9 @@ pub(crate) async fn verify(
     path: PathBuf,
     root: PathBuf,
     session: String,
-    cwd: PathBuf,
+    folder: Folder,
 ) -> Result<Option<Transcript>> {
-    tokio::task::spawn_blocking(move || exact(&path, &root, &session, &cwd))
+    tokio::task::spawn_blocking(move || exact(&path, &root, &session, &folder))
         .await
         .map_err(|e| TranscriptError::Io(format!("verify task: {e}")))?
 }
@@ -1001,6 +1025,85 @@ mod tests {
         let string_content = serde_json::json!({"type": "message", "message": {"role": "user", "content": "[cataly:ccc] x"}});
         fs::write(&path, format!("{string_content}\n")).unwrap();
         assert_eq!(find_marker(&path, "[cataly:ccc]").unwrap(), Found::Yes);
+    }
+
+    /// The owner's layout after a 0.1.0 lead: a title line first, the header cwd `<home>/tmp` while the
+    /// default is now `<home>`, OMP's per-session folder (with a subagent transcript) and lock file next
+    /// to the file, mode 0664 under 0700 parents. The lead resumes in its recorded folder; a lane
+    /// still needs its exact folder; a foreign recorded folder and a redirecting sibling still refuse.
+    #[test]
+    fn a_session_resumes_in_its_recorded_folder_beside_omps_session_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::sys::fs::tests::scratch("owner-layout");
+        let home = base.join("home");
+        let work = home.join("tmp");
+        let state = home.join("state/cataly");
+        let root = state.join("sessions/lead");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        for dir in [state.clone(), state.join("sessions"), root.clone()] {
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let id = "01a21383-7906-7055-a149-9cb73150b636";
+        let stem = format!("2026-11-25T16-21-53-030Z_{id}");
+        let file = root.join(format!("{stem}.jsonl"));
+        let write = |cwd: &Path| {
+            let lines = [
+                serde_json::json!({"type": "title", "title": "lead"}),
+                serde_json::json!({"type": "session", "version": 3, "id": id, "timestamp": "2026-11-25T16:21:53.030Z", "cwd": cwd}),
+                serde_json::json!({"type": "model_change", "id": "m1", "parentId": null, "model": "anthropic/claude-opus-5-5"}),
+            ];
+            fs::write(&file, lines.map(|l| l.to_string() + "\n").concat()).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o664)).unwrap();
+        };
+        write(&work);
+        let artifacts = root.join(&stem);
+        fs::create_dir(&artifacts).unwrap();
+        fs::set_permissions(&artifacts, fs::Permissions::from_mode(0o775)).unwrap();
+        fs::write(
+            artifacts.join("Scout.jsonl"),
+            serde_json::json!({"type": "session", "id": "sub", "cwd": work}).to_string() + "\n",
+        )
+        .unwrap();
+        fs::write(root.join(format!(".{stem}.jsonl.lock.os")), "").unwrap();
+        let home = fs::canonicalize(&home).unwrap();
+        let work = fs::canonicalize(&work).unwrap();
+
+        let resumed = exact(&file, &root, id, &Folder::Recorded(home.clone())).unwrap();
+        assert_eq!(
+            resumed,
+            Some(Transcript {
+                model: Some("anthropic/claude-opus-5-5".into()),
+                cwd: work.clone(),
+            })
+        );
+        let lane = |cwd: &Path| exact(&file, &root, id, &Folder::Exactly(cwd.to_path_buf()));
+        assert_eq!(lane(&home).unwrap(), None, "a lane keeps its exact folder");
+        assert!(lane(&work).unwrap().is_some());
+
+        if rustix::process::getuid().as_raw() != 0 {
+            write(Path::new("/"));
+            assert_eq!(
+                exact(&file, &root, id, &Folder::Recorded(home.clone())).unwrap(),
+                None,
+                "a recorded folder another user owns"
+            );
+            write(&work);
+        }
+        let other =
+            root.join("2026-11-25T17-00-00-000Z_0b9e7c1a-1111-4222-8333-444455556666.jsonl");
+        fs::write(
+            &other,
+            serde_json::json!({"type": "session", "id": "x", "cwd": work, "continuationOf": id})
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            exact(&file, &root, id, &Folder::Recorded(home)).unwrap(),
+            None,
+            "a sibling continuing the session redirects the resume"
+        );
     }
 
     #[test]

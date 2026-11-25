@@ -215,7 +215,7 @@ Present means the hub keeps one standing lead session. Absent means no lead.
 |---|---|---|---|---|
 | `model` | string | **required** | `provider/id` | The lead's model. |
 | `thinking` | string | OMP's default | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto` | Thinking level. |
-| `cwd` | string | your home folder | absolute path | Working folder of the lead. |
+| `cwd` | string | your home folder | absolute path | Working folder of a new lead session. A resumed lead keeps the folder its session recorded (a real folder you own), even when this setting or the default changed since. |
 | `session_id` | string | none | any non-blank | The lead resumes exactly this OMP session. |
 | `instructions` | string | none | absolute path to an owner-only file | Role instructions appended to the lead's system prompt. |
 | `autostart` | boolean | `true` | | Start the lead when the hub starts. |
@@ -588,8 +588,9 @@ A new version is out, boss. Run `cataly update` in a terminal.
 {current} -> {latest} {url}
 ```
 
-After an update and after a rollback (`{sessions}` is a sentence such as `lead와 lane 2개를 이어서
-열었습니다.`, or nothing):
+After an update and after a rollback (`{sessions}` says how the lead came back and which lanes run
+again, such as `lead를 이어서 열었습니다. lane 2개를 이어서 열었습니다: a, b.`; a lead that started
+fresh says so and why, such as `lead는 이전 대화를 이어가지 못해 새로 시작했습니다(...)`; or nothing):
 
 ```text
 {latest} 버전으로 업데이트했습니다. 보스, 감사합니다!

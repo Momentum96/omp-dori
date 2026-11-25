@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The lead resumes after an update or restart even when its session was started in another folder
+  than today's default: it reopens in the folder its session recorded. OMP's per-session folder
+  next to the session file never blocks a resume.
+- The message after an update and the `cataly update` line say how the lead came back: resumed, or
+  started fresh with the reason. Lanes that run again are named.
+
 ## 0.1.1 (2026-11-26)
 
 - One-command setup: `cataly setup` runs the whole first run (owner-only folders, the Discord

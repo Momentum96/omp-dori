@@ -237,11 +237,38 @@ pub(crate) struct Status {
     pub(crate) resumed: Option<Resumed>,
 }
 
-/// The sessions a hub brought back at start: the lead and how many lanes run again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The sessions a hub brought back at start. `lead` and `lanes` keep the shape a 0.1.1 `cataly update`
+/// reads from the new hub's status; `lead` is true only when the lead resumed its earlier session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Resumed {
     pub(crate) lead: bool,
     pub(crate) lanes: usize,
+    /// How the lead came back; `None` when the config has no `[lead]`.
+    #[serde(default)]
+    pub(crate) lead_start: Option<LeadStart>,
+    /// The lanes running again, by name.
+    #[serde(default)]
+    pub(crate) lane_names: Vec<String>,
+}
+
+/// How the lead came back when the hub started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LeadStart {
+    /// It resumed its earlier session.
+    Resumed,
+    /// Fresh: there was no earlier lead session.
+    First,
+    /// Fresh: the owner asked for a fresh lead.
+    Asked,
+    /// Fresh: the earlier session's transcript is gone.
+    Gone,
+    /// Fresh: the earlier transcript did not pass the resume check.
+    Unverified,
+    /// Fresh: the earlier session ended in a state that is not resumed.
+    Ended,
+    /// It is not running.
+    NotRunning,
 }
 
 /// `stats` reply.
