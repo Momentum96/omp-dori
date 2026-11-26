@@ -51,8 +51,47 @@ struct GateState {
     lifted_until_ms: Option<i64>,
 }
 
-/// Why the quota gate holds a new session on a model (`provider/id`) now, if it does.
-pub(crate) type QuotaHold = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// Why the quota gate holds a new session on a model (`provider/id`) now, if it does. Only new
+/// sessions ask: resuming an existing session (the lead's last one, a lane's) never waits.
+pub(crate) type QuotaHold = std::sync::Arc<dyn Fn(&str) -> Option<Held> + Send + Sync>;
+
+/// The gate holding new sessions on a model's provider: the limits at the hold level, each with
+/// the time it releases the gate at the latest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Held {
+    /// The provider, or every held provider for a model without one.
+    pub(crate) provider: String,
+    pub(crate) causes: Vec<Cause>,
+}
+
+impl Held {
+    /// The limits and their reset times: `limit until instant`, comma-separated.
+    pub(crate) fn limits_text(&self) -> String {
+        self.causes
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} until {}",
+                    c.limit,
+                    crate::jobs::instant_text(c.release_ms)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl std::fmt::Display for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the quota gate holds new sessions on {} ({} at the hold level); \
+             `cataly quota lift` lifts it",
+            self.provider,
+            self.limits_text()
+        )
+    }
+}
 
 /// The gate as `cataly quota` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,15 +118,23 @@ impl GateView {
         }
     }
 
-    /// Why a start on `model` waits, if it must.
-    pub(crate) fn hold_reason(&self, model: &str) -> Option<String> {
-        self.holds(model).then(|| {
-            let provider = model.split_once('/').map_or(model, |(p, _)| p);
-            format!(
-                "the quota gate holds new sessions on {provider} (limits at the hold level); \
-                 `cataly quota lift` lifts it"
-            )
-        })
+    /// Why a new session on `model` waits, if it must.
+    pub(crate) fn hold(&self, model: &str) -> Option<Held> {
+        if !self.holds(model) {
+            return None;
+        }
+        let (provider, causes) = match model.split_once('/') {
+            Some((provider, _)) if !provider.is_empty() => (
+                provider.to_string(),
+                self.causes
+                    .iter()
+                    .filter(|c| c.provider() == provider)
+                    .cloned()
+                    .collect(),
+            ),
+            _ => (self.providers.join(", "), self.causes.clone()),
+        };
+        Some(Held { provider, causes })
     }
 }
 
@@ -343,9 +390,18 @@ mod tests {
         let view = gate.view(10);
         assert_eq!(view.providers, ["devin", "openai-codex"]);
         assert!(view.holds("openai-codex/gpt-5"));
+        let held = view.hold("devin/swe").unwrap();
+        assert_eq!(
+            held.causes,
+            [cause("devin#1/weekly")],
+            "its own limits only"
+        );
+        let text = held.to_string();
         assert!(
-            view.hold_reason("devin/swe")
-                .is_some_and(|w| w.contains("devin"))
+            text.contains("on devin")
+                && text.contains("devin#1/weekly until 1970-01-01T00:00:01Z")
+                && text.contains("`cataly quota lift`"),
+            "{text}"
         );
         assert!(
             !view.holds("anthropic/claude-opus-5-5"),

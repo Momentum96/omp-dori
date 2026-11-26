@@ -1,6 +1,6 @@
-//! The standing lead (COORD-01, COORD-02, HOST-26, HOST-28, HOST-29): one session the hub starts when
-//! the quota gate allows, with its resume rules, crash recovery, the session cap and memory admission,
-//! and the API other parts use to reach it:
+//! The standing lead (COORD-01, COORD-02, HOST-26, HOST-28, HOST-29): one session the hub starts,
+//! with its resume rules, crash recovery, the session cap, memory admission and the quota gate (a
+//! fresh session only: a resume never waits for it), and the API other parts use to reach it:
 //!
 //! - [`Lead::deliver`] stores a message in the lead's inbox and delivers it when the lead can read;
 //!   it returns a [`Receipt`] (slice 2b hands owner messages over with it, 2c urgent events).
@@ -27,6 +27,7 @@ use super::{Control, Role, Runtime, SessionEvent, Snapshot, StartError, StartSpe
 use crate::config::Config;
 use crate::config::session::RuntimeKind;
 use crate::jobs::event::{Emit, EventKind, Severity};
+use crate::jobs::owner::quota::{Held, QuotaHold};
 use crate::log;
 use crate::omp::Omp;
 use crate::omp::launch::Target;
@@ -56,8 +57,9 @@ pub(crate) type Events = Arc<dyn Fn(Emit) + Send + Sync>;
 pub(crate) struct Env<R: Runtime> {
     pub(crate) config: watch::Receiver<Arc<Config>>,
     pub(crate) omp: Arc<Omp>,
-    /// Why the quota gate holds a new session on this model now, if it does (OJ-08).
-    pub(crate) quota_hold: crate::jobs::owner::quota::QuotaHold,
+    /// Why the quota gate holds a new session on this model now, if it does (OJ-08). Asked for a
+    /// fresh lead only; a resume of the last session never waits on it.
+    pub(crate) quota_hold: QuotaHold,
     /// Whether the bridge link in OMP's extension folder is current (DESIGN 4.2, 12.2 C19).
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     pub(crate) events: Events,
@@ -83,6 +85,9 @@ pub(crate) enum Phase {
 pub(crate) struct View {
     pub(crate) phase: Phase,
     pub(crate) reason: Option<String>,
+    /// The quota gate holds the lead's new session; `reason` says it in words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quota: Option<Held>,
     pub(crate) session: Option<Snapshot>,
     /// Pending entries that start a turn (urgent or the owner's).
     pub(crate) waiting: usize,
@@ -280,6 +285,9 @@ pub(crate) struct Lead<R: Runtime> {
     turn_started: Mutex<Option<Instant>>,
     /// How the first start of this hub run went (the message after an update).
     came: OnceLock<LeadStart>,
+    /// The quota gate holds the lead's new session: set with the not-started phase it explains,
+    /// cleared by any other phase change.
+    quota: Mutex<Option<Held>>,
 }
 
 impl<R: Runtime> Lead<R> {
@@ -305,6 +313,7 @@ impl<R: Runtime> Lead<R> {
             followers: broadcast::channel(256).0,
             turn_started: Mutex::new(None),
             came: OnceLock::new(),
+            quota: Mutex::new(None),
         })
     }
 
@@ -326,6 +335,40 @@ impl<R: Runtime> Lead<R> {
 
     fn set_phase(&self, phase: Phase, reason: Option<String>) {
         *self.phase() = (phase, reason);
+        *self.quota_hold() = None;
+    }
+
+    fn quota_hold(&self) -> MutexGuard<'_, Option<Held>> {
+        self.quota.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The quota gate holds the lead's new session: the phase stays (an automatic start keeps
+    /// waiting, a stopped lead stays stopped) with the hold as its reason, said once per change.
+    fn held_by_quota(&self, held: Held) -> String {
+        let reason = held.to_string();
+        let same = self.quota_hold().as_ref() == Some(&held);
+        self.phase().1 = Some(reason.clone());
+        *self.quota_hold() = Some(held);
+        if !same {
+            self.emit(
+                Emit::new(EventKind::LeadNotStarted, Severity::Warning, true, "lead")
+                    .with("reason", &reason),
+            );
+        }
+        reason
+    }
+
+    /// The quota gate's hold on the lead's new session, while it keeps the lead from starting.
+    pub(crate) fn quota_held(&self) -> Option<Held> {
+        self.quota_hold().clone()
+    }
+
+    /// Why the lead is not running, while no session runs and the hub recorded a reason.
+    pub(crate) fn refusal(&self) -> Option<String> {
+        if self.current().is_some_and(|s| s.alive()) {
+            return None;
+        }
+        self.phase().1.clone()
     }
 
     fn restarts(&self) -> MutexGuard<'_, Restarts> {
@@ -477,8 +520,9 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
-    /// Why a start must wait now, if it must (HOST req. 89-90; OJ-08; DESIGN 3.4).
-    async fn admission(&self, config: &Config, model: &str) -> Result<PathBuf, String> {
+    /// Why a start must wait now, if it must (HOST req. 89-90; DESIGN 3.4). The quota gate is asked
+    /// in [`Lead::launch`] once the target is known: it holds new sessions only (OJ-08).
+    async fn admission(&self, config: &Config) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -486,9 +530,6 @@ impl<R: Runtime> Lead<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if let Some(why) = (self.env.quota_hold)(model) {
-            return Err(why);
-        }
         (self.env.bridge_link)()?;
         let live = usize::from(self.current().is_some_and(|s| s.alive()));
         if live >= usize::try_from(config.sessions.cap).unwrap_or(usize::MAX) {
@@ -544,7 +585,7 @@ impl<R: Runtime> Lead<R> {
         let Some(settings) = config.lead.clone() else {
             return Err("no [lead] section in the config".into());
         };
-        let exe = self.admission(&config, &settings.model).await?;
+        let exe = self.admission(&config).await?;
         // A new session's folder: `[lead] cwd`, else the home folder, never the hub's own.
         let default = settings
             .cwd
@@ -675,6 +716,7 @@ impl<R: Runtime> Lead<R> {
                 Err(reason)
             }
             Plan::Fresh(how, reason) => {
+                self.admit_new(&settings.model)?;
                 log::info("lead starts fresh", &[("reason", &reason)]);
                 Ok(Chosen::fresh(dir, default, how))
             }
@@ -706,12 +748,22 @@ impl<R: Runtime> Lead<R> {
                     self.set_phase(Phase::Held, Some(reason.clone()));
                     return Err(reason);
                 }
+                self.admit_new(&settings.model)?;
                 log::warn(
                     "lead starts fresh",
                     &[("reason", &reason), ("detail", &detail)],
                 );
                 Ok(Chosen::fresh(dir, default, LeadStart::Unverified))
             }
+        }
+    }
+
+    /// The quota gate holds new sessions only (OJ-08): every fresh lead start asks it, a resume of
+    /// the lead's last session never does.
+    fn admit_new(&self, model: &str) -> Result<(), String> {
+        match (self.env.quota_hold)(model) {
+            Some(held) => Err(self.held_by_quota(held)),
+            None => Ok(()),
         }
     }
 
@@ -1302,11 +1354,17 @@ impl<R: Runtime> Lead<R> {
 
     /// After start-up recovery and the automatic start: how the lead came back in this hub run.
     /// `None` while it may still come up.
+    /// An automatic start the hub refused (the quota gate, memory admission, ...) settles it too:
+    /// the lead is not running, and the reason says why.
     pub(crate) fn settled(&self) -> Option<LeadStart> {
         if let Some(how) = self.came.get() {
             return Some(*how);
         }
-        let coming = self.wants_autostart() || matches!(self.phase().0, Phase::Starting);
+        let (refused, starting) = {
+            let phase = self.phase();
+            (phase.1.is_some(), matches!(phase.0, Phase::Starting))
+        };
+        let coming = (self.wants_autostart() && !refused) || starting;
         (self.recovered.load(Ordering::Acquire) && !coming).then_some(LeadStart::NotRunning)
     }
 
@@ -1323,6 +1381,7 @@ impl<R: Runtime> Lead<R> {
         View {
             phase,
             reason,
+            quota: self.quota_held(),
             session: self.current().map(|s| (*s.snapshot()).clone()),
             waiting: pending(true),
             notes: pending(false),

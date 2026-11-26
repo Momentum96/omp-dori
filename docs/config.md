@@ -803,9 +803,14 @@ Events: `pr.baseline` (`pr`, `title`, `state`), `pr.feedback` (`pr`, `author`, `
 
 Warns once when a provider limit rises past an alert level. While a watched limit is at or above
 `hold`, the quota gate holds new session starts on that limit's provider; a session whose model
-(`provider/id`) belongs to another provider starts as usual. The gate opens when fresh data shows
-the limits below, or when every limit that closed it has passed its reset time. `cataly status` and
-`cataly quota` name the held providers; `cataly quota lift` opens the gate by hand.
+(`provider/id`) belongs to another provider starts as usual. Only new sessions wait: resuming an
+existing session (the lead's last session after a hub restart, `cataly update`, `cataly rollback`
+or `cataly lead start`, and parked or live lanes) goes ahead. A fresh lead (`cataly lead start
+--fresh`, or a first lead with no session yet) and new lanes wait; `cataly lead status`, the ops
+panel and the update message then name the provider, the limits with their reset times and
+`cataly quota lift`. The gate opens when fresh data shows the limits below, or when every limit
+that closed it has passed its reset time. `cataly status` and `cataly quota` name the held
+providers; `cataly quota lift` opens the gate by hand.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|

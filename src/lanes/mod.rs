@@ -339,8 +339,15 @@ impl<R: Runtime> Lanes<R> {
         Ok(self.overlay.get_or_init(|| path).clone())
     }
 
-    /// Admission for every open, reopen and restart (LANE req. 18; OJ-08; C14).
-    async fn admission(&self, config: &Config, cwd: &Path, model: &str) -> Result<PathBuf, String> {
+    /// Admission for every open, reopen and restart (LANE req. 18; OJ-08; C14). `new_model` is the
+    /// model of a new session, which the quota gate judges; a resume of an existing session passes
+    /// `None`, since the gate holds new sessions only.
+    async fn admission(
+        &self,
+        config: &Config,
+        cwd: &Path,
+        new_model: Option<&str>,
+    ) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -348,8 +355,8 @@ impl<R: Runtime> Lanes<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if let Some(why) = (self.env.quota_hold)(model) {
-            return Err(why);
+        if let Some(held) = new_model.and_then(|m| (self.env.quota_hold)(m)) {
+            return Err(held.to_string());
         }
         (self.env.bridge_link)()?;
         let live = self.live_map().values().filter(|s| s.alive()).count();
@@ -544,7 +551,7 @@ impl<R: Runtime> Lanes<R> {
                 let model = s(input, "model")
                     .or(config.lanes.model.as_deref())
                     .unwrap_or_default();
-                Ok(match self.admission(&config, &cwd, model).await {
+                Ok(match self.admission(&config, &cwd, Some(model)).await {
                     Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
                     Err(e) => json!({ "admit": false, "detail": e }),
                 })
@@ -997,7 +1004,9 @@ impl<R: Runtime> Lanes<R> {
             return Err(format!("the key {} is already used by a lane", valid.key));
         }
         let config = self.cfg();
-        let exe = self.admission(&config, &valid.cwd, &valid.model).await?;
+        let exe = self
+            .admission(&config, &valid.cwd, Some(&valid.model))
+            .await?;
         let mut rec = Self::build(&valid, &config, crate::host::random_hex(8));
         self.tern_spend(&config, &rec).await?;
         if let Some(source) = thread_from {

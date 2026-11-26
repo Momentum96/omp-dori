@@ -508,8 +508,9 @@ resets, buying credits and paid overage stay refused, in code:
   account, provider or model yourself; OMP's configured fallback may change the model for you; when it is
   exhausted, stop, save progress and report. This replaces the stricter "no switching" wording in LANE req. 13
   and OPC-63/64.
-- The quota gate keeps new session starts (lanes, planner starts) waiting at the hold level; running sessions are
-  untouched; only the owner can lift it.
+- The quota gate keeps new session starts (a fresh lead, lanes, planner starts) waiting at the hold level;
+  resuming an existing session (the lead's last one, a parked or live lane) never waits; running sessions are
+  untouched; only the owner can lift it. A held lead is said with its provider, limits, reset times and the lift.
 - Voice is the one paid feature: explicit opt-in, owner-entered prices, daily, total and spending caps checked
   before every call starts, hold after any failure, never a paid retry (VOICE-19, VOICE-20).
 

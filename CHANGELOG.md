@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.1 (Unreleased)
+
+- The quota gate holds new sessions only, as documented. Resuming an existing session no longer
+  waits for it: the lead's last session and parked or live lanes come back after a hub restart,
+  `cataly update` or `cataly rollback`, and `cataly lead start` without `--fresh` resumes. A
+  fresh lead (`lead start --fresh`, or a first lead with no session yet) and new lanes still wait.
+- When the gate holds the lead, the hub says so: the `lead.refused` alert, `cataly lead start`,
+  `cataly lead status`, the ops panel, the `cataly update` line and the update message (Korean
+  and English) name the provider, the limits with their reset times and `cataly quota lift`.
+- `cataly update` and the update message no longer wait out the full minute when the hub does
+  not start the lead: a refused start is reported at once with its reason, and a hub that does
+  not answer in time is reported instead of said nothing about.
+
 ## 0.2.0 (2026-11-26)
 
 The first public release. Releases now come from `github.com/vntrevx/Cataly`, for Linux x64

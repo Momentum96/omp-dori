@@ -703,12 +703,12 @@ impl<R: Runtime> Lanes<R> {
         let free = p.max_open.saturating_sub(open).min(p.max_starts);
         // Planner starts run on the lanes' configured model.
         let model = config.lanes.model.as_deref().unwrap_or_default();
-        let mut why = (self.env.quota_hold)(model);
+        let mut why = (self.env.quota_hold)(model).map(|h| h.to_string());
         if why.is_none() {
             if !(self.env.lead_live)() {
                 why = Some("no lead".into());
             } else if let Err(e) = self
-                .admission(&config, std::path::Path::new(&first.cwd), model)
+                .admission(&config, std::path::Path::new(&first.cwd), Some(model))
                 .await
             {
                 why = Some(e);

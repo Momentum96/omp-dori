@@ -135,11 +135,19 @@ impl Hub {
         let how = self.lead.settled()?;
         let lead_start = self.config_tx.borrow().lead.is_some().then_some(how);
         let lane_names = self.lanes.resumed.get()?.clone();
+        let not_running = lead_start == Some(crate::proto::LeadStart::NotRunning);
+        let lead_held = self.lead.quota_held().filter(|_| not_running);
+        let lead_reason = self
+            .lead
+            .refusal()
+            .filter(|_| not_running && lead_held.is_none());
         Some(crate::proto::Resumed {
             lead: lead_start == Some(crate::proto::LeadStart::Resumed),
             lanes: lane_names.len(),
             lead_start,
             lane_names,
+            lead_held,
+            lead_reason,
         })
     }
 
@@ -537,7 +545,7 @@ fn sessions(
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold_reason(model)),
+        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         events: Arc::clone(&events),
         store: store.clone(),
@@ -729,7 +737,7 @@ fn lanes(
         state_dir: paths.state_dir.clone(),
         events: Arc::clone(events),
         make: runtime(paths, agent_start, links),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold_reason(model)),
+        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         lead_live: Arc::new(move || lead.snapshot().is_some()),
         threads: Arc::new(crate::relay::discord::threads::DiscordThreads {
@@ -766,6 +774,7 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 (None, Phase::Starting) => LeadState::Starting,
                 (None, Phase::Stopped) => LeadState::Stopped,
                 (None, Phase::Held) => LeadState::Held,
+                (None, Phase::NotStarted) if view.quota.is_some() => LeadState::Held,
                 (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
             };
             // The lead counts as live exactly as the lanes' session cap counts it.
@@ -782,6 +791,7 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 running,
                 waiting,
                 models,
+                lead_quota: view.quota,
             }
         })
     }));

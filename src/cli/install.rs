@@ -152,6 +152,26 @@ async fn resumed(paths: &Paths) -> Option<crate::proto::Resumed> {
     }
 }
 
+/// The line `cataly update` and `cataly rollback` add about the sessions the new hub brought back:
+/// how the lead came back (or what holds it) and the lanes, or that the hub did not say in time.
+async fn sessions_note(paths: &Paths) -> String {
+    match resumed(paths).await {
+        Some(r) => {
+            let text = crate::jobs::update::resumed_text(owner_language(paths), Some(r));
+            if text.is_empty() {
+                text
+            } else {
+                format!("\n{text}")
+            }
+        }
+        None => format!(
+            "\nthe new hub did not say within {} s which sessions it brought back; \
+             `cataly lead status` shows the lead",
+            STOP_WAIT.as_secs()
+        ),
+    }
+}
+
 /// `omp --version` as `(a, b, c)`, or `None` when OMP is absent or says nothing usable.
 async fn omp_version() -> Option<(u64, u64, u64)> {
     use crate::sys::command::{KILL_GRACE, Output, Spec};
@@ -377,13 +397,7 @@ async fn restart_switch(
         Ok(()) => {
             let _ = layout_ops::retain(l);
             let answered = closed.elapsed().as_millis();
-            let sessions =
-                crate::jobs::update::resumed_text(owner_language(paths), resumed(paths).await);
-            let sessions = if sessions.is_empty() {
-                String::new()
-            } else {
-                format!("\n{sessions}")
-            };
+            let sessions = sessions_note(paths).await;
             Outcome::Done(format!(
                 "cataly {was} -> {version}; the new hub answered {answered} ms after the old one closed{sessions}"
             ))
@@ -684,13 +698,7 @@ async fn package_update(l: &Layout, package: &Package, p: &Parsed, paths: &Paths
     match start_and_wait(l, paths, &version).await {
         Ok(()) => {
             let answered = closed.elapsed().as_millis();
-            let sessions =
-                crate::jobs::update::resumed_text(owner_language(paths), resumed(paths).await);
-            let sessions = if sessions.is_empty() {
-                String::new()
-            } else {
-                format!("\n{sessions}")
-            };
+            let sessions = sessions_note(paths).await;
             Outcome::Done(format!(
                 "cataly {current} -> {version}; the new hub answered {answered} ms after the old one closed{sessions}"
             ))

@@ -102,6 +102,8 @@ pub(crate) struct People {
     /// The model (`provider/id`, or the requested selector until OMP names one) of every live
     /// session the hub runs, the lead's first. Its length is the count the session cap holds.
     pub(crate) models: Vec<String>,
+    /// The quota gate holds the lead's new session: its limits and reset times.
+    pub(crate) lead_quota: Option<crate::jobs::owner::quota::Held>,
 }
 
 impl Default for People {
@@ -112,6 +114,7 @@ impl Default for People {
             running: 0,
             waiting: 0,
             models: Vec::new(),
+            lead_quota: None,
         }
     }
 }
@@ -451,13 +454,32 @@ fn people_value(p: &People, lang: Language) -> String {
         .model
         .as_deref()
         .map_or_default(|m| format!(" · {}", plain(m.rsplit('/').next().unwrap_or(m))));
+    // A lead the quota gate holds says which limits, when they reset, and the way out.
+    let quota = p.lead_quota.as_ref().map_or_default(|held| {
+        let limits = held
+            .causes
+            .iter()
+            .map(|c| {
+                let (limit, at) = (plain(&c.limit), when(c.release_ms, 'R'));
+                match lang {
+                    Language::Korean => format!("{limit} {at} 초기화"),
+                    Language::English => format!("{limit} resets {at}"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        match lang {
+            Language::Korean => format!(" · 사용량 한도: {limits} · `cataly quota lift`로 풀어요"),
+            Language::English => format!(" · quota gate: {limits} · `cataly quota lift` lifts it"),
+        }
+    });
     match lang {
         Language::Korean => format!(
-            "리드: {lead}{model}\n레인: 실행 {} · 대기 {}",
+            "리드: {lead}{model}{quota}\n레인: 실행 {} · 대기 {}",
             p.running, p.waiting
         ),
         Language::English => format!(
-            "Lead: {lead}{model}\nLanes: {} running · {} waiting",
+            "Lead: {lead}{model}{quota}\nLanes: {} running · {} waiting",
             p.running, p.waiting
         ),
     }
@@ -946,6 +968,7 @@ pub(crate) mod tests {
                     "openai-codex/gpt-5.5".into(),
                     "anthropic/claude-sonnet-5".into(),
                 ],
+                lead_quota: None,
             },
             jobs: 5,
             issues: Vec::new(),

@@ -239,7 +239,7 @@ pub(crate) struct Status {
 
 /// The sessions a hub brought back at start. `lead` and `lanes` keep the shape a 0.1.1 `cataly update`
 /// reads from the new hub's status; `lead` is true only when the lead resumed its earlier session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Resumed {
     pub(crate) lead: bool,
     pub(crate) lanes: usize,
@@ -249,6 +249,12 @@ pub(crate) struct Resumed {
     /// The lanes running again, by name.
     #[serde(default)]
     pub(crate) lane_names: Vec<String>,
+    /// The quota gate holds the lead: no session to resume, and a new one waits for the gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lead_held: Option<crate::jobs::owner::quota::Held>,
+    /// Why the hub did not start the lead, when another rule than the quota gate held it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lead_reason: Option<String>,
 }
 
 /// How the lead came back when the hub started.
