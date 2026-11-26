@@ -114,6 +114,35 @@ pub mod defaults {
     pub const API_BASE: &str = "https://api.openai.com";
 }
 
+/// Starting values for the required models, voice and prices: what `cataly setup --voice on`
+/// writes where the config names none, and what the gated live test runs with unless told
+/// otherwise. The prices only feed the spending cap's estimate; the owner checks them against
+/// `OpenAI`'s current price list, since the cap is only as good as they are.
+pub mod starting {
+    use super::Prices;
+    /// Realtime speech model.
+    pub const SPEECH_MODEL: &str = "gpt-live-1";
+    /// Model that answers.
+    pub const BACKEND_MODEL: &str = "gpt-5.6-luna";
+    /// Model that summarises.
+    pub const SUMMARY_MODEL: &str = "gpt-6-luna";
+    /// Voice name.
+    pub const VOICE: &str = "marin";
+    /// USD per million tokens of the backend model.
+    pub const BACKEND_PRICES: Prices = Prices {
+        input: 0.25,
+        cached_input: 0.025,
+        cache_write: 0.3,
+        output: 2.0,
+    };
+    /// USD per million tokens of the summary model.
+    pub const SUMMARY_PRICES: Prices = BACKEND_PRICES;
+    /// USD per web search.
+    pub const SEARCH_PRICE: f64 = 0.01;
+    /// USD per minute of speech.
+    pub const SPEECH_PRICE_PER_MINUTE: f64 = 0.06;
+}
+
 /// The required fields, in the order their absence is reported.
 pub const REQUIRED: [&str; 10] = [
     "voice_channel",

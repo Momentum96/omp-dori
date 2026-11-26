@@ -707,7 +707,7 @@ impl<T: Runtime> Intake<T> {
     /// An approval answers the request that started the run; a question goes to the home channel.
     async fn route(&self, approval: bool) -> Option<(Snowflake, Option<Snowflake>)> {
         if !approval {
-            return self.settings.home().map(|c| (c, None));
+            return self.settings().home().map(|c| (c, None));
         }
         let open = self
             .store
@@ -751,7 +751,7 @@ impl<T: Runtime> Intake<T> {
             let _ = write!(
                 body,
                 "\nWithout an answer in {}, choice {} (recommended) is used.",
-                duration_words(self.settings.form_default_after),
+                duration_words(self.settings().form_default_after),
                 r + 1
             );
         }
@@ -858,13 +858,13 @@ impl<T: Runtime> Intake<T> {
         }
         let room = match self.route(true).await {
             Some(r) => Some(r),
-            None => self.settings.home().map(|c| (c, None)),
+            None => self.settings().home().map(|c| (c, None)),
         };
         let Some((channel, reply_to)) = room else {
             return;
         };
         let mut create = json!({
-            "content": local_notice(dialog, self.settings.remote_approvals),
+            "content": local_notice(dialog, self.settings().remote_approvals),
             "nonce": nonce(&format!("local:{}:{}", self.bot, dialog.id), 0),
         });
         if let Some(source) = reply_to {
@@ -886,7 +886,7 @@ impl<T: Runtime> Intake<T> {
             me.cards.lock().skipped.insert(dialog.id.clone());
         };
         let lang = self.language;
-        let approvals = self.settings.remote_approvals.then_some(lang);
+        let approvals = self.settings().remote_approvals.then_some(lang);
         let Some((kind, head, choices, recommended)) = card_of(dialog, lang, approvals) else {
             return self.stay_local(dialog).await;
         };
@@ -1017,7 +1017,8 @@ impl<T: Runtime> Intake<T> {
 
     /// The single recommended choice after the quiet time, submitted explicitly (DESIGN 12.2 C11).
     async fn recommended_after(&self, dialog: &str, index: usize) {
-        tokio::time::sleep(self.settings.form_default_after).await;
+        let quiet = self.settings().form_default_after;
+        tokio::time::sleep(quiet).await;
         let Some(card) = self.cards.take(dialog) else {
             return;
         };
@@ -1037,7 +1038,7 @@ impl<T: Runtime> Intake<T> {
         let status = match self.lead.answer(dialog, &answer).await {
             Ok(()) => format!(
                 "No answer within {}: the recommended choice \"{}\" was used.",
-                duration_words(self.settings.form_default_after),
+                duration_words(self.settings().form_default_after),
                 neutral(&label)
             ),
             Err(e) => format!("Closed: {}", neutral(&e)),
@@ -1051,13 +1052,35 @@ impl<T: Runtime> Intake<T> {
         .await;
     }
 
-    /// A press on the ops panel: the owner's is answered by the panel, anyone else's refused.
+    /// A press on the ops panel: the owner's is answered by the panel, anyone else's refused. The
+    /// watched-channel button and picker also refuse a press from outside `[discord] guild`.
     async fn ops_press(&self, press: &Press) {
-        if !press.by_owner(self.application, self.owner) {
-            let lang = self.jobs.ctx().config.borrow().hub.language;
-            return self.refuse(press, crate::jobs::ops::refusal(lang)).await;
+        let (lang, guild) = {
+            let config = self.jobs.ctx().config.borrow();
+            (config.hub.language, config.discord.guild)
+        };
+        let watch = matches!(
+            press.custom_id.as_str(),
+            crate::jobs::ops::render::WATCH | crate::jobs::ops::render::WATCHED
+        );
+        if watch && (guild.is_none() || press.guild != guild) {
+            return self
+                .refuse(press, crate::jobs::ops::watch_refusal(lang))
+                .await;
         }
-        let body = self.jobs.ops_press(&press.custom_id, press.channel).await;
+        if !press.by_owner(self.application, self.owner) {
+            let refusal = if watch {
+                crate::jobs::ops::watch_refusal(lang)
+            } else {
+                crate::jobs::ops::refusal(lang)
+            };
+            return self.refuse(press, refusal).await;
+        }
+        let body = if press.custom_id == crate::jobs::ops::render::WATCHED {
+            self.jobs.watch_channels(&press.values).await
+        } else {
+            self.jobs.ops_press(&press.custom_id, press.channel).await
+        };
         if let Err(e) = self.rest.callback(&press.id, &press.token, body).await {
             log::info("ops panel press not answered", &[("error", &e)]);
         }

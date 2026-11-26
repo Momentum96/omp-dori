@@ -32,7 +32,7 @@ limits view and health report of the watch-schedule area (WS-xx), on dialogs and
 | OJ-05 | Watch the owner's PRs on a repository (new, merged, closed, reviews, comments, failed checks) | owner | MERGE into WS-25 | Same follower; add discovery by author. |
 | OJ-06 | GitHub mentions and review requests from notifications | owner | KEEP | Cheap, owner-visible, not covered elsewhere. |
 | OJ-07 | Quota level alerts for short and weekly windows | owner, lead | SIMPLIFY | Read OMP's usage output, not a status line. |
-| OJ-08 | Quota hold that defers new sessions | lead, admission | KEEP | Protects remaining quota; in-daemon flag, not a file. |
+| OJ-08 | Quota hold that defers new sessions | lead, admission | DROP | Owner decision (0.2.4): usage alerts only; nothing waits on usage. |
 | OJ-09 | Quota reader keyed by limit identity | usage job | MERGE into WS-23 | One account-limits reader. |
 | OJ-10 | Detect a session running on another model than requested, or on none | owner, lead | SIMPLIFY | Use OMP's fallback events and serving model; covers lead and lanes. |
 | OJ-11 | Return the lead to its requested model after a fallback | owner | SIMPLIFY | Model change on an idle session; no probe prompt, no restart. |
@@ -117,24 +117,17 @@ limits view and health report of the watch-schedule area (WS-xx), on dialogs and
     80 characters). Remembered identities older than 30 days are forgotten.
 19. Each `gh` call has a 60 s timeout. A failure of either read leaves all state of that tick untouched.
 
-### C. Quota watch and hold (OJ-07, OJ-08)
+### C. Quota watch (OJ-07; OJ-08 dropped)
 
 20. Source: OMP's usage command with JSON output (WS-37 limits and caching). Cadence default 5 minutes, minimum 2.
     Each limit is identified by provider, anonymous account ordinal and the limit's own identity, never by its
     window's display name: two limits can share a window name.
 21. Settings: providers to watch (default: the providers of the lead's and open sessions' requested models), alert
-    levels (default 70, 85, 95 per cent), hold level (default 85), destinations.
+    levels (default 70, 85, 95 per cent), destinations.
 22. Each limit has a band: the highest alert level its used share reaches. A rise to a higher band emits a warning
-    with the share, the window length and the time until reset. A fall from at or above the hold level to below it
+    with the share, the window length and the time until reset. A fall from a warned band to below every level
     emits one recovery note. Other falls are silent.
-23. Hold: while any watched limit is at or above the hold level, the daemon holds new session starts. The hold
-    ends when fresh data shows every watched limit below the hold level, or when every limit that caused it has
-    passed the reset time OMP reported, whichever comes first. Unavailable data never extends the hold past those
-    reset times, so a hold cannot strand work for ever.
-24. While held, a request to open a lane is accepted into lane admission's pending list (LANE) and starts in order
-    when the hold ends; running sessions continue untouched; the lead is told once per hold with the reason.
-25. The owner may lift a hold for one named launch or until the current window resets. The lead and other sessions
-    cannot lift it.
+23. to 25. Dropped in 0.2.4 by owner decision: usage holds no session start, and there is nothing to lift.
 26. Unavailable or malformed usage data emits one warning per distinct reason and keeps the last known bands.
 27. The job never runs a usage subcommand other than the read, never spends a saved reset, never switches account,
     provider or model.

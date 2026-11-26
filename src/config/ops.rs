@@ -14,7 +14,7 @@ pub(crate) const DEFAULT_DESTINATION: &str = "cataly-ops";
 pub(crate) enum AlertKind {
     /// The host over the alert level for at least five minutes.
     Pressure,
-    /// The quota gate holding or releasing a provider.
+    /// A provider limit reaching an alert level (`quota.level`).
     Quota,
     /// A job failing twice in a row.
     Jobs,

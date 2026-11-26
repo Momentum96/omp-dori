@@ -19,6 +19,11 @@ pub(crate) static THUMB_BYTES: &[u8] = include_bytes!("../../../assets/panel-thu
 pub(crate) const REFRESH: &str = "ops:refresh";
 pub(crate) const USAGE: &str = "ops:usage";
 pub(crate) const MUTE: &str = "ops:mute";
+pub(crate) const WATCH: &str = "ops:watch";
+/// The channel select the watch button opens.
+pub(crate) const WATCHED: &str = "ops:watched";
+/// Discord's most values in one select; the config allows more watched channels.
+pub(crate) const PICKER_MAX: usize = 25;
 
 /// Discord's embed limits (characters).
 const TITLE_MAX: usize = 256;
@@ -34,7 +39,7 @@ const BAR_CELLS: usize = 8;
 
 const GREEN: u32 = 0x002E_CC71;
 const AMBER: u32 = 0x00F1_C40F;
-/// A limit of a provider that is not held at this per cent or more makes the panel worth a look.
+/// A limit of a provider a live session uses at this per cent or more makes the panel worth a look.
 const HIGH_LIMIT: f64 = 90.0;
 const RED: u32 = 0x00E7_4C3C;
 const GREY: u32 = 0x0095_A5A6;
@@ -75,8 +80,6 @@ pub(crate) struct Limit {
     pub(crate) label: String,
     pub(crate) percent: Option<f64>,
     pub(crate) reset_ms: Option<i64>,
-    /// The quota gate holds new sessions on this provider.
-    pub(crate) held: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +92,8 @@ pub(crate) enum LeadState {
     Starting,
     Stopped,
     Held,
+    /// Its OMP stopped after a long idle; a normal state that wakes on the next message.
+    Asleep,
     Off,
 }
 
@@ -102,8 +107,6 @@ pub(crate) struct People {
     /// The model (`provider/id`, or the requested selector until OMP names one) of every live
     /// session the hub runs, the lead's first. Its length is the count the session cap holds.
     pub(crate) models: Vec<String>,
-    /// The quota gate holds the lead's new session: its limits and reset times.
-    pub(crate) lead_quota: Option<crate::jobs::owner::quota::Held>,
 }
 
 impl Default for People {
@@ -114,7 +117,6 @@ impl Default for People {
             running: 0,
             waiting: 0,
             models: Vec::new(),
-            lead_quota: None,
         }
     }
 }
@@ -146,8 +148,6 @@ pub(crate) struct Panel {
     pub(crate) host: Host,
     /// `None` when no usage data was read.
     pub(crate) limits: Option<Vec<Limit>>,
-    /// The providers the quota gate holds, in order.
-    pub(crate) held: Vec<String>,
     pub(crate) people: People,
     pub(crate) jobs: usize,
     pub(crate) issues: Vec<Issue>,
@@ -261,24 +261,15 @@ fn plain(text: &str) -> String {
 
 impl Panel {
     /// Red only when the owner must act: the host overloaded, a job failing or waiting for an ack,
-    /// the lead held, or a held provider a live session uses. A held provider no live session uses
-    /// does not raise the level (its info line says sessions on the other providers start
-    /// normally), nor does its spent limit.
+    /// or the lead held.
     pub(crate) fn level(&self) -> Level {
         let failing = self.issues.iter().any(|i| i.failures >= 2 || i.needs_ack);
-        let (used, _) = self.held_split();
-        if self.host.state == HostState::Alert
-            || failing
-            || !used.is_empty()
-            || self.people.lead == LeadState::Held
-        {
+        if self.host.state == HostState::Alert || failing || self.people.lead == LeadState::Held {
             return Level::Act;
         }
-        let high = self
-            .limits
-            .iter()
-            .flatten()
-            .any(|l| !l.held && l.percent.is_some_and(|p| p >= HIGH_LIMIT));
+        let high = self.limits.iter().flatten().any(|l| {
+            self.used_by_a_session(&l.provider) && l.percent.is_some_and(|p| p >= HIGH_LIMIT)
+        });
         if self.host.state == HostState::Busy
             || high
             || !self.issues.is_empty()
@@ -290,52 +281,12 @@ impl Panel {
         }
     }
 
-    /// The held providers a live session uses, then the others. A model without a provider may
-    /// use any of them, as the quota gate judges a start.
-    fn held_split(&self) -> (Vec<&str>, Vec<&str>) {
-        self.held.iter().map(String::as_str).partition(|held| {
-            self.people.models.iter().any(|m| match m.split_once('/') {
-                Some((provider, _)) if !provider.is_empty() => provider == *held,
-                _ => true,
-            })
+    /// Whether a live session uses `provider`. A model without a provider may use any of them.
+    fn used_by_a_session(&self, provider: &str) -> bool {
+        self.people.models.iter().any(|m| match m.split_once('/') {
+            Some((p, _)) if !p.is_empty() => p == provider,
+            _ => true,
         })
-    }
-
-    /// The summary's held-provider line, when the gate holds one.
-    fn held_line(&self, lang: Language) -> Option<String> {
-        if self.held.is_empty() {
-            return None;
-        }
-        let names = |list: &[&str]| list.iter().map(|p| plain(p)).collect::<Vec<_>>().join(", ");
-        let all: Vec<&str> = self.held.iter().map(String::as_str).collect();
-        let (used, idle) = self.held_split();
-        let mut line = format!("⛔ {} {}", t(lang, "보류:", "Held:"), names(&all));
-        if used.is_empty() {
-            line.push_str(t(
-                lang,
-                " · 다른 제공자의 세션은 정상적으로 시작해요",
-                " · sessions on other providers start normally",
-            ));
-        } else {
-            let _ = write!(
-                line,
-                " · {} {}",
-                t(
-                    lang,
-                    "실행 중인 세션이 쓰는 제공자:",
-                    "used by a live session:"
-                ),
-                names(&used)
-            );
-            if !idle.is_empty() {
-                line.push_str(t(
-                    lang,
-                    " · 그 밖의 제공자 세션은 정상적으로 시작해요",
-                    " · sessions on the other providers start normally",
-                ));
-            }
-        }
-        Some(line)
     }
 }
 
@@ -412,9 +363,6 @@ fn limit_line(l: &Limit, lang: Language, label: bool) -> String {
     if let Some(r) = l.reset_ms {
         let _ = write!(line, " · {} {}", t(lang, "리셋", "resets"), when(r, 'R'));
     }
-    if l.held {
-        let _ = write!(line, " · ⛔ {}", t(lang, "보류", "held"));
-    }
     line
 }
 
@@ -448,38 +396,20 @@ fn people_value(p: &People, lang: Language) -> String {
         LeadState::Starting => t(lang, "시작 중", "starting"),
         LeadState::Stopped => t(lang, "멈춤", "stopped"),
         LeadState::Held => t(lang, "보류", "held"),
+        LeadState::Asleep => t(lang, "쉬는 중", "asleep"),
         LeadState::Off => t(lang, "꺼짐", "off"),
     };
     let model = p
         .model
         .as_deref()
         .map_or_default(|m| format!(" · {}", plain(m.rsplit('/').next().unwrap_or(m))));
-    // A lead the quota gate holds says which limits, when they reset, and the way out.
-    let quota = p.lead_quota.as_ref().map_or_default(|held| {
-        let limits = held
-            .causes
-            .iter()
-            .map(|c| {
-                let (limit, at) = (plain(&c.limit), when(c.release_ms, 'R'));
-                match lang {
-                    Language::Korean => format!("{limit} {at} 초기화"),
-                    Language::English => format!("{limit} resets {at}"),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        match lang {
-            Language::Korean => format!(" · 사용량 한도: {limits} · `cataly quota lift`로 풀어요"),
-            Language::English => format!(" · quota gate: {limits} · `cataly quota lift` lifts it"),
-        }
-    });
     match lang {
         Language::Korean => format!(
-            "리드: {lead}{model}{quota}\n레인: 실행 {} · 대기 {}",
+            "리드: {lead}{model}\n레인: 실행 {} · 대기 {}",
             p.running, p.waiting
         ),
         Language::English => format!(
-            "Lead: {lead}{model}{quota}\nLanes: {} running · {} waiting",
+            "Lead: {lead}{model}\nLanes: {} running · {} waiting",
             p.running, p.waiting
         ),
     }
@@ -535,9 +465,6 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
         Level::Act => (RED, t(lang, "🔴 확인이 필요해요", "🔴 Needs you")),
     };
     let mut description = summary.to_string();
-    if let Some(held) = p.held_line(lang) {
-        let _ = write!(description, "\n{held}");
-    }
     if let Some(until) = p.muted_until_ms {
         let _ = write!(
             description,
@@ -606,6 +533,7 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
             button(t(lang, "새로고침", "Refresh"), "🔄", REFRESH),
             button(t(lang, "사용량 자세히", "Usage details"), "📊", USAGE),
             mute,
+            button(t(lang, "감시 채널", "Watched channels"), "📡", WATCH),
         ]}],
     })
 }
@@ -720,6 +648,98 @@ pub(crate) fn private(text: &str) -> Value {
     json!({ "type": 4, "data": { "content": cut(text, 2000), "flags": 64, "allowed_mentions": { "parse": [] } } })
 }
 
+/// The owner's picker of watched channels: Discord's channel select (text and forum channels)
+/// with the first 25 watched channels chosen, ephemeral.
+pub(crate) fn watch_picker(watched: &[crate::relay::discord::Snowflake], lang: Language) -> Value {
+    let defaults: Vec<Value> = watched
+        .iter()
+        .take(PICKER_MAX)
+        .map(|c| json!({ "id": c.to_string(), "type": "channel" }))
+        .collect();
+    let rest = watched.len().saturating_sub(PICKER_MAX);
+    let mut text = t(
+        lang,
+        "📡 Cataly가 지켜볼 채널을 고르세요.",
+        "📡 Choose the channels Cataly watches.",
+    )
+    .to_string();
+    if rest > 0 {
+        let _ = match lang {
+            Language::Korean => write!(
+                text,
+                " 목록에 다 담기지 않는 {rest}개 채널은 그대로 지켜봐요."
+            ),
+            Language::English => write!(
+                text,
+                " The other {rest} watched channels do not fit in the list and stay watched."
+            ),
+        };
+    }
+    json!({ "type": 4, "data": {
+        "content": text,
+        "flags": 64,
+        "allowed_mentions": { "parse": [] },
+        "components": [{ "type": 1, "components": [{
+            "type": 8,
+            "custom_id": WATCHED,
+            "channel_types": [0, 15],
+            "min_values": 1,
+            "max_values": PICKER_MAX,
+            "default_values": defaults,
+        }]}],
+    }})
+}
+
+/// The picker's answer once the list is applied: the watched channels as mentions, in place of
+/// the picker. `kept` channels the picker could not show stay watched.
+pub(crate) fn watching(
+    channels: &[crate::relay::discord::Snowflake],
+    kept: usize,
+    lang: Language,
+) -> Value {
+    let mentions: Vec<String> = channels
+        .iter()
+        .take(PICKER_MAX)
+        .map(|c| format!("<#{c}>"))
+        .collect();
+    let mut text = format!(
+        "{} {}",
+        t(lang, "📡 지켜보는 채널:", "📡 Watching:"),
+        mentions.join(" ")
+    );
+    let more = channels.len().saturating_sub(PICKER_MAX);
+    if more > 0 {
+        let _ = match lang {
+            Language::Korean => write!(text, " 외 {more}개"),
+            Language::English => write!(text, " and {more} more"),
+        };
+    }
+    if kept > 0 {
+        let _ = match lang {
+            Language::Korean => write!(text, " (목록에 없던 {kept}개 채널은 그대로 둬요)"),
+            Language::English => {
+                write!(text, " ({kept} channels the list could not show are kept)")
+            }
+        };
+    }
+    replace(&text)
+}
+
+/// The picker's answer when nothing changed.
+pub(crate) fn watch_failed(why: &str, lang: Language) -> Value {
+    let head = t(
+        lang,
+        "⚠️ 감시 채널을 바꾸지 못했어요. 지금 설정을 그대로 써요:",
+        "⚠️ The watched channels were not changed; the running config stays:",
+    );
+    replace(&format!("{head} {why}"))
+}
+
+/// Replaces the ephemeral message a component sits on with one line and no components.
+fn replace(text: &str) -> Value {
+    json!({ "type": 7, "data": { "content": cut(text, 2000), "components": [], "allowed_mentions": { "parse": [] } } })
+}
+
 /// An open alert: a small embed with the thumbnail.
 pub(crate) fn alert(
     title: &str,
@@ -764,17 +784,6 @@ fn get(r: &Recent, name: &str) -> String {
     plain(&field(r.fields.as_deref(), name).unwrap_or_default())
 }
 
-/// The providers of quota limit keys (`provider#account/id`), each once.
-pub(crate) fn providers(limits: &str) -> String {
-    let mut out: Vec<&str> = limits
-        .split(", ")
-        .map(|l| l.split_once('#').map_or(l, |(p, _)| p))
-        .filter(|p| !p.is_empty())
-        .collect();
-    out.dedup();
-    plain(&out.join(", "))
-}
-
 /// The short line of an event: the alert title for alert kinds, a few words for the rest, the
 /// event's own text for kinds without words here.
 #[allow(clippy::too_many_lines)]
@@ -790,14 +799,6 @@ pub(crate) fn line(r: &Recent, lang: Language) -> String {
         )
         .into(),
         "pressure.clear" => t(lang, "✅ 서버 부하 정상", "✅ Host pressure cleared").into(),
-        "quota.hold" => {
-            let p = providers(&get(r, "limits"));
-            pick(
-                format!("⛔ 사용량 한도: {p} 새 세션 보류"),
-                format!("⛔ Quota hold: new {p} sessions wait"),
-            )
-        }
-        "quota.released" => t(lang, "✅ 사용량 보류 풀림", "✅ Quota hold lifted").into(),
         "quota.level" => {
             let (p, pc) = (get(r, "provider"), get(r, "percent"));
             pick(
@@ -947,17 +948,14 @@ pub(crate) mod tests {
                     label: "5h".into(),
                     percent: Some(64.0),
                     reset_ms: Some(1_800_000_000_000),
-                    held: false,
                 },
                 Limit {
                     provider: "openai-codex".into(),
                     label: "weekly".into(),
                     percent: Some(97.0),
                     reset_ms: None,
-                    held: true,
                 },
             ]),
-            held: vec!["openai-codex".into()],
             people: People {
                 lead: LeadState::Working,
                 model: Some("anthropic/claude-opus-5-5".into()),
@@ -968,7 +966,6 @@ pub(crate) mod tests {
                     "openai-codex/gpt-5.5".into(),
                     "anthropic/claude-sonnet-5".into(),
                 ],
-                lead_quota: None,
             },
             jobs: 5,
             issues: Vec::new(),
@@ -990,7 +987,10 @@ pub(crate) mod tests {
         let ko = panel(&sample(), Language::Korean, "0.1.1");
         let embed = &ko["embeds"][0];
         assert_eq!(embed["title"], "Cataly 상황판");
-        assert_eq!(embed["color"], RED, "a held provider needs the owner");
+        assert_eq!(
+            embed["color"], AMBER,
+            "a lane's provider at 97 % is worth a look"
+        );
         assert_eq!(embed["image"]["url"], "attachment://panel-banner.jpg");
         assert_eq!(embed["thumbnail"]["url"], "attachment://panel-thumb.jpg");
         let text = embed.to_string();
@@ -998,7 +998,6 @@ pub(crate) mod tests {
             "🖥️ 서버",
             "부하 `▰▰▰▱▱▱▱▱` 40%",
             "세션 3/20",
-            "⛔ 보류",
             "리드: 작업 중 · claude-opus-5-5",
             "레인: 실행 2 · 대기 1",
             "✅ 모두 정상 (5개)",
@@ -1013,7 +1012,10 @@ pub(crate) mod tests {
             .iter()
             .map(|b| b["label"].as_str().unwrap())
             .collect();
-        assert_eq!(labels, ["새로고침", "사용량 자세히", "1시간 조용히"]);
+        assert_eq!(
+            labels,
+            ["새로고침", "사용량 자세히", "1시간 조용히", "감시 채널"]
+        );
         assert!(
             embed.get("timestamp").is_none(),
             "the time is added when sent"
@@ -1033,11 +1035,25 @@ pub(crate) mod tests {
         }
         let mut calm = sample();
         calm.limits = Some(Vec::new());
-        calm.held.clear();
         assert_eq!(
             panel(&calm, Language::Korean, "x")["embeds"][0]["color"],
             GREEN
         );
+        // A sleeping lead is a normal state: the panel stays green and says so.
+        let mut asleep = calm.clone();
+        asleep.people.lead = LeadState::Asleep;
+        asleep.people.model = None;
+        for (lang, want) in [
+            (Language::Korean, "리드: 쉬는 중\n"),
+            (Language::English, "Lead: asleep\n"),
+        ] {
+            let body = panel(&asleep, lang, "x");
+            assert_eq!(body["embeds"][0]["color"], GREEN);
+            assert!(
+                body.to_string().contains(&want.replace('\n', "\\n")),
+                "{want}"
+            );
+        }
         calm.host.state = HostState::Busy;
         assert_eq!(
             panel(&calm, Language::Korean, "x")["embeds"][0]["color"],
@@ -1066,7 +1082,6 @@ pub(crate) mod tests {
                     label: "y".repeat(300),
                     percent: Some(50.0),
                     reset_ms: Some(1_800_000_000_000),
-                    held: i % 2 == 0,
                 })
                 .collect(),
         );
@@ -1131,7 +1146,6 @@ pub(crate) mod tests {
         assert_eq!(minutes_words(60, Language::Korean), "1시간");
         assert_eq!(minutes_words(90, Language::Korean), "1시간 30분");
         assert_eq!(minutes_words(30, Language::English), "30 min");
-        assert_eq!(providers("a#1/x, a#2/y, b#1/z"), "a, b");
         assert_eq!(plain("a_b `x`\n"), "a\\_b \\`x\\` ");
         let r = Recent {
             at_ms: 0,
@@ -1153,22 +1167,20 @@ pub(crate) mod tests {
         assert_eq!(done["embeds"][0]["color"], GREEN);
     }
 
-    /// The live panel of 0.1.4: the lead alone on anthropic, `openai-codex` and `devin` held at
-    /// 100 %, six jobs all fine.
-    fn held_elsewhere() -> Panel {
+    /// The live panel of 0.1.4: the lead alone on anthropic, `openai-codex` and `devin` at 100 %,
+    /// six jobs all fine.
+    fn spent_elsewhere() -> Panel {
         let mut p = sample();
-        p.held = vec!["devin".into(), "openai-codex".into()];
-        let limit = |provider: &str, percent: f64, held: bool| {
+        let limit = |provider: &str, percent: f64| {
             let mut l = p.limits.iter().flatten().next().cloned().unwrap();
             l.provider = provider.into();
             l.percent = Some(percent);
-            l.held = held;
             l
         };
         p.limits = Some(vec![
-            limit("openai-codex", 100.0, true),
-            limit("anthropic", 40.0, false),
-            limit("devin", 100.0, true),
+            limit("openai-codex", 100.0),
+            limit("anthropic", 40.0),
+            limit("devin", 100.0),
         ]);
         p.jobs = 6;
         p.issues.clear();
@@ -1187,29 +1199,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_held_provider_no_live_session_uses_stays_green() {
-        let p = held_elsewhere();
+    fn a_spent_provider_no_live_session_uses_stays_green() {
+        let p = spent_elsewhere();
         assert_eq!(p.level(), Level::Fine);
         let ko = panel(&p, Language::Korean, "x");
         assert_eq!(ko["embeds"][0]["color"], GREEN);
-        let d = description(&p, Language::Korean);
-        assert!(d.starts_with("🟢 모두 정상\n"), "{d}");
+        for lang in [Language::Korean, Language::English] {
+            let d = description(&p, lang);
+            assert!(!d.contains('⛔'), "{d}");
+        }
+        assert!(description(&p, Language::English).starts_with("🟢 All fine\n"));
+        let usage = ko.to_string();
         assert!(
-            d.contains("⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요"),
-            "{d}"
-        );
-        assert!(!d.contains("확인이 필요해요"), "{d}");
-        let d = description(&p, Language::English);
-        assert!(d.starts_with("🟢 All fine\n"), "{d}");
-        assert!(
-            d.contains("⛔ Held: devin, openai-codex · sessions on other providers start normally"),
-            "{d}"
+            usage.contains("**devin** `▰▰▰▰▰▰▰▰` 100%"),
+            "the bars stay: {usage}"
         );
     }
 
     #[test]
     fn a_limit_turns_amber_at_ninety_per_cent() {
-        let mut p = held_elsewhere();
+        let mut p = spent_elsewhere();
         let anthropic = |p: &mut Panel, percent: f64| {
             for l in p.limits.iter_mut().flatten() {
                 if l.provider == "anthropic" {
@@ -1225,42 +1234,19 @@ pub(crate) mod tests {
             panel(&p, Language::English, "x")["embeds"][0]["color"],
             AMBER
         );
-    }
-
-    #[test]
-    fn the_held_provider_of_a_live_session_is_red() {
-        let mut p = held_elsewhere();
-        p.held = vec!["anthropic".into(), "devin".into()];
-        assert_eq!(p.level(), Level::Act, "the lead's own provider is held");
-        let d = description(&p, Language::Korean);
-        assert!(d.starts_with("🔴 확인이 필요해요\n"), "{d}");
-        assert!(
-            d.contains(
-                "⛔ 보류: anthropic, devin · 실행 중인 세션이 쓰는 제공자: anthropic · 그 밖의 제공자 세션은 정상적으로 시작해요"
-            ),
-            "{d}"
-        );
-        let d = description(&p, Language::English);
-        assert!(
-            d.contains(
-                "⛔ Held: anthropic, devin · used by a live session: anthropic · sessions on the other providers start normally"
-            ),
-            "{d}"
-        );
-        // A lane on a held provider counts as much as the lead.
-        let mut p = held_elsewhere();
+        // A lane on a spent provider counts as much as the lead.
+        let mut p = spent_elsewhere();
         p.people.models.push("devin/swe-1".into());
-        assert_eq!(p.level(), Level::Act);
-        // A lead held by the quota gate or by OMP's usage limit needs the owner.
-        let mut p = held_elsewhere();
-        p.held.clear();
+        assert_eq!(p.level(), Level::Watch);
+        // A lead held by OMP's usage limit needs the owner.
+        let mut p = spent_elsewhere();
         p.people.lead = LeadState::Held;
         assert_eq!(p.level(), Level::Act);
     }
 
     #[test]
     fn sessions_count_the_lead_and_the_time_is_relative() {
-        let p = held_elsewhere();
+        let p = spent_elsewhere();
         for (lang, want, updated) in [
             (Language::Korean, "세션 1/20", "🕒 마지막 갱신 "),
             (Language::English, "Sessions 1/20", "🕒 Updated "),

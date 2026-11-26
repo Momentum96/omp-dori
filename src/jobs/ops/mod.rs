@@ -4,10 +4,11 @@
 //! panel is the board post rule applied to an embed (created once with its banner and thumbnail,
 //! pinned when the bot may, edited in place only on change and at most once a minute, never
 //! recreated after an uncertain create). Alerts are separate small embeds for what is worth a ping:
-//! the host over the alert level for five minutes, a quota hold, a job failing twice in a row, a
-//! refused backup, GitHub news and new mail. An alert whose condition clears is edited to show it
-//! resolved. Each alert kind posts at most once an hour; the owner's mute silences new alerts while
-//! the panel keeps updating. Owner-only buttons refresh the panel, show the usage table and mute.
+//! the host over the alert level for five minutes, a usage level reached, a job failing twice in a
+//! row, a refused backup, GitHub news and new mail. An alert whose condition clears is edited to
+//! show it resolved. Each alert kind posts at most once an hour; the owner's mute silences new
+//! alerts while the panel keeps updating. Owner-only buttons refresh the panel, show the usage
+//! table and mute.
 
 pub(crate) mod render;
 
@@ -23,7 +24,7 @@ use tokio::sync::Notify;
 use self::render::{Host, HostState, Issue, Level, Limit, Panel, People, Recent};
 use super::{Ctx, Jobs, JobsError};
 use crate::config::ops::{AlertKind, OpsSettings};
-use crate::config::{Config, Destination, Language, Owner, Work};
+use crate::config::{Config, Destination, DiscordSettings, Language, Owner, Work, file};
 use crate::jobs::owner::pressure::{self, ALERT_AFTER_MS};
 use crate::lanes::BoxFut;
 use crate::lanes::board::{self, Board, EVERY_MS, Post};
@@ -44,8 +45,9 @@ const RECENT_KEEP: usize = 3;
 const INBOX_MAX: usize = 256;
 /// Resolved alerts are forgotten after a day.
 const RESOLVED_KEEP_MS: i64 = 24 * HOUR_MS;
-/// Failed runs or ticks in a row that make a job alert.
-const JOB_FAILURES: i64 = 2;
+/// Failed runs or ticks in a row that make a job alert; a transient tick failure is reported from
+/// this count too.
+pub(crate) const JOB_FAILURES: i64 = 2;
 
 /// The lead and lanes as the panel shows them; set by the hub once both exist.
 pub(crate) type PeopleFn = Arc<dyn Fn() -> BoxFut<'static, People> + Send + Sync>;
@@ -137,8 +139,7 @@ fn act(e: &EventRecord) -> Act {
     match e.kind.as_str() {
         "pressure.alert" => Act::Open("pressure".into(), AlertKind::Pressure),
         "pressure.clear" => Act::Close("pressure".into()),
-        "quota.hold" => Act::Open(key("quota"), AlertKind::Quota),
-        "quota.released" => Act::Close(key("quota")),
+        "quota.level" => Act::Once(AlertKind::Quota),
         "backup.refused" => Act::Open(key("backup"), AlertKind::Backup),
         "backup.clean" => Act::Close(key("backup")),
         "github.pr" | "github.notification" | "pr.feedback" | "pr.check_failed" | "pr.merged" => {
@@ -172,8 +173,6 @@ fn recent_of(e: &EventRecord) -> Recent {
 pub(crate) struct Extra {
     /// The host line for a pressure alert.
     pub(crate) host: String,
-    /// When the quota gate opens at the latest.
-    pub(crate) quota_release_ms: Option<i64>,
 }
 
 /// One pass of the ops room for one destination, with time and messenger supplied.
@@ -388,18 +387,6 @@ impl<B: Board + ?Sized> Turn<'_, B> {
         let title = render::line(r, self.lang);
         let detail = match r.kind.as_str() {
             "pressure.alert" => extra.host.clone(),
-            "quota.hold" => match (self.lang, extra.quota_release_ms) {
-                (Language::Korean, Some(at)) => format!(
-                    "새 세션은 {}까지 기다려요. `cataly quota lift`로 풀 수 있어요.",
-                    render::when(at, 'R')
-                ),
-                (Language::English, Some(at)) => format!(
-                    "New sessions wait until {}. `cataly quota lift` lifts the hold.",
-                    render::when(at, 'R')
-                ),
-                (Language::Korean, None) => "새 세션은 기다려요.".into(),
-                (Language::English, None) => "New sessions wait.".into(),
-            },
             _ => render::detail(r, self.lang),
         };
         (title, detail)
@@ -712,7 +699,7 @@ async fn pass(ctx: &Arc<Ctx>) {
             Vec::new()
         }
     };
-    let (panel, extra) = gather(ctx, &config, &jobs, now).await;
+    let (panel, extra) = gather(ctx, &config, &jobs).await;
     let board = Embeds { rest, now };
     let channel = channel.to_string();
     let turn = Turn {
@@ -730,8 +717,8 @@ async fn pass(ctx: &Arc<Ctx>) {
     turn.run(panel, events, &jobs, &extra, force).await;
 }
 
-/// The panel's facts: the host, usage and the quota gate, people, and jobs.
-async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Panel, Extra) {
+/// The panel's facts: the host, usage, people, and jobs.
+async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView]) -> (Panel, Extra) {
     let job = config.jobs.values().find_map(|j| match &j.work {
         Work::Owner(Owner::Pressure(p)) => Some((j.name.clone(), p.clone())),
         _ => None,
@@ -782,10 +769,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         .usage
         .read(ctx.omp.path().as_deref(), config.limits.cache, false)
         .await;
-    let gate = ctx.gate.view(now);
-    let limits = read
-        .snapshot
-        .map(|s| worst_per_provider(&s.usage.limits, &gate.providers));
+    let limits = read.snapshot.map(|s| worst_per_provider(&s.usage.limits));
     let issues = jobs
         .iter()
         .filter(|j| j.error_streak > 0 || j.needs_ack)
@@ -797,12 +781,10 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         .collect();
     let extra = Extra {
         host: render::host_line(&host, config.hub.language),
-        quota_release_ms: gate.causes.iter().map(|c| c.release_ms).max(),
     };
     let panel = Panel {
         host,
         limits,
-        held: gate.providers,
         people,
         jobs: jobs.len(),
         issues,
@@ -814,21 +796,20 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
     (panel, extra)
 }
 
-fn limit_of(l: &crate::omp::usage::Limit, held: &[String]) -> Limit {
+fn limit_of(l: &crate::omp::usage::Limit) -> Limit {
     Limit {
         provider: l.provider.clone(),
         label: l.label.clone(),
         percent: l.used_percent,
         reset_ms: l.reset_ms,
-        held: held.contains(&l.provider),
     }
 }
 
 /// One line per provider: its most used limit.
-fn worst_per_provider(limits: &[crate::omp::usage::Limit], held: &[String]) -> Vec<Limit> {
+fn worst_per_provider(limits: &[crate::omp::usage::Limit]) -> Vec<Limit> {
     let mut out: Vec<Limit> = Vec::new();
     for l in limits {
-        let line = limit_of(l, held);
+        let line = limit_of(l);
         match out.iter_mut().find(|o| o.provider == line.provider) {
             Some(o) if o.percent.unwrap_or(-1.0) < line.percent.unwrap_or(-1.0) => *o = line,
             Some(_) => {}
@@ -875,14 +856,9 @@ impl Jobs {
             }
             render::USAGE => {
                 let snapshot = ctx.omp.usage.last();
-                let gate = ctx.gate.view(now);
-                let limits: Option<Vec<Limit>> = snapshot.as_ref().map(|s| {
-                    s.usage
-                        .limits
-                        .iter()
-                        .map(|l| limit_of(l, &gate.providers))
-                        .collect()
-                });
+                let limits: Option<Vec<Limit>> = snapshot
+                    .as_ref()
+                    .map(|s| s.usage.limits.iter().map(limit_of).collect());
                 render::usage_table(limits.as_deref(), snapshot.map(|s| s.fetched_ms), lang)
             }
             render::MUTE => {
@@ -911,8 +887,184 @@ impl Jobs {
                     ),
                 })
             }
+            render::WATCH => render::watch_picker(&config.discord.channels, lang),
             _ => render::private(&t("알 수 없는 버튼이에요.", "Unknown button.")),
         }
+    }
+
+    /// The owner submitted the watched-channel picker (the caller checked the owner and the
+    /// server). Each newly picked channel must first be readable by the bot; then the config file
+    /// as it is now gets the chosen channels, then those the picker could not show, a home that
+    /// is still watched and `others` without the dropped channels; the result is checked as
+    /// `cataly config check` does and applied as `cataly config reload` does. A refused check or
+    /// an invalid result writes nothing.
+    pub(crate) async fn watch_channels(&self, values: &[String]) -> Value {
+        let config = self.ctx.config();
+        let lang = config.hub.language;
+        let chosen: Vec<Snowflake> = values.iter().filter_map(|v| Snowflake::parse(v)).collect();
+        if chosen.is_empty() {
+            let why = match lang {
+                Language::Korean => "고른 채널이 없어요.",
+                Language::English => "no channel was chosen.",
+            };
+            return render::watch_failed(why, lang);
+        }
+        let fresh: Vec<Snowflake> = chosen
+            .iter()
+            .filter(|c| !config.discord.channels.contains(c))
+            .copied()
+            .collect();
+        if let Err(why) = self.readable(&config, &fresh).await {
+            log::info("watched channels refused", &[("error", &why)]);
+            return render::watch_failed(&why, lang);
+        }
+        let mut applied = Picked::default();
+        let written = file::edit(&self.ctx.config_file, "", |text| {
+            let now = crate::config::parse(text)
+                .map_err(|e| {
+                    format!(
+                        "the config file is not valid now: {}",
+                        crate::config::describe(&e)
+                    )
+                })?
+                .discord;
+            let pick = picked(&now, &chosen);
+            let mut text = file::set_rendered(
+                text,
+                "discord",
+                "channels",
+                &file::string_list(&pick.channels),
+            );
+            if let Some(home) = pick.home {
+                text = file::set_key(&text, "discord", "home", &home.to_string());
+            }
+            if let Some(others) = &pick.others {
+                text = file::set_rendered(&text, "discord", "others", &file::string_list(others));
+            }
+            applied = pick;
+            Ok(text)
+        });
+        if let Err(e) = written {
+            log::warn("watched channels not written", &[("error", &e)]);
+            return render::watch_failed(&e, lang);
+        }
+        match self.reload().await {
+            Ok(_) => render::watching(&applied.channels, applied.kept, lang),
+            Err(e) => render::watch_failed(&e, lang),
+        }
+    }
+
+    /// Checks that the bot may view and read the history of every channel: one bounded call
+    /// each, side by side, all within [`READABLE_WITHIN`] so the picker is answered in time. The
+    /// first channel that fails is named with the permission it lacks.
+    async fn readable(&self, config: &Config, channels: &[Snowflake]) -> Result<(), String> {
+        if channels.is_empty() {
+            return Ok(());
+        }
+        let lang = config.hub.language;
+        let rest = self.ctx.discord(config)?;
+        let mut checks = tokio::task::JoinSet::new();
+        for channel in channels {
+            let (rest, channel) = (Arc::clone(&rest), *channel);
+            checks.spawn(async move { (channel, rest.readable(channel).await) });
+        }
+        let mut answers = Vec::with_capacity(channels.len());
+        let all = tokio::time::timeout(READABLE_WITHIN, async {
+            while let Some(done) = checks.join_next().await {
+                if let Ok(answer) = done {
+                    answers.push(answer);
+                }
+            }
+        })
+        .await;
+        for channel in channels {
+            let why = match answers.iter().find(|(c, _)| c == channel) {
+                Some((_, Ok(()))) => continue,
+                Some((_, Err(e))) => match (e.missing_permission(), lang) {
+                    (Some(need), Language::Korean) => {
+                        format!("봇이 <#{channel}> 채널을 읽을 수 없어요. {need} 권한이 필요해요.")
+                    }
+                    (Some(need), Language::English) => {
+                        format!("the bot cannot read <#{channel}>: it needs {need} there.")
+                    }
+                    (None, Language::Korean) => {
+                        format!("<#{channel}> 채널을 확인하지 못했어요 ({e}).")
+                    }
+                    (None, Language::English) => {
+                        format!("<#{channel}> could not be checked ({e}).")
+                    }
+                },
+                None if all.is_err() => match lang {
+                    Language::Korean => {
+                        format!("Discord가 <#{channel}> 확인에 제때 답하지 않았어요.")
+                    }
+                    Language::English => format!("Discord did not confirm <#{channel}> in time."),
+                },
+                None => match lang {
+                    Language::Korean => format!("<#{channel}> 채널을 확인하지 못했어요."),
+                    Language::English => format!("<#{channel}> could not be checked."),
+                },
+            };
+            return Err(why);
+        }
+        Ok(())
+    }
+}
+
+/// How long the readability check of newly picked channels may take: Discord wants the picker
+/// answered within 3 s.
+const READABLE_WITHIN: Duration = Duration::from_secs(2);
+
+/// The config after the picker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Picked {
+    /// The chosen channels, then those the picker could not show.
+    channels: Vec<Snowflake>,
+    /// The home to write; `None` leaves it.
+    home: Option<Snowflake>,
+    /// `others` without the channels no longer watched; `None` when it is unchanged.
+    others: Option<Vec<Snowflake>>,
+    /// How many channels the picker could not show were kept.
+    kept: usize,
+}
+
+/// The watched list after the picker. Channels the picker could not show come after the chosen
+/// ones. The home stays while it is watched; else, or when it was unset and several channels are
+/// now watched, it becomes the current home if still watched, else the first chosen channel.
+/// `others` keeps only watched channels.
+fn picked(now: &DiscordSettings, chosen: &[Snowflake]) -> Picked {
+    let mut channels: Vec<Snowflake> = Vec::with_capacity(chosen.len() + now.channels.len());
+    for c in chosen {
+        if !channels.contains(c) {
+            channels.push(*c);
+        }
+    }
+    let mut kept = 0;
+    for c in now.channels.iter().skip(render::PICKER_MAX) {
+        if !channels.contains(c) {
+            channels.push(*c);
+            kept += 1;
+        }
+    }
+    let first = channels.first().copied();
+    let home = match now.home {
+        Some(h) if channels.contains(&h) => None,
+        Some(_) => first,
+        None if channels.len() > 1 => now.home().filter(|h| channels.contains(h)).or(first),
+        None => None,
+    };
+    let others = now.others.iter().any(|o| !channels.contains(o)).then(|| {
+        now.others
+            .iter()
+            .filter(|o| channels.contains(o))
+            .copied()
+            .collect()
+    });
+    Picked {
+        channels,
+        home,
+        others,
+        kept,
     }
 }
 
@@ -921,6 +1073,14 @@ pub(crate) fn refusal(lang: Language) -> &'static str {
     match lang {
         Language::Korean => "이 버튼은 주인만 누를 수 있어요.",
         Language::English => "Only the owner can use these buttons.",
+    }
+}
+
+/// The refusal of a watched-channel change by anyone but the owner, or from another server.
+pub(crate) fn watch_refusal(lang: Language) -> &'static str {
+    match lang {
+        Language::Korean => "감시 채널은 주인만 바꿀 수 있어요.",
+        Language::English => "Only the owner may change the watched channels.",
     }
 }
 

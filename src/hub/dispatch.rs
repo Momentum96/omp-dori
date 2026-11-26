@@ -57,7 +57,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 44] = [
+const METHODS: [Method; 42] = [
     Method {
         name: method::STATUS,
         needs: Needs::Any,
@@ -107,17 +107,6 @@ const METHODS: [Method; 44] = [
         name: method::LIMITS,
         needs: Needs::Any,
         mutating: false,
-    },
-    Method {
-        name: method::QUOTA,
-        needs: Needs::Any,
-        mutating: false,
-    },
-    // Only the owner lifts the quota gate (OJ req. 25).
-    Method {
-        name: method::QUOTA_LIFT,
-        needs: Needs::Owner,
-        mutating: true,
     },
     Method {
         name: method::PR_FOLLOW,
@@ -461,32 +450,16 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         }
         method::CONFIG_RELOAD => {
             let _: Mutation = params(raw)?;
-            let jobs = hub.reload().await.map_err(|message| Failure {
+            let jobs = hub.jobs.reload().await.map_err(|message| Failure {
                 code: code::REFUSED,
                 message,
             })?;
             ok(&proto::Reloaded { jobs })
         }
-        method::HEALTH => {
-            let checks = hub.jobs.health().await?;
-            let ignored = hub.config_tx.borrow().health.ignore.clone();
-            let warn = checks
-                .iter()
-                .any(|c| c.level == "warn" && !ignored.contains(&c.name));
-            ok(&proto::Health {
-                checks,
-                ignored,
-                warn,
-            })
-        }
+        method::HEALTH => health(hub).await,
         method::LIMITS => {
             let p: LimitsParams = params(raw)?;
             ok(&limits(hub, p.refresh).await?)
-        }
-        method::QUOTA => ok(&hub.jobs.gate()),
-        method::QUOTA_LIFT => {
-            let _: Mutation = params(raw)?;
-            ok(&hub.jobs.lift().await?)
         }
         method::PR_FOLLOW | method::PR_UNFOLLOW => {
             let p: TargetParams = params(raw)?;
@@ -772,9 +745,27 @@ async fn slack_upload(hub: &Hub, p: proto::DiscordParams) -> Result<Value, Failu
     ok(&serde_json::json!({ "file": id }))
 }
 
+/// `health`: the hub's checks, then the configured lead's line.
+async fn health(hub: &Hub) -> Result<Value, Failure> {
+    let mut checks = hub.jobs.health().await?;
+    if hub.config().lead.is_some() {
+        let view = hub.lead.view().await;
+        checks.push(crate::jobs::owner::health::lead_check(&view));
+    }
+    let ignored = hub.config().health.ignore.clone();
+    let warn = checks
+        .iter()
+        .any(|c| c.level == "warn" && !ignored.contains(&c.name));
+    ok(&proto::Health {
+        checks,
+        ignored,
+        warn,
+    })
+}
+
 /// The account-limits view (WS req. 37-39): off unless enabled; never retries or changes anything.
 async fn limits(hub: &Hub, refresh: bool) -> Result<Limits, Failure> {
-    let settings = hub.config_tx.borrow().limits.clone();
+    let settings = hub.config().limits.clone();
     if !settings.enabled {
         return Err(Failure {
             code: code::REFUSED,

@@ -197,7 +197,7 @@ fn updated(previous: &str, resumed: Option<Resumed>, config: &Config) -> Option<
 }
 
 /// What the hub brought back after an update, in the owner's language: how the lead came back (a
-/// fresh lead says why, a held one names what holds it and the way out) and the lanes running
+/// fresh lead says why, one not running says why when the hub knows) and the lanes running
 /// again by name; empty when nothing is known or there is nothing to say. A hub before 0.1.2 says
 /// only whether the lead runs and how many lanes do.
 pub(crate) fn resumed_text(language: Language, resumed: Option<Resumed>) -> String {
@@ -255,38 +255,23 @@ pub(crate) fn resumed_text(language: Language, resumed: Option<Resumed>) -> Stri
     lead.into_iter().chain(lanes).collect::<Vec<_>>().join(" ")
 }
 
-/// The lead is not running: what holds it, when the hub knows.
+/// The lead is not running: asleep (a normal state), or why, when the hub knows.
 fn not_running(korean: bool, resumed: &Resumed) -> String {
-    match (&resumed.lead_held, &resumed.lead_reason, korean) {
-        (Some(held), _, true) => {
-            let limits = held
-                .causes
-                .iter()
-                .map(|c| {
-                    format!(
-                        "{} ({}에 초기화)",
-                        c.limit,
-                        super::instant_text(c.release_ms)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+    if let Some(since) = resumed.lead_asleep_ms {
+        let since = super::instant_text(since);
+        return if korean {
+            format!("lead는 쉬는 중입니다({since}부터). 필요할 때 같은 대화로 깨어납니다.")
+        } else {
             format!(
-                "lead는 사용량 한도 때문에 보류 중입니다: {} 한도 {limits}. \
-                 `cataly quota lift`로 보류를 풀면 바로 시작합니다.",
-                held.provider
+                "The lead is asleep (since {since}) and wakes on the same conversation when it is needed."
             )
-        }
-        (Some(held), _, false) => format!(
-            "The quota gate holds the lead: {} limits at the hold level ({}). \
-             Run `cataly quota lift` to start it now.",
-            held.provider,
-            held.limits_text()
-        ),
-        (None, Some(reason), true) => format!("lead는 실행 중이 아닙니다: {reason}."),
-        (None, Some(reason), false) => format!("The lead is not running: {reason}."),
-        (None, None, true) => "lead는 실행 중이 아닙니다.".into(),
-        (None, None, false) => "The lead is not running.".into(),
+        };
+    }
+    match (&resumed.lead_reason, korean) {
+        (Some(reason), true) => format!("lead는 실행 중이 아닙니다: {reason}."),
+        (Some(reason), false) => format!("The lead is not running: {reason}."),
+        (None, true) => "lead는 실행 중이 아닙니다.".into(),
+        (None, false) => "The lead is not running.".into(),
     }
 }
 
@@ -551,49 +536,30 @@ mod tests {
         assert!(config::parse("[update]\nupdated_template = \"{url}\"\n").is_err());
     }
 
-    /// The quota gate holds a lead that has no session to resume: the update message names the
-    /// provider, the limit, its reset time and the way out, in both languages, and never claims the
-    /// lead resumed. Another refusal is said with its reason.
+    /// A lead that is not running is said with its reason, and the message never claims the lead
+    /// resumed.
     #[test]
-    fn the_update_message_names_a_held_lead() {
+    fn the_update_message_says_why_the_lead_is_not_running() {
         let older = "0.0.1";
         let config = config::parse(DISCORD).unwrap();
-        let english = config::parse(&format!("{DISCORD}[hub]\nlanguage = \"en\"\n")).unwrap();
-        let held = Some(Resumed {
+        let stopped = Some(Resumed {
             lanes: 1,
             lead_start: Some(LeadStart::NotRunning),
             lane_names: vec!["build".into()],
-            lead_held: Some(crate::jobs::owner::quota::Held {
-                provider: "anthropic".into(),
-                causes: vec![crate::jobs::owner::quota::Cause {
-                    limit: "anthropic#1/7d".into(),
-                    release_ms: 1_800_000_000_000,
-                }],
-            }),
+            lead_reason: Some("the session cap of 1 is reached".into()),
             ..Resumed::default()
         });
-        let event = updated(older, held.clone(), &config).unwrap();
+        let event = updated(older, stopped, &config).unwrap();
         assert_eq!(event.kind, "update.done");
         assert!(
             event.text.ends_with(
-                "\nlead는 사용량 한도 때문에 보류 중입니다: anthropic 한도 anthropic#1/7d \
-                 (2027-01-15T08:00:00Z에 초기화). `cataly quota lift`로 보류를 풀면 바로 \
-                 시작합니다. lane 1개를 이어서 열었습니다: build."
+                "\nlead는 실행 중이 아닙니다: the session cap of 1 is reached. \
+                 lane 1개를 이어서 열었습니다: build."
             ),
             "{}",
             event.text
         );
         assert!(!event.text.contains("lead를 이어서"), "{}", event.text);
-        let event = updated(older, held, &english).unwrap();
-        assert!(
-            event.text.ends_with(
-                "\nThe quota gate holds the lead: anthropic limits at the hold level \
-                 (anthropic#1/7d until 2027-01-15T08:00:00Z). Run `cataly quota lift` to start \
-                 it now. Resumed 1 lane: build."
-            ),
-            "{}",
-            event.text
-        );
         let other = Some(Resumed {
             lead_start: Some(LeadStart::NotRunning),
             lead_reason: Some("memory admission holds the start: memory".into()),
@@ -602,6 +568,21 @@ mod tests {
         assert_eq!(
             resumed_text(Language::English, other),
             "The lead is not running: memory admission holds the start: memory."
+        );
+        let asleep = Some(Resumed {
+            lead_start: Some(LeadStart::NotRunning),
+            lead_reason: Some("it is asleep and wakes when it is needed".into()),
+            lead_asleep_ms: Some(1_800_000_000_000),
+            ..Resumed::default()
+        });
+        assert_eq!(
+            resumed_text(Language::Korean, asleep.clone()),
+            "lead는 쉬는 중입니다(2027-01-15T08:00:00Z부터). 필요할 때 같은 대화로 깨어납니다."
+        );
+        assert_eq!(
+            resumed_text(Language::English, asleep),
+            "The lead is asleep (since 2027-01-15T08:00:00Z) and wakes on the same conversation \
+             when it is needed."
         );
     }
 

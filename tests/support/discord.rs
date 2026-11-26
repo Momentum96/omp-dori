@@ -85,6 +85,11 @@ struct State {
     app_flags: u64,
     guilds: Vec<Value>,
     profile: HashMap<String, (String, String)>,
+    /// Channel -> the Discord error code its reads get (50001 or 50013).
+    denied: HashMap<String, u64>,
+    /// Setup's permission check: the server's `@everyone` permissions (View Channel, Send
+    /// Messages, Connect and Speak when unset).
+    everyone: Option<u64>,
 }
 
 pub struct FakeDiscord {
@@ -227,6 +232,17 @@ impl FakeDiscord {
         self.state.lock().unwrap().channels.insert(id.into(), v);
     }
 
+    /// Takes the bot's View Channel (`code` 50001) or Read Message History (50013) in `channel`;
+    /// 0 gives it back.
+    pub fn deny(&self, channel: &str, code: u64) {
+        let mut s = self.state.lock().unwrap();
+        if code == 0 {
+            s.denied.remove(channel);
+        } else {
+            s.denied.insert(channel.into(), code);
+        }
+    }
+
     /// An active thread for the listing.
     pub fn thread(&self, id: &str, parent: &str) {
         self.channel(id, 11, Some(parent));
@@ -344,6 +360,19 @@ impl FakeDiscord {
             id.into(),
             json!({ "id": id, "name": name, "type": kind, "guild_id": guild }),
         );
+    }
+
+    /// The `@everyone` permissions of every server.
+    pub fn everyone_permissions(&self, bits: u64) {
+        self.state.lock().unwrap().everyone = Some(bits);
+    }
+
+    /// Sets a channel's permission overwrites.
+    pub fn overwrites(&self, channel: &str, list: Value) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(c) = s.channels.get_mut(channel) {
+            c["permission_overwrites"] = list;
+        }
     }
 
     pub fn set_resume_url(&self, url: &str) {
@@ -504,6 +533,27 @@ fn param(query: &str, key: &str) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
+/// Reads that depend on the bot's access: a denied channel's (50001, no View Channel: every read
+/// of it; 50013, no Read Message History: its history and threads) are refused, and a readable
+/// channel's public archived threads are none.
+fn access(s: &State, method: &str, parts: &[&str]) -> Option<Response<Full<Bytes>>> {
+    let ("GET", ["channels", id, rest @ ..]) = (method, parts) else {
+        return None;
+    };
+    match s.denied.get(*id).copied() {
+        Some(code) if code == 50001 || !rest.is_empty() => Some(reply(
+            403,
+            &json!({ "message": "Missing Access", "code": code }),
+        )),
+        _ => (rest == ["threads", "archived", "public"]).then(|| {
+            reply(
+                200,
+                &json!({ "threads": [], "members": [], "has_more": false }),
+            )
+        }),
+    }
+}
+
 /// The calls `cataly setup` makes: the bot account (its avatar and banner kept and changed), the
 /// application's intent flags, the bot's servers, a server's channels and a new channel.
 fn setup_route(
@@ -542,6 +592,20 @@ fn setup_route(
             )
         }
         ("GET", ["users", "@me", "guilds"]) => reply(200, &Value::Array(s.guilds.clone())),
+        ("GET", ["guilds", guild]) => {
+            let everyone = s
+                .everyone
+                .unwrap_or((1 << 10) | (1 << 11) | (1 << 20) | (1 << 21));
+            reply(
+                200,
+                &json!({ "id": guild, "owner_id": APP_OWNER, "roles": [
+                    { "id": guild, "name": "@everyone", "permissions": everyone.to_string() }
+                ]}),
+            )
+        }
+        ("GET", ["guilds", _, "members", user]) => {
+            reply(200, &json!({ "user": { "id": user }, "roles": [] }))
+        }
         ("GET", ["guilds", guild, "channels"]) => {
             let list: Vec<Value> = s
                 .channels
@@ -598,7 +662,9 @@ async fn answer(
             &json!({ "message": "401: Unauthorized", "code": 0 }),
         ));
     }
-    if let Some(r) = setup_route(&mut s, &method, &parts, &body) {
+    if let Some(r) =
+        setup_route(&mut s, &method, &parts, &body).or_else(|| access(&s, &method, &parts))
+    {
         return Ok(r);
     }
     let unknown = json!({ "message": "Unknown Message", "code": 10008 });
@@ -625,21 +691,7 @@ async fn answer(
         ("GET", ["guilds", _, "threads", "active"]) => {
             reply(200, &json!({ "threads": s.threads, "members": [] }))
         }
-        ("GET", ["channels", id, "messages"]) => {
-            let limit = usize::try_from(param(&query, "limit").unwrap_or(50)).unwrap();
-            let before = param(&query, "before");
-            let list = s.history.get(*id).cloned().unwrap_or_default();
-            let page: Vec<Value> = list
-                .iter()
-                .rev()
-                .filter(|m| {
-                    before.is_none_or(|b| m["id"].as_str().unwrap().parse::<u64>().unwrap() < b)
-                })
-                .take(limit)
-                .cloned()
-                .collect();
-            reply(200, &Value::Array(page))
-        }
+        ("GET", ["channels", id, "messages"]) => history_page(&s, id, &query),
         ("GET", ["channels", id, "messages", mid]) => {
             match s
                 .history
@@ -651,6 +703,7 @@ async fn answer(
             }
         }
         ("POST", ["channels", id, "messages"]) => create(&mut s, id, &body),
+        ("POST", ["channels", id, .., "threads"]) => start_thread(&mut s, id, &parts, &body),
         ("PATCH", ["channels", id, "messages", mid]) => edit_message(&mut s, id, mid, &body),
         (
             "PUT",
@@ -665,6 +718,21 @@ async fn answer(
     Ok(response)
 }
 
+/// One page of a channel's history, newest first, as `limit` and `before` ask.
+fn history_page(s: &State, id: &str, query: &str) -> Response<Full<Bytes>> {
+    let limit = usize::try_from(param(query, "limit").unwrap_or(50)).unwrap();
+    let before = param(query, "before");
+    let list = s.history.get(id).cloned().unwrap_or_default();
+    let page: Vec<Value> = list
+        .iter()
+        .rev()
+        .filter(|m| before.is_none_or(|b| m["id"].as_str().unwrap().parse::<u64>().unwrap() < b))
+        .take(limit)
+        .cloned()
+        .collect();
+    reply(200, &Value::Array(page))
+}
+
 /// A request body: JSON, or a multipart body's `payload_json` with its files.
 fn decode(content_type: Option<&str>, bytes: &[u8]) -> (Value, Vec<(String, usize)>) {
     match content_type.and_then(|c| c.strip_prefix("multipart/form-data; boundary=")) {
@@ -674,6 +742,50 @@ fn decode(content_type: Option<&str>, bytes: &[u8]) -> (Value, Vec<(String, usiz
             Vec::new(),
         ),
     }
+}
+
+/// A public thread as Discord starts it: from a message (the thread takes the message's ID, one
+/// thread per message, none inside a thread) or without one.
+fn start_thread(
+    s: &mut State,
+    parent: &str,
+    parts: &[&str],
+    body: &Value,
+) -> Response<Full<Bytes>> {
+    let message = match parts {
+        [_, _, "messages", m, _] => Some(*m),
+        _ => None,
+    };
+    let in_thread = s
+        .channels
+        .get(parent)
+        .is_some_and(|c| matches!(c["type"].as_u64(), Some(11 | 12)));
+    if in_thread {
+        let why = json!({ "message": "Cannot execute action on this channel type", "code": 50024 });
+        return reply(400, &why);
+    }
+    let id = match message {
+        Some(m) => {
+            let found = s
+                .history
+                .get(parent)
+                .is_some_and(|l| l.iter().any(|x| x["id"] == m));
+            if !found {
+                return reply(404, &json!({ "message": "Unknown Message", "code": 10008 }));
+            }
+            if s.channels.contains_key(m) {
+                let why = json!({ "message": "A thread has already been created for this message", "code": 160_004 });
+                return reply(400, &why);
+            }
+            m.to_string()
+        }
+        None => (800_000_000_000_001_000u64 + s.threads.len() as u64).to_string(),
+    };
+    let thread = json!({ "id": id, "type": 11, "parent_id": parent, "guild_id": GUILD,
+        "name": body["name"], "thread_metadata": { "archived": false } });
+    s.channels.insert(id, thread.clone());
+    s.threads.push(thread.clone());
+    reply(201, &thread)
 }
 
 /// A channel edit: a thread's name or archived flag.
@@ -815,24 +927,37 @@ impl FakeDiscord {
             .insert("gateway".into(), json!({ "url": url }));
     }
 
-    /// A button press interaction from `user` on bot message `message` in `channel`.
+    /// A button press interaction from `user` on bot message `message` in `channel` of the guild.
     pub fn press(&self, user: &str, channel: &str, message: &str, custom_id: &str) {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let raw = json!({"id": (700_000_000_000_000_000u64 + n).to_string(), "token": format!("tok{n}"),
-            "application_id": APP, "channel_id": channel, "type": 3,
+            "application_id": APP, "channel_id": channel, "guild_id": GUILD, "type": 3,
             "data": {"component_type": 2, "custom_id": custom_id},
             "message": {"id": message}, "member": {"user": {"id": user}}});
         self.gw(Gw::Dispatch("INTERACTION_CREATE", raw));
     }
 
-    /// Any component or modal interaction: `kind` 3 with `data` holding `component_type` and
-    /// `values`, or 5 (modal submit) with its `components`.
+    /// Any component or modal interaction in the guild: `kind` 3 with `data` holding
+    /// `component_type` and `values`, or 5 (modal submit) with its `components`.
     pub fn interact(&self, user: &str, channel: &str, message: &str, kind: u64, data: &Value) {
+        self.interact_in(GUILD, user, channel, message, kind, data);
+    }
+
+    /// [`FakeDiscord::interact`] from the server `guild`.
+    pub fn interact_in(
+        &self,
+        guild: &str,
+        user: &str,
+        channel: &str,
+        message: &str,
+        kind: u64,
+        data: &Value,
+    ) {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let raw = json!({"id": (710_000_000_000_000_000u64 + n).to_string(), "token": format!("tik{n}"),
-            "application_id": APP, "channel_id": channel, "type": kind, "data": data,
+            "application_id": APP, "channel_id": channel, "guild_id": guild, "type": kind, "data": data,
             "message": {"id": message}, "member": {"user": {"id": user}}});
         self.gw(Gw::Dispatch("INTERACTION_CREATE", raw));
     }

@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 
 use super::args::Parsed;
 use super::out;
-use super::setup::{self, Terminal};
+use super::setup::Terminal;
+use crate::config::file;
 use crate::config::{self, Config, Destination, sha256_hex};
 use crate::relay::discord::{API, ChannelRef, Rest, Snowflake};
 use crate::relay::http::Base;
@@ -35,17 +36,30 @@ const MESSAGE_CONTENT_LIMITED: u64 = 1 << 19;
 /// of a bot in fewer than 100 servers.
 const LIMITED_INTENTS: u64 = (1 << 13) | (1 << 15) | MESSAGE_CONTENT_LIMITED;
 /// What Cataly does in its server: manage channels (setup creates its two), add reactions, view
-/// channels, send messages, read message history, manage threads, create public threads, send
-/// messages in threads, pin messages (the ops panel pins its message; it works unpinned without).
+/// channels, send messages, read message history, connect and speak in a voice channel (voice
+/// calls), manage threads, create public threads, send messages in threads, pin messages (the ops
+/// panel pins its message; it works unpinned without).
 const PERMISSIONS: u64 = (1 << 4)
     | (1 << 6)
-    | (1 << 10)
+    | VIEW_CHANNEL
     | (1 << 11)
     | (1 << 16)
+    | CONNECT
+    | SPEAK
     | (1 << 34)
     | (1 << 35)
     | (1 << 38)
     | (1 << 51);
+const ADMINISTRATOR: u64 = 1 << 3;
+const VIEW_CHANNEL: u64 = 1 << 10;
+const CONNECT: u64 = 1 << 20;
+const SPEAK: u64 = 1 << 21;
+/// What the bot needs in the voice channel, with Discord's names.
+const VOICE_NEEDS: [(u64, &str); 3] = [
+    (VIEW_CHANNEL, "View Channel"),
+    (CONNECT, "Connect"),
+    (SPEAK, "Speak"),
+];
 /// The lead's channel and the job notices' channel (also the name of the destination for it).
 pub(super) const LEAD: &str = "cataly";
 pub(super) const OPS: &str = "cataly-ops";
@@ -384,11 +398,7 @@ impl Flow<'_> {
 
     /// The invite link: the bot scope with Cataly's permissions.
     fn invite(&mut self) -> String {
-        let id = self
-            .found
-            .application
-            .map_or_else(String::new, |a| a.to_string());
-        let link = format!("{INVITE}?client_id={id}&scope=bot&permissions={PERMISSIONS}");
+        let link = invite_link(self.found.application);
         self.found.invite = Some(link.clone());
         link
     }
@@ -659,6 +669,102 @@ impl Discord {
         }
     }
 
+    /// The server's voice channels, as (ID, name), read now.
+    pub(super) async fn voice_channels(&self) -> Result<Vec<(Snowflake, String)>, String> {
+        let all = self
+            .rest
+            .guild_channels(self.guild)
+            .await
+            .map_err(|e| format!("reading the server's channels: {e}"))?;
+        Ok(all
+            .iter()
+            .filter(|c| c.get("type").and_then(Value::as_u64) == Some(2))
+            .filter_map(|c| {
+                let id = c
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(Snowflake::parse)?;
+                let name = c.get("name").and_then(Value::as_str).unwrap_or_default();
+                Some((id, name.to_string()))
+            })
+            .collect())
+    }
+
+    /// Creates the voice channel `name` (after the owner's yes). Never repeated after an uncertain
+    /// outcome: the next run finds it by name.
+    pub(super) async fn create_voice(&self, name: &str) -> Result<Snowflake, String> {
+        match self.rest.create_voice_channel(self.guild, name).await {
+            Ok(v) => v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(Snowflake::parse)
+                .filter(|_| v.get("name").and_then(Value::as_str) == Some(name))
+                .ok_or_else(|| {
+                    format!("Discord's answer named no voice channel {name}; run setup again, it finds the channel if it was made")
+                }),
+            Err(e) if e.status == Some(403) => Err(format!(
+                "the bot may not create channels ({e}): give it Manage Channels by opening {}, \
+                 or create the voice channel {name} yourself, then run setup again",
+                self.found.invite.as_deref().unwrap_or(INVITE)
+            )),
+            Err(e) if e.uncertain => Err(format!(
+                "Discord did not confirm the voice channel {name} ({e}); run setup again, it finds the channel if it was made"
+            )),
+            Err(e) => Err(format!("creating the voice channel {name}: {e}")),
+        }
+    }
+
+    /// Whether the bot may join and speak in the voice channel `channel` (a channel still to be
+    /// created gets the server-wide permissions). `Err` says what is missing and how to fix it.
+    pub(super) async fn voice_access(
+        &self,
+        channel: Option<Snowflake>,
+        shown: &str,
+    ) -> Result<(), String> {
+        let bot = self
+            .me
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let read = |e: crate::relay::discord::RestError| {
+            format!("reading the bot's permissions in {}: {e}", self.server)
+        };
+        let guild = self.rest.guild(self.guild).await.map_err(read)?;
+        let member = self.rest.member(self.guild, bot).await.map_err(read)?;
+        let overwrites = match channel {
+            Some(id) => self
+                .rest
+                .guild_channels(self.guild)
+                .await
+                .map_err(read)?
+                .into_iter()
+                .find(|c| c.get("id").and_then(Value::as_str) == Some(id.to_string().as_str()))
+                .and_then(|c| c.get("permission_overwrites").cloned())
+                .unwrap_or(Value::Null),
+            None => Value::Null,
+        };
+        let app = self
+            .app
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(Snowflake::parse);
+        match voice_blocked(&guild, &member, bot, &overwrites) {
+            None => Ok(()),
+            Some(Blocked::Server(missing)) => Err(format!(
+                "the bot lacks {missing} in {}; open {} to invite it again with the permissions \
+                 voice needs (inviting again updates its role), or give its role {missing}; then run \
+                 `cataly setup --voice on` again. Voice was not enabled",
+                self.server,
+                invite_link(app)
+            )),
+            Some(Blocked::Overwrite(missing, by)) => Err(format!(
+                "the voice channel {shown} denies the bot {missing} through its permission \
+                 overwrite for {by}; allow it there (Edit Channel, Permissions), then run \
+                 `cataly setup --voice on` again. Voice was not enabled"
+            )),
+        }
+    }
+
     /// What the profile step does with the bot's avatar and banner and the application's icon. An
     /// image is set when there is none, when it is the one Cataly set earlier but Cataly's default
     /// changed since, or always with `force` (`--profile`); one the owner set by hand is kept.
@@ -824,26 +930,17 @@ pub(super) fn config_text(
 ) -> String {
     let c = &config.discord;
     if c.guild != Some(d.guild) {
-        text = setup::set_key(&text, "discord", "guild", &d.guild.to_string());
+        text = file::set_key(&text, "discord", "guild", &d.guild.to_string());
     }
     if c.owner != Some(d.owner) {
-        text = setup::set_key(&text, "discord", "owner", &d.owner.to_string());
+        text = file::set_key(&text, "discord", "owner", &d.owner.to_string());
     }
     if !c.channels.contains(&lead) {
         let mut channels = c.channels.clone();
         channels.push(lead);
-        let quoted: Vec<String> = channels
-            .iter()
-            .map(|c| setup::toml_string(&c.to_string()))
-            .collect();
-        text = setup::set_rendered(
-            &text,
-            "discord",
-            "channels",
-            &format!("[{}]", quoted.join(", ")),
-        );
+        text = file::set_rendered(&text, "discord", "channels", &file::string_list(&channels));
         if channels.len() > 1 && c.home.is_none() {
-            text = setup::set_key(&text, "discord", "home", &lead.to_string());
+            text = file::set_key(&text, "discord", "home", &lead.to_string());
         }
     }
     let dest = Destination::Discord {
@@ -851,10 +948,111 @@ pub(super) fn config_text(
     };
     if config.destinations.get(OPS) != Some(&dest) {
         let section = format!("destinations.{OPS}");
-        text = setup::set_key(&text, &section, "kind", "discord");
-        text = setup::set_key(&text, &section, "channel", &ops.to_string());
+        text = file::set_key(&text, &section, "kind", "discord");
+        text = file::set_key(&text, &section, "channel", &ops.to_string());
     }
     text
+}
+
+/// The invite link for the application `app`: the bot scope with Cataly's permissions.
+fn invite_link(app: Option<Snowflake>) -> String {
+    let id = app.map_or_else(String::new, |a| a.to_string());
+    format!("{INVITE}?client_id={id}&scope=bot&permissions={PERMISSIONS}")
+}
+
+/// Why the bot cannot join a voice channel.
+#[derive(Debug, PartialEq, Eq)]
+enum Blocked {
+    /// Its roles lack these permissions server-wide.
+    Server(String),
+    /// The channel's overwrites for these holders take these permissions away.
+    Overwrite(String, String),
+}
+
+/// Discord's permission computation for the bot in one channel (server roles, then the channel's
+/// overwrites for `@everyone`, the bot's roles and the bot), reporting what voice lacks.
+fn voice_blocked(guild: &Value, member: &Value, bot: &str, overwrites: &Value) -> Option<Blocked> {
+    let bits = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let everyone = guild.get("id").and_then(Value::as_str).unwrap_or_default();
+    let mine: Vec<&str> = member
+        .get("roles")
+        .and_then(Value::as_array)
+        .map_or_default(|r| r.iter().filter_map(Value::as_str).collect());
+    let roles = guild.get("roles").and_then(Value::as_array);
+    let role = |id: &str| roles.and_then(|r| r.iter().find(|x| x["id"] == id));
+    let mut base = bits(role(everyone).and_then(|r| r.get("permissions")));
+    for id in &mine {
+        base |= bits(role(id).and_then(|r| r.get("permissions")));
+    }
+    if base & ADMINISTRATOR != 0 || guild.get("owner_id").and_then(Value::as_str) == Some(bot) {
+        return None;
+    }
+    let lacking = |have: u64| -> u64 {
+        VOICE_NEEDS
+            .iter()
+            .filter(|(b, _)| have & b == 0)
+            .map(|(b, _)| *b)
+            .sum()
+    };
+    let names = |bits: u64| {
+        let list: Vec<&str> = VOICE_NEEDS
+            .iter()
+            .filter(|(b, _)| bits & b != 0)
+            .map(|(_, n)| *n)
+            .collect();
+        list.join(" and ")
+    };
+    if lacking(base) != 0 {
+        return Some(Blocked::Server(names(lacking(base))));
+    }
+    let list = overwrites.as_array().map_or_default(Vec::as_slice);
+    let of = |id: &str| list.iter().find(|o| o["id"] == id);
+    // Each step: who it is, its deny, its allow.
+    let mut steps = Vec::new();
+    if let Some(o) = of(everyone) {
+        steps.push((
+            "@everyone".to_string(),
+            bits(o.get("deny")),
+            bits(o.get("allow")),
+        ));
+    }
+    let (mut deny, mut allow, mut holders) = (0, 0, Vec::new());
+    for id in mine.iter().filter(|id| **id != everyone) {
+        if let Some(o) = of(id) {
+            deny |= bits(o.get("deny"));
+            allow |= bits(o.get("allow"));
+            let name = role(id).and_then(|r| r["name"].as_str()).unwrap_or(id);
+            holders.push(format!("role {name}"));
+        }
+    }
+    if !holders.is_empty() {
+        steps.push((holders.join(", "), deny, allow));
+    }
+    if let Some(o) = of(bot) {
+        steps.push((
+            "the bot".to_string(),
+            bits(o.get("deny")),
+            bits(o.get("allow")),
+        ));
+    }
+    let mut have = base;
+    for (_, deny, allow) in &steps {
+        have = (have & !deny) | allow;
+    }
+    let missing = lacking(have);
+    if missing == 0 {
+        return None;
+    }
+    let by: Vec<&str> = steps
+        .iter()
+        .filter(|(_, deny, _)| deny & missing != 0)
+        .map(|(who, _, _)| who.as_str())
+        .collect();
+    Some(Blocked::Overwrite(names(missing), by.join(", ")))
 }
 
 /// Whether the application has either Message Content flag.
@@ -941,7 +1139,46 @@ mod tests {
 
     #[test]
     fn invite_permissions_are_the_ones_cataly_uses() {
-        assert_eq!(PERMISSIONS, 2_252_126_231_268_432);
+        assert_eq!(PERMISSIONS, 2_252_126_234_414_160);
+        assert_eq!(PERMISSIONS & (CONNECT | SPEAK), CONNECT | SPEAK);
+    }
+
+    #[test]
+    fn voice_access_follows_roles_then_channel_overwrites() {
+        let guild = |everyone: u64| {
+            json!({ "id": "1", "owner_id": "9", "roles": [
+                { "id": "1", "name": "@everyone", "permissions": everyone.to_string() },
+                { "id": "2", "name": "Cataly", "permissions": SPEAK.to_string() },
+            ]})
+        };
+        let member = json!({ "roles": ["2"] });
+        let all = VIEW_CHANNEL | CONNECT | SPEAK;
+        let none = Value::Null;
+        assert_eq!(voice_blocked(&guild(all), &member, "5", &none), None);
+        // Speak comes from the bot's role; Connect is missing server-wide.
+        assert_eq!(
+            voice_blocked(&guild(VIEW_CHANNEL), &member, "5", &none),
+            Some(Blocked::Server("Connect".into()))
+        );
+        let admin = json!({ "id": "1", "roles": [
+            { "id": "1", "permissions": ADMINISTRATOR.to_string() } ] });
+        assert_eq!(voice_blocked(&admin, &member, "5", &none), None);
+        // An @everyone deny is lifted by an allow for the bot's role, not by nothing.
+        let deny = json!([{ "id": "1", "type": 0, "allow": "0", "deny": CONNECT.to_string() }]);
+        assert_eq!(
+            voice_blocked(&guild(all), &member, "5", &deny),
+            Some(Blocked::Overwrite("Connect".into(), "@everyone".into()))
+        );
+        let lifted = json!([
+            { "id": "1", "type": 0, "allow": "0", "deny": CONNECT.to_string() },
+            { "id": "2", "type": 0, "allow": CONNECT.to_string(), "deny": "0" },
+        ]);
+        assert_eq!(voice_blocked(&guild(all), &member, "5", &lifted), None);
+        let bot = json!([{ "id": "5", "type": 1, "allow": "0", "deny": SPEAK.to_string() }]);
+        assert_eq!(
+            voice_blocked(&guild(all), &member, "5", &bot),
+            Some(Blocked::Overwrite("Speak".into(), "the bot".into()))
+        );
     }
 
     #[test]

@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.2.4 (Unreleased)
+
+- The ops panel has a **📡 Watched channels** button. It opens a private Discord channel picker
+  with the watched channels already chosen. On submit the hub checks that the bot may view and
+  read the history of each newly picked channel (one call each) and refuses the whole pick,
+  naming the channel and the missing permission, if not. Then it writes `[discord] channels`
+  into the config file as it is at that moment (keeping your other lines, moving `home` to a
+  watched channel when needed, dropping unwatched channels from `others`), checks it as
+  `cataly config check` does and applies it as `cataly config reload` does. Only
+  `[discord] owner` may use it, from `[discord] guild`; an invalid result or a failed write
+  changes nothing. Channels past the picker's 25 are kept.
+- A change of `[discord] channels`, `home` or `others` alone, from the panel or
+  `cataly config reload`, now applies on the running Gateway connection: a new channel is read
+  from the moment the change was applied and catch-up after a reconnect covers it; a dropped one
+  stops being read at once. Before, any `[discord]` change restarted intake and opened a new
+  connection.
+- A watched channel the bot cannot read no longer stops Discord intake for every channel: it
+  leaves intake alone with one `relay.held` notice naming the missing permission, at start, on a
+  channel change or when a catch-up read meets it.
+- The lead sleeps when it has been fully idle for `[lead] idle_sleep` (default `2h`; `0s` turns it
+  off): no turn, no message waiting or in doubt, no open card or owner question and no open lane
+  (quiet notes wait through the sleep and go with the first turn after it). The hub
+  stops its OMP the orderly way and keeps the session; an owner message (typed or spoken), an
+  urgent event, a lane report or `cataly lead send` resumes the same session, and the message is
+  delivered once it is accepted. `cataly status`, `cataly lead status`, `cataly health` and the
+  ops panel show `asleep`; an update keeps a sleeping lead asleep.
+- The lead hands work to lanes. It does work likely to take 5 minutes or less itself in the
+  channel; longer work, development in a repository and work worth running beside other work go
+  to a lane in a thread under the owner's message, with a brief, done checks and a one-line
+  kickoff (`lane.open` `kickoff`, posted first in the new thread), and the lead answers with one
+  line naming the thread. An owner message in a lane's thread that asks to split a task out
+  becomes a second lane in a new thread beside the first (Discord nests no threads, so
+  `thread_from` a message inside a lane thread starts the thread in its channel).
+- A lane opened with `worktree` now works in that worktree. Before, its session, its done checks
+  and its brief's directory were the repository it was cut from, so lanes meant to edit in
+  parallel all edited the main checkout.
+- `cataly setup --voice on` turns on Discord voice calls in one command. It fills in every
+  `[voice]` key the config does not set yet: a voice channel (`--voice-channel <id|name>`, else
+  the server's only one, else `General`/`일반`, else a `Cataly` voice channel found or created),
+  the lead's home channel for the text, the models, voice and prices the live voice test uses, the
+  system time zone, the caps (30 minutes and 3 USD a day unless `--voice-daily-minutes` or
+  `--voice-cap-usd` say otherwise) and the key file (`--voice-key-file`, else
+  `secrets/voice-key`; without one setup stops before enabling anything). Keys you set are kept.
+  The summary says that calls cost money on your OpenAI key and shows the caps. `--voice off` turns
+  voice off and keeps the other keys. `cataly config check` now warns when voice is enabled but
+  would stay off, and names why. Before enabling voice, setup checks that the bot may view, connect
+  and speak in the voice channel; if not, it stops and prints a fresh invite link or names the
+  channel overwrite to fix.
+- The bot's invite link now also asks for Connect and Speak, which voice calls need
+  (`permissions=2252126234414160`). A bot invited before keeps its old role until you open the new
+  link.
+- Usage no longer holds session starts. The `quota` job keeps its alerts (one warning per level,
+  `levels` default `[70, 85, 95]`, and one note when a limit falls back below every level), and
+  the ops panel keeps its usage bars and turns amber at 90 % for a provider a live session uses.
+  `cataly quota`, `cataly quota lift`, the `quota.hold` and `quota.released` events and the
+  held-lead lines of `cataly lead status`, the panel and the update message are gone; `cataly
+  limits` shows usage. `alerts.quota` now posts a usage alert (`quota.level`).
+- A quota job's `hold` setting no longer does anything. The hub removes its line at start, keeps
+  the file as it was in `config.toml.before-0.2.4` and records a `config.cleaned` event; a file it
+  cannot write keeps the line, ignored, and `cataly health` and `cataly config check` name it.
+- An owner job's one-off server or network failure (HTTP 5xx, 429, a timeout) is retried on the
+  next tick and becomes a `job.failed` event, and so a note for the lead, only when it happens
+  twice in a row; a 404, 401 or bad setting is reported at once as before.
+- The planner no longer logs "planner pass failed" when it skips a pass that is not due yet.
+- On macOS the CLI now reports a control connection the hub closed without an answer as "the hub
+  closed the connection", as on Linux, instead of "Invalid argument (os error 22)". macOS can
+  report such a close as EINVAL or ENOTCONN rather than end of stream; these, like EPIPE and
+  ECONNRESET, count as closed without an answer on every platform, so `cataly update` and
+  `cataly rollback` count the stop once the hub has ended.
+- An OMP that is slow to exit after end of input on a loaded host no longer fails the OMP probe
+  when it ends at TERM; only a failed exit or one that needs KILL does. At hub shutdown each lane
+  now gets the same 27 s as the lead, so a slow exit keeps its full TERM grace before any KILL.
+- Voice no longer fails and holds itself right after a pass to the lead with "provider error
+  unknown_parameter: Unknown parameter: 'delegation_id'". Continuing the backend after a tool
+  result sent `delegation_id` on `response.create`, which takes only `type` and `event_id`. The
+  fake realtime server in the tests now rejects every field the Live API does not document for an
+  event, with the API's error shape.
+- Lead replies are now spoken in a live call, and a quiet call closes after the idle time. The
+  provider streams output audio all the time, silence included, and every chunk counted as
+  output, so voice never saw a pause: no reply piece was offered and idle close never came. Only
+  audible audio (at or above -55 dBFS) now counts as output.
+- After a provider failure or a voice cap, the summary post says what the owner and the
+  assistant said and what the tools did, instead of only "no summary: the session failed". No
+  model call is made, and voice stays held until `cataly voice restart`.
+- A quiet owner no longer logs "voice receive stalled; stream restarted" every 10 to 15 s. Discord
+  sends no audio during silence and reports speaking once, so silence was taken for a stall; a
+  stall is now owner audio that keeps arriving but does not decode.
+
 ## 0.2.3 (2026-11-27)
 
 - `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that

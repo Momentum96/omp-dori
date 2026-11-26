@@ -190,6 +190,15 @@ jobs:
         env:
           CATALY_CONTRACT_OMP: "1"
         run: cargo test --locked --release --no-fail-fast --test 'contract*' -- --nocapture
+      # The lead's sleep against stock OMP needs a 4 s idle time, which only a debug hub takes
+      # (`CATALY_IDLE_SLEEP`); release keeps the 5-minute minimum, too slow for five cycles here.
+      - name: Contract test of the lead's sleep (debug)
+        if: success() || failure()
+        env:
+          CATALY_CONTRACT_OMP: "1"
+        run: >-
+          cargo test --locked --test contract_session -- --nocapture --exact
+          lead_sleeps_and_wakes_against_stock_omp
 
   # Release binaries without a release, for scripts/release.sh --add: on a dispatch with `binaries`,
   # each target builds `cargo build --locked --release --features voice` with the release public key

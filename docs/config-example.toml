@@ -73,11 +73,10 @@ notifications = true
 login = "example-owner"
 destinations = ["owner-dm", "log"]
 
-# The quota gate: alerts at 70/85/95 % and holds new session starts from 85 %.
+# Usage alerts: one warning per limit as it reaches 70, 85 and 95 %.
 [jobs.quota]
 kind = "quota"
 levels = [70, 85, 95]
-hold = 85
 destinations = ["owner-dm"]
 
 # Back up the state folder to the private repository <login>/cataly-home. `cataly setup` writes

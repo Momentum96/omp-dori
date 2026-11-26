@@ -253,7 +253,7 @@ impl<R: Runtime> Lanes<R> {
         q.state = STARTING.into();
         let version = docs::put(&self.env.store, QUEUED, key, &q, Some(version)).await?;
         let digest = record::digest(&open);
-        let outcome = self.open_one(valid, None, digest, None).await;
+        let outcome = self.open_one(valid, None, digest, None, None).await;
         match &outcome {
             // The kickoff may have reached the agent: left for inspection, never retried.
             Ok(o) if o.starts_with("unconfirmed") => q.note = Some(o.clone()),

@@ -66,10 +66,11 @@ asks only what Discord forces, then fills in defaults without asking:
 2. **Message Content intent**: switched on through `PATCH /applications/@me` (Discord allows it for
    a bot in fewer than 100 servers). If Discord does not take it, setup names the place: Developer
    Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content Intent**.
-3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=2252126231268432`,
+3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=2252126234414160`,
    exactly the permissions Cataly uses (Manage Channels, View Channels, Send Messages, Read Message
-   History, Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads, Pin
-   Messages; the ops panel pins its message with it and works unpinned without). Setup
+   History, Add Reactions, Connect and Speak for voice calls, Create Public Threads, Send Messages
+   in Threads, Manage Threads, Pin Messages; the ops panel pins its message with it and works
+   unpinned without). Setup
    reads the bot's servers every 3 s until it joins (10 minutes at a terminal; `--wait 5m` in a
    script, none by default). With several servers it asks which (`--guild <id>`).
 
@@ -85,6 +86,7 @@ Then the defaults, each applied only where the config says nothing yet:
 | Home backup | to `<gh login>/cataly-home`, private, created if absent, when `gh` is logged in (see [Home backup](#home-backup)) | `--backup on\|off`, `--backup-repo owner/name` |
 | Jobs | `[jobs.health]` and `[jobs.pressure]` with their defaults, notices to `#cataly-ops`, unless a job of that kind exists | |
 | Service | the user service, enabled and started (see [`cataly service enable`](#cataly-service-enable)); only for an installed release | `--service on\|off` |
+| Voice | off. `--voice on` turns on the [Discord voice assistant](#voice-and-transcribe) and fills in every `[voice]` key the file does not set (see below); `--voice off` sets `enabled = false` and keeps the rest | `--voice on\|off`, `--voice-channel <id\|name>`, `--voice-daily-minutes <n>`, `--voice-cap-usd <usd>`, `--voice-key-file <path>` |
 
 Setup then shows one short summary (a `+` marks what this run changes) and asks once; nothing
 changes before you say yes. `--yes` says yes in a script; without it and without a terminal setup
@@ -222,12 +224,14 @@ Present means the hub keeps one standing lead session. Absent means no lead.
 | `session_id` | string | none | any non-blank | The lead resumes exactly this OMP session. |
 | `instructions` | string | none | absolute path to an owner-only file | Role instructions appended to the lead's system prompt. |
 | `autostart` | boolean | `true` | | Start the lead when the hub starts. |
+| `idle_sleep` | duration | `"2h"` | `"0s"` (off), or `"5m"` to `"720h"` | Put the lead to sleep after it has been fully idle this long: no turn running, no message waiting for it or in doubt, no open question or approval card, no open owner question and no open lane. Quiet notes that wait for its next turn do not keep it awake; they go with its first turn after it wakes. The hub then stops the lead's OMP the orderly way (never during a turn) and keeps its session. A message that would start a turn (yours, an urgent event, a lane report, `cataly lead send`) resumes the same session and is delivered once it is accepted. `cataly lead stop` and `cataly lead start` work as usual on a sleeping lead, and an update keeps it asleep. |
 
 ```toml
 [lead]
 model = "anthropic/claude-sonnet-4-5"
 thinking = "medium"
 cwd = "/home/me/work"
+idle_sleep = "2h"
 ```
 
 ## `[fallback]`
@@ -260,7 +264,7 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | `--guild` |
 | `api_base` | string | Discord's API | `http(s)://` on localhost only | Test override of the API address. | |
 | `owner` | string | none | Discord user ID | Your account. | `--owner` (default: the application's owner) |
-| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `#cataly`, found or created |
+| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. Can also be set from the [ops panel](#ops)'s 📡 button; a change applies on the running connection. | `#cataly`, found or created |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
 | `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `#cataly` when there are several |
 | `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button, on a card in `[hub] language` with the command in a code block. Cataly's own tools and a fixed list of read-only commands (`ls`, `cat`, `grep`, `git status`, `git log`, `git diff` and the like) never ask; anything else still does. | `--approvals on\|off` (setup's default: on) |
@@ -342,6 +346,38 @@ keys are not read, but a key that is not in the table below is an error at load 
 When enabled, a missing or invalid voice key turns voice off and names the
 field, but the rest of the configuration still applies. A build without the `voice` feature refuses
 `enabled = true` the same way. Voice also needs `[discord] guild` and `[discord] owner`.
+
+`cataly setup --voice on` writes `enabled = true` and fills in what the file does not set; keys you
+set are kept, and a later run changes only what a voice flag names:
+
+- `voice_channel`: the voice channel `--voice-channel <id|name>` names (a name that does not exist
+  is created), else the server's only voice channel, else the one named `General` or `일반`, else a
+  voice channel `Cataly`, found or created.
+- `text_channel`: the lead's home channel.
+- `speech_model = "gpt-live-1"`, `backend_model = "gpt-5.6-luna"`, `summary_model = "gpt-6-luna"`,
+  `voice = "marin"`; `backend_prices` and `summary_prices` 0.25 / 0.025 / 0.3 / 2.0 USD per million
+  tokens (input, cached input, cache write, output), `search_price = 0.01`,
+  `speech_price_per_minute = 0.06`. These are the starting values the live voice test also uses.
+  The prices only feed the spending cap's estimate, and they are yours to check: compare them with
+  [OpenAI's price list](https://openai.com/api/pricing/) and correct them in the file.
+- `zone`: the system's time zone.
+- `daily_minutes = 30` and `spending_cap_usd = 3.0`, or what `--voice-daily-minutes` and
+  `--voice-cap-usd` say.
+- `key_file`: the file `--voice-key-file` names, else `secrets/voice-key` when it exists. Cataly
+  does not look for a key OMP stores: OMP keeps provider keys in its own credential store and has
+  no public command that names a key file without reading the key. Without a key file setup stops
+  before it enables anything and asks you to save your OpenAI API key in `secrets/voice-key`
+  (`chmod 600`).
+
+The summary says plainly that calls cost money on your OpenAI key and shows the caps. On yes setup
+creates the voice channel if one is to be made, checks that voice would start with what it wrote,
+and asks a running hub to reload.
+
+Before it enables voice (or moves it with `--voice-channel`), setup reads the bot's permissions
+in the chosen voice channel: its roles, then the channel's overwrites. If View Channel, Connect or
+Speak is missing, it stops without enabling voice: for permissions the bot's roles lack it prints
+a fresh invite link (inviting the bot again updates its role's permissions), and for an overwrite
+it names the channel and whose overwrite denies them.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
@@ -630,7 +666,7 @@ lines; the panel words them, in `[hub] language`, and the event log keeps them a
 | `destination` | string | `"cataly-ops"` when that is a Discord destination | a Discord destination in `[destinations]`; `""` turns the room off | Where the panel and alerts go. |
 | `mute` | duration | `"1h"` | 1m–24h | How long the mute button silences new alerts. |
 | `alerts.pressure` | boolean | `true` | | Post when the host has been in alert for five minutes (`pressure.alert`). |
-| `alerts.quota` | boolean | `true` | | Post when the quota gate holds a provider (`quota.hold`). |
+| `alerts.quota` | boolean | `true` | | Post when a provider limit reaches an alert level (`quota.level`). |
 | `alerts.jobs` | boolean | `true` | | Post when a job routed here fails twice in a row. |
 | `alerts.backup` | boolean | `true` | | Post when a backup is refused (`backup.refused`). |
 | `alerts.github` | boolean | `true` | | Post GitHub news: `github.pr`, `github.notification`, `pr.feedback`, `pr.check_failed`, `pr.merged`. |
@@ -643,17 +679,15 @@ minute, like the [board](#coordination-coord). After an uncertain create it is n
 it stays in doubt until the lead names the message it found (board destination
 `ops:<channel id>`).
 Its colour is the worst state: green when all is fine, amber when something is worth a look (host
-busy, a limit of a provider that is not held at 90 % or more, a job with a failure, the lead in
-error), red when it needs you (host in alert, a held provider a live session uses, the lead held
-by the quota gate or its provider's limit, a job failing twice or waiting for your ack). A held
-provider no live session uses does not change the colour: under the summary, a held provider gets
-a line naming the held providers and saying whether a live session uses one or sessions on the
-other providers start normally. It shows:
+busy, a limit of a provider a live session uses at 90 % or more, a job with a failure, the lead in
+error), red when it needs you (host in alert, the lead held by OMP's usage limit or for the owner,
+a job failing twice or waiting for your ack). A spent limit of a provider no live session uses
+does not change the colour. It shows:
 
 - 🖥️ host: load bar and per cent, free memory and disk, live sessions (the lead and the lanes)
   of `max_sessions` (load and memory rounded to 5 %, so noise does not edit the panel);
 - 🔋 usage: one line per provider, by the name OMP reports, with its most used limit, a bar, the
-  per cent and the reset time; held providers marked;
+  per cent and the reset time;
 - 👥 sessions: the lead's state and model, lanes running and waiting;
 - 🛠️ jobs: all fine, or which jobs need attention;
 - 📮 recent: the last three events routed here (busy and ready changes left out), with relative
@@ -663,12 +697,31 @@ other providers start normally. It shows:
 
 Buttons, for the owner only (anyone else gets a private refusal): 🔄 refresh (once a minute at
 most), 📊 usage details (a private reply with every limit), 🔕 mute (silences new alerts for
-`mute`; press again to unmute; the panel keeps updating).
+`mute`; press again to unmute; the panel keeps updating), 📡 watched channels.
+
+**📡 Watched channels** opens a private channel picker (text and forum channels, up to 25) with
+the watched channels already chosen. On submit the hub first asks Discord, once per newly picked
+channel and within 2 s in all, whether the bot may view it and read its history; if not, the
+whole pick is refused with the channel and the missing permission named, and nothing changes.
+Then it writes `[discord] channels` into the file as it is at that moment, keeping your other
+lines, moves `home` to a watched channel when it would no longer be one (or sets it when several
+channels are now watched and it was unset), and drops channels no longer watched from `others`.
+The result is checked as `cataly config check` does and applied as `cataly config reload` does;
+a result that is not valid, or a file that cannot be written, changes nothing and is reported. A
+new channel is read from the moment the change was applied (a message sent meanwhile is caught
+up), its threads as `follow_threads` says; a dropped one stops being read at once, and messages
+of it still queued are dropped. With more than 25 watched channels the picker shows the first 25
+and keeps the rest. Only `[discord] owner` may submit it, and only from `[discord] guild`; the
+folder holding the file must be owner-only, as setup makes it.
+
+A watched channel the bot cannot read, when intake starts, when the channels change or later,
+leaves intake alone with one `relay.held` notice naming the missing permission; the other
+channels are read as before. It is checked again at the next start or channel change.
 
 **Alerts** are small embeds with the thumbnail, each kind at most once an hour and none while
-muted. One whose condition clears (`pressure.clear`, `quota.released`, `backup.clean`, the job
-working again) is edited to show it resolved and when, instead of a new post. Busy and ready
-changes never post; they only change the panel.
+muted. One whose condition clears (`pressure.clear`, `backup.clean`, the job working again) is
+edited to show it resolved and when, instead of a new post. Busy and ready changes never post;
+they only change the panel.
 
 ```toml
 [ops]
@@ -753,7 +806,10 @@ templates = { "run.done" = "{job} finished: {outcome}" }
 
 Built-in kinds. Each ticks every `every`, the first tick when the job is registered. All of them
 emit `job.failed` (fields `job`, `reason`) and `job.recovered` (`job`, `failures`) besides their
-own events.
+own events. A failure on the server's side or on the way to it (HTTP 408, 429 or 5xx, a time
+limit, a network error) is tried again on the next tick and reported only when it happens twice
+in a row, the count that opens an `alerts.jobs` alert; any other failure (a 404 or 401, a bad
+setting) is reported at once. `job.recovered` follows only a reported failure.
 
 | Kind | `every` default | `every` minimum | `timeout` default |
 |---|---|---|---|
@@ -795,28 +851,24 @@ Events: `pr.baseline` (`pr`, `title`, `state`), `pr.feedback` (`pr`, `author`, `
 `count`, `old`, `new`, `rewritten`), `pr.merged` (`pr`, `commit`), `pr.closed` (`pr`),
 `pr.reopened` (`pr`).
 
-#### `quota`: provider quota and the quota gate
+#### `quota`: provider usage alerts
 
-Warns once when a provider limit rises past an alert level. While a watched limit is at or above
-`hold`, the quota gate holds new session starts on that limit's provider; a session whose model
-(`provider/id`) belongs to another provider starts as usual. Only new sessions wait: resuming an
-existing session (the lead's last session after a hub restart, `cataly update`, `cataly rollback`
-or `cataly lead start`, and parked or live lanes) goes ahead. A fresh lead (`cataly lead start
---fresh`, or a first lead with no session yet) and new lanes wait; `cataly lead status`, the ops
-panel and the update message then name the provider, the limits with their reset times and
-`cataly quota lift`. The gate opens when fresh data shows the limits below, or when every limit
-that closed it has passed its reset time. `cataly status` and `cataly quota` name the held
-providers; `cataly quota lift` opens the gate by hand.
+Warns once when a provider limit rises past an alert level, and says once when it falls back below
+every level (after its window resets). Usage never holds a session start; `cataly limits` and the
+ops panel show every limit.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `providers` | list of strings | `[]` (all OMP reports) | | Providers watched. |
 | `levels` | list of integers | `[70, 85, 95]` | 1–100, at least one; sorted, duplicates dropped | Alert levels in per cent. |
-| `hold` | integer | `85` | 1–100 | The gate holds a provider's new sessions from this level. |
+
+`hold` (before 0.2.4) no longer does anything. The hub removes its line when it starts, keeping
+the file as it was in `config.toml.before-0.2.4` next to it and recording a `config.cleaned`
+event. When it cannot write the file (read-only, permission denied) the line stays, ignored, and
+`cataly health` and `cataly config check` name it; `cataly config check` never writes.
 
 Events: `quota.level` (`limit`, `provider`, `account`, `percent`, `window`, `reset_in`),
-`quota.recovered` (`limit`, `provider`, `account`, `percent`), `quota.hold` (`limits`, `level`),
-`quota.released` (`reason`).
+`quota.recovered` (`limit`, `provider`, `account`, `percent`).
 
 #### `backup`: commit and push a folder
 

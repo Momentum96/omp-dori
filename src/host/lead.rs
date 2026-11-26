@@ -1,6 +1,6 @@
 //! The standing lead (COORD-01, COORD-02, HOST-26, HOST-28, HOST-29): one session the hub starts,
-//! with its resume rules, crash recovery, the session cap, memory admission and the quota gate (a
-//! fresh session only: a resume never waits for it), and the API other parts use to reach it:
+//! with its resume rules, crash recovery, the session cap and memory admission, and the API other
+//! parts use to reach it:
 //!
 //! - [`Lead::deliver`] stores a message in the lead's inbox and delivers it when the lead can read;
 //!   it returns a [`Receipt`] (slice 2b hands owner messages over with it, 2c urgent events).
@@ -10,7 +10,10 @@
 //! clean close; after an unclean stop with a free lease it resumes with a note; with a held lease it
 //! is reported and not started. A configured lead session ID must be resumed exactly. When its OMP
 //! exits by itself the lead is restarted on the same session with backoff, and held for the owner
-//! after more than 5 restarts in 10 minutes (DESIGN 2.2).
+//! after more than 5 restarts in 10 minutes (DESIGN 2.2). A lead idle for `[lead] idle_sleep` is put
+//! to sleep and woken on the same session when a message needs it ([`sleep`]).
+
+mod sleep;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -27,7 +30,6 @@ use super::{Control, Role, Runtime, SessionEvent, Snapshot, StartError, StartSpe
 use crate::config::Config;
 use crate::config::session::RuntimeKind;
 use crate::jobs::event::{Emit, EventKind, Severity};
-use crate::jobs::owner::quota::{Held, QuotaHold};
 use crate::log;
 use crate::omp::Omp;
 use crate::omp::launch::Target;
@@ -44,8 +46,10 @@ const CONFIRM_TICK: Duration = Duration::from_secs(5);
 const SWEEP: Duration = Duration::from_mins(5);
 /// How often an automatic start that is waiting looks again.
 const AUTOSTART_TICK: Duration = Duration::from_secs(30);
-/// Bound for a graceful stop at hub shutdown: 15 s, TERM, 5 s, KILL.
-pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(22);
+/// Bound for a graceful stop at hub shutdown: end of input, 15 s, TERM, 5 s, KILL and 5 s to reap
+/// it, with 2 s for the state read before. The lead and every lane get all of it, so a slow exit
+/// keeps its TERM grace in full instead of being dropped, and so killed, before its KILL is due.
+pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(27);
 
 /// Builds the runtime of one start from the config in force, the resolved OMP executable and the
 /// runtime the session runs on: the config's for a new session, the stored one for a resume.
@@ -57,9 +61,6 @@ pub(crate) type Events = Arc<dyn Fn(Emit) + Send + Sync>;
 pub(crate) struct Env<R: Runtime> {
     pub(crate) config: watch::Receiver<Arc<Config>>,
     pub(crate) omp: Arc<Omp>,
-    /// Why the quota gate holds a new session on this model now, if it does (OJ-08). Asked for a
-    /// fresh lead only; a resume of the last session never waits on it.
-    pub(crate) quota_hold: QuotaHold,
     /// Whether the bridge link in OMP's extension folder is current (DESIGN 4.2, 12.2 C19).
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     pub(crate) events: Events,
@@ -78,6 +79,9 @@ pub(crate) enum Phase {
     Stopped,
     /// Not started and not to be started automatically until the owner acts.
     Held,
+    /// Its OMP was stopped after a long idle; the session is kept and resumed when a message that
+    /// starts a turn arrives.
+    Asleep,
 }
 
 /// `cataly lead status`.
@@ -85,9 +89,6 @@ pub(crate) enum Phase {
 pub(crate) struct View {
     pub(crate) phase: Phase,
     pub(crate) reason: Option<String>,
-    /// The quota gate holds the lead's new session; `reason` says it in words.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) quota: Option<Held>,
     pub(crate) session: Option<Snapshot>,
     /// Pending entries that start a turn (urgent or the owner's).
     pub(crate) waiting: usize,
@@ -95,6 +96,18 @@ pub(crate) struct View {
     pub(crate) notes: usize,
     pub(crate) sent: usize,
     pub(crate) in_doubt: usize,
+    /// The session kept while the lead is asleep, and since when.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) asleep: Option<Asleep>,
+}
+
+/// The lead's kept session while it sleeps.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct Asleep {
+    #[serde(skip)]
+    handle: String,
+    pub(crate) session_id: String,
+    pub(crate) since_ms: i64,
 }
 
 /// How the next start goes.
@@ -211,11 +224,15 @@ pub(crate) fn plan(
     }
 }
 
-/// The note for a resume after anything but a clean close.
+/// The note for a resume after anything but a clean close; a sleep records how its close went.
 fn unclean(row: &SessionRow) -> Option<String> {
-    match (row.state.as_str(), row.stop_how.as_deref()) {
-        ("stopped", Some("clean")) => None,
-        (_, how) => Some(format!(
+    match (
+        row.state.as_str(),
+        row.stop_how.as_deref(),
+        row.stop_detail.as_deref(),
+    ) {
+        ("stopped", Some("clean"), _) | ("stopped", Some(sleep::ASLEEP), Some("clean")) => None,
+        (_, how, _) => Some(format!(
             "resumed after an unclean stop ({})",
             how.unwrap_or("hub stopped")
         )),
@@ -285,9 +302,10 @@ pub(crate) struct Lead<R: Runtime> {
     turn_started: Mutex<Option<Instant>>,
     /// How the first start of this hub run went (the message after an update).
     came: OnceLock<LeadStart>,
-    /// The quota gate holds the lead's new session: set with the not-started phase it explains,
-    /// cleared by any other phase change.
-    quota: Mutex<Option<Held>>,
+    /// The session put to sleep: set before its close, cleared by any phase change but sleep.
+    asleep: Mutex<Option<Asleep>>,
+    /// The lead's last activity: a session event, a delivery, a start or a busy idle check.
+    active: Mutex<Instant>,
 }
 
 impl<R: Runtime> Lead<R> {
@@ -313,7 +331,8 @@ impl<R: Runtime> Lead<R> {
             followers: broadcast::channel(256).0,
             turn_started: Mutex::new(None),
             came: OnceLock::new(),
-            quota: Mutex::new(None),
+            asleep: Mutex::new(None),
+            active: Mutex::new(Instant::now()),
         })
     }
 
@@ -335,32 +354,7 @@ impl<R: Runtime> Lead<R> {
 
     fn set_phase(&self, phase: Phase, reason: Option<String>) {
         *self.phase() = (phase, reason);
-        *self.quota_hold() = None;
-    }
-
-    fn quota_hold(&self) -> MutexGuard<'_, Option<Held>> {
-        self.quota.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The quota gate holds the lead's new session: the phase stays (an automatic start keeps
-    /// waiting, a stopped lead stays stopped) with the hold as its reason, said once per change.
-    fn held_by_quota(&self, held: Held) -> String {
-        let reason = held.to_string();
-        let same = self.quota_hold().as_ref() == Some(&held);
-        self.phase().1 = Some(reason.clone());
-        *self.quota_hold() = Some(held);
-        if !same {
-            self.emit(
-                Emit::new(EventKind::LeadNotStarted, Severity::Warning, true, "lead")
-                    .with("reason", &reason),
-            );
-        }
-        reason
-    }
-
-    /// The quota gate's hold on the lead's new session, while it keeps the lead from starting.
-    pub(crate) fn quota_held(&self) -> Option<Held> {
-        self.quota_hold().clone()
+        *self.sleep() = None;
     }
 
     /// Why the lead is not running, while no session runs and the hub recorded a reason.
@@ -379,7 +373,8 @@ impl<R: Runtime> Lead<R> {
         (self.env.events)(emit);
     }
 
-    /// The supervised task: recovery once, the automatic start when the gate allows, then the inbox.
+    /// The supervised task: recovery once, the automatic start when admission allows, then the inbox;
+    /// it also carries the idle timer that puts the lead to sleep and wakes it for a message.
     pub(crate) async fn run(
         self: Arc<Self>,
         mut shutdown: watch::Receiver<bool>,
@@ -390,16 +385,28 @@ impl<R: Runtime> Lead<R> {
             if *shutdown.borrow() {
                 return Ok(());
             }
+            let mut waking = false;
             if self.env.omp.report().is_some() {
                 if !self.recovered.swap(true, Ordering::AcqRel) {
                     self.recover().await;
+                    self.keep_asleep().await;
                 }
                 if self.restart_wait() == Some(Duration::ZERO) {
                     self.restart().await;
                 }
-                if self.wants_autostart() {
+                waking = self.wants_wake().await;
+                if waking || self.wants_autostart() {
                     match self.start(false).await {
-                        Ok(_) => last_refusal = None,
+                        Ok(view) => {
+                            if waking {
+                                let session = view.session.and_then(|s| s.session_id);
+                                log::info(
+                                    "lead woke",
+                                    &[("session", &session.unwrap_or_default())],
+                                );
+                            }
+                            last_refusal = None;
+                        }
                         Err(reason) if last_refusal.as_deref() != Some(&reason) => {
                             log::info("lead not started yet", &[("reason", &reason)]);
                             last_refusal = Some(reason);
@@ -409,6 +416,7 @@ impl<R: Runtime> Lead<R> {
                 }
                 let _ = self.flush(None).await;
             }
+            self.sleep_if_idle().await;
             // A batch that found the lead between states (a turn just ending) goes when the lead
             // turns idle (see `watch`); the confirm tick is only the backstop.
             let live = self.current().is_some_and(|s| s.alive());
@@ -416,12 +424,15 @@ impl<R: Runtime> Lead<R> {
                 || (live && self.mailbox.waking_pending().await)
             {
                 CONFIRM_TICK
-            } else if self.wants_autostart() || self.env.omp.report().is_none() {
+            } else if waking || self.wants_autostart() || self.env.omp.report().is_none() {
                 AUTOSTART_TICK.min(SWEEP)
             } else {
                 SWEEP
             };
-            if let Some(wait) = self.restart_wait() {
+            for wait in [self.restart_wait(), self.sleep_wait()]
+                .into_iter()
+                .flatten()
+            {
                 tick = tick.min(wait);
             }
             tokio::select! {
@@ -520,8 +531,7 @@ impl<R: Runtime> Lead<R> {
         }
     }
 
-    /// Why a start must wait now, if it must (HOST req. 89-90; DESIGN 3.4). The quota gate is asked
-    /// in [`Lead::launch`] once the target is known: it holds new sessions only (OJ-08).
+    /// Why a start must wait now, if it must (HOST req. 89-90; DESIGN 3.4).
     async fn admission(&self, config: &Config) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
@@ -716,7 +726,6 @@ impl<R: Runtime> Lead<R> {
                 Err(reason)
             }
             Plan::Fresh(how, reason) => {
-                self.admit_new(&settings.model)?;
                 log::info("lead starts fresh", &[("reason", &reason)]);
                 Ok(Chosen::fresh(dir, default, how))
             }
@@ -748,22 +757,12 @@ impl<R: Runtime> Lead<R> {
                     self.set_phase(Phase::Held, Some(reason.clone()));
                     return Err(reason);
                 }
-                self.admit_new(&settings.model)?;
                 log::warn(
                     "lead starts fresh",
                     &[("reason", &reason), ("detail", &detail)],
                 );
                 Ok(Chosen::fresh(dir, default, LeadStart::Unverified))
             }
-        }
-    }
-
-    /// The quota gate holds new sessions only (OJ-08): every fresh lead start asks it, a resume of
-    /// the lead's last session never does.
-    fn admit_new(&self, model: &str) -> Result<(), String> {
-        match (self.env.quota_hold)(model) {
-            Some(held) => Err(self.held_by_quota(held)),
-            None => Ok(()),
         }
     }
 
@@ -790,6 +789,7 @@ impl<R: Runtime> Lead<R> {
         *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&session));
         self.closing.store(false, Ordering::Release);
         self.set_phase(Phase::Live, started.held.clone());
+        self.touch();
         let identity = (started.session_id.clone(), PathBuf::from(&started.file));
         tokio::spawn(Arc::clone(self).watch(
             handle,
@@ -1095,22 +1095,7 @@ impl<R: Runtime> Lead<R> {
                     );
                 }
                 SessionEvent::Stopped { record } => {
-                    self.update(SessionUpdate {
-                        handle: handle.clone(),
-                        state: Some("stopped".into()),
-                        stop: Some((record.how.clone(), record.detail.clone())),
-                        ..SessionUpdate::default()
-                    })
-                    .await;
-                    self.set_phase(Phase::Stopped, Some(format!("stopped: {}", record.how)));
-                    if record.how == "exited" && !self.closing.load(Ordering::Acquire) {
-                        let exit = record.detail.as_deref().unwrap_or("no exit status");
-                        self.exited(
-                            identity,
-                            &format!("its OMP exited by itself ({exit})"),
-                            Some(exit),
-                        );
-                    }
+                    self.ended(&handle, identity, &record).await;
                     self.wake.notify_one();
                     return;
                 }
@@ -1121,6 +1106,30 @@ impl<R: Runtime> Lead<R> {
                 | SessionEvent::LinkLost
                 | SessionEvent::InterruptUnconfirmed => {}
             }
+        }
+    }
+
+    /// The watched session ended: its record and phase, and a restart when its OMP exited by itself.
+    /// A sleep records its own stop, and nothing restarts.
+    async fn ended(&self, handle: &str, identity: (String, PathBuf), record: &super::StopRecord) {
+        if self.sleeps(handle) {
+            return;
+        }
+        self.update(SessionUpdate {
+            handle: handle.to_string(),
+            state: Some("stopped".into()),
+            stop: Some((record.how.clone(), record.detail.clone())),
+            ..SessionUpdate::default()
+        })
+        .await;
+        self.set_phase(Phase::Stopped, Some(format!("stopped: {}", record.how)));
+        if record.how == "exited" && !self.closing.load(Ordering::Acquire) {
+            let exit = record.detail.as_deref().unwrap_or("no exit status");
+            self.exited(
+                identity,
+                &format!("its OMP exited by itself ({exit})"),
+                Some(exit),
+            );
         }
     }
 
@@ -1238,6 +1247,8 @@ impl<R: Runtime> Lead<R> {
 
     async fn deliver_as(&self, request: Message, live: bool) -> Result<Receipt, String> {
         let called = Instant::now();
+        // Before the lock: a sleep waiting on it sees the lead busy again.
+        self.touch();
         let (receipt, stored) = {
             let _one = self.flushing.lock().await;
             let session = self.current();
@@ -1269,6 +1280,7 @@ impl<R: Runtime> Lead<R> {
     /// Passes an event to the relays; a turn start is stamped first. Nobody following is fine; a
     /// slow follower sees `Lagged` and reads the state again.
     fn forward(&self, event: &SessionEvent) {
+        self.touch();
         if *event == SessionEvent::TurnStarted {
             *self
                 .turn_started
@@ -1305,24 +1317,25 @@ impl<R: Runtime> Lead<R> {
     /// Decision 15 recovery: whether an owner request that an earlier hub run may have written
     /// to the lead before its record landed ([`inbox::wake_id`]) reached the lead's transcript.
     /// `Some(true)` when a user entry of the current or the previous lead transcript carries its
-    /// marker; `Some(false)` when neither does and a lead started by this hub runs (the process an
-    /// earlier run wrote to has let go of its session, so its file is final); `None` while no lead
-    /// runs yet. A transcript that cannot be searched is an error: the caller fails closed.
+    /// marker; `Some(false)` when neither does and a lead started by this hub runs, or the lead is
+    /// asleep (either way the process an earlier run wrote to has let go of its session, so its
+    /// file is final); `None` while no lead runs yet. A transcript that cannot be searched is an
+    /// error: the caller fails closed.
     pub(crate) async fn written_earlier(&self, request_id: &str) -> Result<Option<bool>, String> {
-        let Some(current) = self
+        let current = self
             .current()
             .filter(|s| s.alive())
-            .and_then(|s| s.snapshot().session_file.clone())
-        else {
+            .and_then(|s| s.snapshot().session_file.clone());
+        if current.is_none() && self.asleep().is_none() {
             return Ok(None);
-        };
+        }
         let earlier = self
             .env
             .store
             .read(|r| r.session_files("lead", 2))
             .await
             .map_err(|e| e.to_string())?;
-        let mut files = vec![current];
+        let mut files: Vec<String> = current.into_iter().collect();
         for file in earlier {
             if !files.contains(&file) {
                 files.push(file);
@@ -1354,7 +1367,7 @@ impl<R: Runtime> Lead<R> {
 
     /// After start-up recovery and the automatic start: how the lead came back in this hub run.
     /// `None` while it may still come up.
-    /// An automatic start the hub refused (the quota gate, memory admission, ...) settles it too:
+    /// An automatic start the hub refused (memory admission, ...) settles it too:
     /// the lead is not running, and the reason says why.
     pub(crate) fn settled(&self) -> Option<LeadStart> {
         if let Some(how) = self.came.get() {
@@ -1381,12 +1394,12 @@ impl<R: Runtime> Lead<R> {
         View {
             phase,
             reason,
-            quota: self.quota_held(),
             session: self.current().map(|s| (*s.snapshot()).clone()),
             waiting: pending(true),
             notes: pending(false),
             sent: count("sent"),
             in_doubt: count("in_doubt"),
+            asleep: self.asleep(),
         }
     }
 
@@ -1403,6 +1416,7 @@ impl<R: Runtime> Lead<R> {
 
     pub(crate) async fn settle(&self, index: usize, confirm: bool) -> Result<(), String> {
         self.mailbox.settle(index, confirm).await?;
+        self.touch();
         self.wake.notify_one();
         Ok(())
     }
@@ -1446,11 +1460,14 @@ impl<R: Runtime> Lead<R> {
     }
 
     /// Stops the lead; refused while it works or has a dialog unless forced (HOST req. 83). With no
-    /// lead running it cancels a planned automatic restart.
+    /// lead running it cancels a planned automatic restart, or keeps a sleeping lead stopped.
     pub(crate) async fn stop(&self, force: bool) -> Result<View, String> {
         let session = match self.live() {
             Ok(session) => session,
             Err(e) => {
+                if self.stop_asleep().await {
+                    return Ok(self.view().await);
+                }
                 if self.restarts().due.take().is_none() {
                     return Err(e);
                 }
@@ -1493,8 +1510,7 @@ impl<R: Runtime> Lead<R> {
         };
         let handle = session.snapshot().handle.clone();
         self.closing.store(true, Ordering::Release);
-        match tokio::time::timeout(STOP_BUDGET + Duration::from_secs(5), session.close(true)).await
-        {
+        match tokio::time::timeout(STOP_BUDGET, session.close(true)).await {
             Ok(Ok(record)) => {
                 self.update(SessionUpdate {
                     handle,

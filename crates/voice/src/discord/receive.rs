@@ -2,10 +2,11 @@
 //!
 //! Only the owner's SSRC is decoded; every other speaker is dropped before decryption. A stream
 //! that ends is resubscribed at once if it lived over 10 s, else after a delay doubling from 100 ms
-//! to 2 s. Once a second, an owner Discord reports as speaking with no audio decoded for 3 s gets a
-//! fresh stream. With DAVE active, unencrypted owner frames are accepted only within 30 s of an
-//! encryption-group change; end-to-end decryption failures are counted per burst (1 s quiet ends
-//! one).
+//! to 2 s. Once a second, if owner frames are still arriving but none has decoded to audio for 3 s,
+//! the stream is restarted. Silence is not a stall: Discord sends no frames while the owner is
+//! quiet, and its speaking event sets a speaking mode once rather than reporting each pause. With
+//! DAVE active, unencrypted owner frames are accepted only within 30 s of an encryption-group
+//! change; end-to-end decryption failures are counted per burst (1 s quiet ends one).
 
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,8 @@ const FIRST_DELAY: Duration = Duration::from_millis(100);
 const MAX_DELAY: Duration = Duration::from_secs(2);
 const STALL: Duration = Duration::from_secs(3);
 const STALL_LOG: Duration = Duration::from_secs(10);
+/// Owner frames count as arriving while the last one is this recent.
+const ARRIVING: Duration = Duration::from_secs(1);
 const PLAINTEXT_WINDOW: Duration = Duration::from_secs(30);
 const BURST_QUIET: Duration = Duration::from_secs(1);
 /// Undecodable frames in a row that end a stream.
@@ -49,7 +52,8 @@ pub(crate) struct Receiver {
     resubscribe_at: Option<Instant>,
     delay: Duration,
     group_changed: Option<Instant>,
-    speaking: bool,
+    /// When the last owner frame arrived, decodable or not.
+    last_frame: Option<Instant>,
     stall_logged: Option<Instant>,
     burst: Option<(Instant, u32)>,
     notices: Vec<Notice>,
@@ -65,7 +69,7 @@ impl Receiver {
             resubscribe_at: None,
             delay: FIRST_DELAY,
             group_changed: None,
-            speaking: false,
+            last_frame: None,
             stall_logged: None,
             burst: None,
             notices: Vec::new(),
@@ -79,10 +83,6 @@ impl Receiver {
             self.owner_ssrc = Some(ssrc);
             self.end(now);
         }
-    }
-
-    pub(crate) fn speaking(&mut self, on: bool) {
-        self.speaking = on;
     }
 
     /// An encryption-group change (DAVE transition executed).
@@ -143,6 +143,7 @@ impl Receiver {
         if self.owner_ssrc != Some(ssrc) {
             return None;
         }
+        self.last_frame = Some(now);
         if !self.ensure(now) {
             return None;
         }
@@ -190,7 +191,10 @@ impl Receiver {
             self.notices.push(Notice::DecryptBurst(n));
             self.burst = None;
         }
-        let stalled = self.speaking
+        let arriving = self
+            .last_frame
+            .is_some_and(|t| now.saturating_duration_since(t) < ARRIVING);
+        let stalled = arriving
             && self
                 .stream
                 .as_ref()
@@ -242,11 +246,17 @@ mod tests {
         let t0 = Instant::now();
         let mut r = Receiver::new();
         r.owner_ssrc(7, t0);
-        r.speaking(true);
         let f = opus();
         assert!(r.frame(7, &f, None, t0).is_some());
         assert_eq!(r.opened, 1);
-        // Discord says the owner speaks but nothing decodes for 3 s: the stream restarts.
+        // Owner frames keep arriving but none decodes for 3 s: the stream restarts.
+        let mut sealed = f.clone();
+        sealed.extend_from_slice(&MAGIC);
+        let mut never = |_: &[u8]| -> Option<Vec<u8>> { None };
+        for ms in (100..=2900).step_by(200) {
+            let at = t0 + Duration::from_millis(ms);
+            assert!(r.frame(7, &sealed, Some(&mut never), at).is_none());
+        }
         r.tick(t0 + Duration::from_secs(3));
         assert_eq!(r.notices(), vec![Notice::Stalled]);
         // It lived under 10 s: resubscribed after 100 ms, not before.
@@ -279,6 +289,23 @@ mod tests {
             let _ = r.frame(7, &[0xff, 0xff, 0xff], None, t2);
         }
         assert!(r.frame(7, &f, None, t2).is_some());
+    }
+
+    /// Silence is not a stall: with no owner frames arriving, nothing restarts or logs, however long
+    /// the owner stays quiet after speaking.
+    #[test]
+    fn silence_is_not_a_stall() {
+        let t0 = Instant::now();
+        let mut r = Receiver::new();
+        r.owner_ssrc(7, t0);
+        let f = opus();
+        assert!(r.frame(7, &f, None, t0).is_some());
+        for s in 1..=60 {
+            r.tick(t0 + Duration::from_secs(s));
+        }
+        assert_eq!(r.notices(), Vec::<Notice>::new());
+        assert_eq!(r.opened, 1);
+        assert!(r.frame(7, &f, None, t0 + Duration::from_secs(61)).is_some());
     }
 
     /// Check 2: unencrypted frames only within 30 s of an encryption change; failures per burst.

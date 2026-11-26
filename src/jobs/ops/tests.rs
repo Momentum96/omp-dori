@@ -161,7 +161,6 @@ impl Room {
         };
         let extra = Extra {
             host: "부하 172%".into(),
-            quota_release_ms: Some(now + HOUR_MS),
         };
         turn.run(panel, events, jobs, &extra, false).await
     }
@@ -170,7 +169,6 @@ impl Room {
 fn panel_with(load: f64, state: HostState) -> Panel {
     let mut p = render::tests::sample();
     p.limits = Some(Vec::new());
-    p.held.clear();
     p.host.load = Some(load);
     p.host.state = state;
     p
@@ -365,24 +363,25 @@ async fn pressure_alert_resolves_in_place() {
     let again = event("pressure.alert", "host", START + 20 * MIN, None);
     room.at(START + 20 * MIN, hot(), vec![again], &[], ko).await;
     assert_eq!(room.fake.count("create"), creates);
-    // Muted: a quota hold opens no post, but the panel still says so.
+    // Muted: a usage alert opens no post, but the panel still says so.
     let mute = Mute {
         until_ms: Some(START + 2 * HOUR_MS),
     };
     docs::put(&room.store, STATE, MUTE_ID, &mute, None)
         .await
         .unwrap();
-    let hold = event(
-        "quota.hold",
-        "quota",
+    let level = event(
+        "quota.level",
+        "anthropic#1/five_hour",
         START + 90 * MIN,
-        Some(r#"{"limits":"anthropic#1/five_hour","level":"85"}"#),
+        Some(r#"{"provider":"anthropic","percent":"85"}"#),
     );
-    room.at(START + 90 * MIN, calm(), vec![hold], &[], ko).await;
+    room.at(START + 90 * MIN, calm(), vec![level], &[], ko)
+        .await;
     assert_eq!(room.fake.count("create"), creates);
     let last = room.fake.calls().last().cloned().unwrap();
     assert!(last.0.starts_with("edit") && last.1.contains("🔕 알림 꺼짐"));
-    assert!(last.1.contains("⛔ 사용량 한도: anthropic 새 세션 보류"));
+    assert!(last.1.contains("🔋 anthropic 사용량 85%"));
 }
 
 /// A job routed here that fails twice opens one alert, resolved when it works again; the English
@@ -448,34 +447,31 @@ const OMP_19_2_1: &str = r#"{"generatedAt":1795660240551,"reports":[
   "accountsWithoutUsage":[],"disabledCredentials":[],"capacity":{}}"#;
 
 /// The 0.1.3 panel on the owner's machine: the lead live on anthropic, `openai-codex` and `devin`
-/// held by the quota gate.
+/// spent.
 #[test]
 fn the_live_omp_usage_renders_named_providers_and_green() {
     let usage = crate::omp::usage::parse_usage(OMP_19_2_1.as_bytes()).unwrap();
-    let held = vec!["devin".to_string(), "openai-codex".to_string()];
-    let limits = worst_per_provider(&usage.limits, &held);
-    let shown: Vec<(&str, Option<f64>, bool)> = limits
+    let limits = worst_per_provider(&usage.limits);
+    let shown: Vec<(&str, Option<f64>)> = limits
         .iter()
-        .map(|l| (l.provider.as_str(), l.percent, l.held))
+        .map(|l| (l.provider.as_str(), l.percent))
         .collect();
     assert_eq!(
         shown,
         [
-            ("openai-codex", Some(100.0), true),
-            ("anthropic", Some(83.0), false),
-            ("devin", Some(100.0), true),
+            ("openai-codex", Some(100.0)),
+            ("anthropic", Some(83.0)),
+            ("devin", Some(100.0)),
         ]
     );
     let mut p = render::tests::sample();
     p.limits = Some(limits);
-    p.held = held;
     p.people = People {
         lead: render::LeadState::Idle,
         model: Some("anthropic/claude-opus-5-5".into()),
         running: 0,
         waiting: 0,
         models: vec!["anthropic/claude-opus-5-5".into()],
-        lead_quota: None,
     };
     p.host.sessions = p.people.models.len();
     for (lang, words) in [
@@ -483,18 +479,16 @@ fn the_live_omp_usage_renders_named_providers_and_green() {
             Language::Korean,
             [
                 "🟢 모두 정상",
-                "⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요",
                 "세션 1/20",
-                "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R> · ⛔ 보류",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R>",
             ],
         ),
         (
             Language::English,
             [
                 "🟢 All fine",
-                "⛔ Held: devin, openai-codex · sessions on other providers start normally",
                 "Sessions 1/20",
-                "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R> · ⛔ held",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R>",
             ],
         ),
     ] {
@@ -506,4 +500,47 @@ fn the_live_omp_usage_renders_named_providers_and_green() {
         }
         assert!(!text.contains("unknown"), "{text}");
     }
+}
+
+#[test]
+fn picked_keeps_hidden_channels_a_watched_home_and_watched_others() {
+    let id = |n: u64| Snowflake::parse(&(600 + n).to_string()).unwrap();
+    let settings = |channels: &[u64], home: Option<u64>| DiscordSettings {
+        channels: channels.iter().map(|n| id(*n)).collect(),
+        home: home.map(id),
+        ..DiscordSettings::default()
+    };
+    let pick = |channels: &[u64], home: Option<u64>, kept: usize| Picked {
+        channels: channels.iter().map(|n| id(*n)).collect(),
+        home: home.map(id),
+        others: None,
+        kept,
+    };
+    // One channel, home unset: two chosen make the current home explicit.
+    assert_eq!(
+        picked(&settings(&[1], None), &[id(1), id(2)]),
+        pick(&[1, 2], Some(1), 0)
+    );
+    // The current home dropped: the first chosen channel; duplicates are dropped.
+    assert_eq!(
+        picked(&settings(&[1, 2], Some(1)), &[id(3), id(2), id(3)]),
+        pick(&[3, 2], Some(3), 0)
+    );
+    // A home still watched stays; one channel left needs no home.
+    assert_eq!(
+        picked(&settings(&[1, 2], Some(2)), &[id(2)]),
+        pick(&[2], None, 0)
+    );
+    assert_eq!(picked(&settings(&[1], None), &[id(2)]), pick(&[2], None, 0));
+    // Channels past the picker's 25 are kept after the chosen ones.
+    let many: Vec<u64> = (0..27).collect();
+    assert_eq!(
+        picked(&settings(&many, Some(0)), &[id(5)]),
+        pick(&[5, 25, 26], Some(5), 2)
+    );
+    // A dropped channel leaves `others`; a watched one stays; untouched `others` is not written.
+    let mut now = settings(&[1, 2, 3], Some(1));
+    now.others = vec![id(2), id(3)];
+    assert_eq!(picked(&now, &[id(1), id(3)]).others, Some(vec![id(3)]));
+    assert_eq!(picked(&now, &[id(1), id(2), id(3)]).others, None);
 }

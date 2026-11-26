@@ -157,6 +157,14 @@ fn the_panel_speaks_english_when_asked() {
         .iter()
         .map(|b| b["label"].as_str().unwrap())
         .collect();
-    assert_eq!(labels, ["Refresh", "Usage details", "Mute 1 hour"]);
+    assert_eq!(
+        labels,
+        [
+            "Refresh",
+            "Usage details",
+            "Mute 1 hour",
+            "Watched channels"
+        ]
+    );
     assert!(hub.stop().success());
 }

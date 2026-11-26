@@ -602,3 +602,71 @@ macOS runner was available; the release workflow builds and checks that target o
 
 Not measured: the musl static build (`x86_64-unknown-linux-musl`) size, which the release workflow
 produces; the darwin-arm64 size and install time.
+
+## Watched channels from the ops panel (2026-11-27, Linux x64, release build, fake OMP and fake Discord)
+
+Idle memory as in part A: the hub's `VmRSS` 10 s after start, here once Discord intake is
+connected and caught up, the lead attached on the fake OMP in its turn mode and the ops panel
+posted. `cargo test --release --test watch -- --ignored --nocapture idle_rss`, three runs each,
+once against main (7cc4ddbe, with the test and the fake Discord's guild field added) and once with
+the picker and the live channel change:
+
+| Hub idle RSS (OMP excluded) | Before (main) | After |
+| --- | --- | --- |
+| 1 watched channel | 16.6-17.1 MiB (`VmRSS` 16984, 17048, 17540 kB) | 16.7-17.1 MiB (17148, 17360, 17508 kB) |
+| 5 watched channels | 16.5-17.1 MiB (16896, 17344, 17464 kB) | 16.7-17.1 MiB (17076, 17420, 17532 kB) |
+
+No change beyond run-to-run noise (about 0.6 MiB): the picker keeps no state in the hub (Discord's
+client renders the channel list), and a watched channel costs one entry in intake's scope.
+
+# Lead sleep (2026-11-27, Linux x64, debug hub, stock OMP 19.2.1, loopback fake model)
+
+Commands: `CATALY_CONTRACT_OMP=1 cargo test --test contract_session lead_sleeps_and_wakes -- --nocapture
+--test-threads=1` (debug build: the test shortens `idle_sleep` to 4 s with `CATALY_IDLE_SLEEP`, which only
+debug builds read). Five cycles per run of: an owner message, the turn, idle until the lead sleeps (its
+OMP gone from `/proc`), then `lead send` to wake it. OMP RSS is `VmRSS` of the lead's OMP process after a
+turn; hub RSS is `cataly stats`. Wake times are polled with `cataly lead status --json` (a few ms per
+poll) and the fake model's request log. Two runs; the first ran beside other agents' builds.
+
+| Measure | Run 1 (loaded host) | Run 2 |
+| --- | --- | --- |
+| Lead OMP RSS, awake after a turn | 286-310 MiB (299,712,512-325,480,448 bytes) | 295-314 MiB (309,579,776-329,199,616 bytes) |
+| Hub RSS with the lead awake (debug) | 33.7-34.6 MiB | 34.0-34.3 MiB |
+| Total with the lead asleep: hub only (debug), no OMP process | 33.8-34.6 MiB | 34.0-34.3 MiB |
+| Wake: `lead send` to the resumed session live and its bridge accepted, same session ID | 806, 2992, 3465, 3180, 3944 ms | 1071, 1302, 979, 1106, 917 ms (p50 1071) |
+| Wake: `lead send` to the model request carrying the message | 872, 3146, 3628, 3337, 4101 ms | 1144, 1384, 1045, 1188, 995 ms (p50 1144) |
+
+Sleeping frees the lead's OMP (about 300 MiB, 90 % of the awake total in this debug run; with the
+release hub's 15-21 MiB it is about 94 %) and the hub's RSS does not move with it. A wake costs one
+OMP start and resume (OMP's own start to `ready` is about 0.5-0.6 s, slice 2c); in run 2's hub log the
+lead is bound 0.17-0.19 s after its bridge is accepted, and the message is written after that. The
+run-1 spread (0.8-3.9 s) came with the host's load and was not broken down [inference: OMP's start
+under load]. Release-build
+and macOS figures are not measured: release builds ignore `CATALY_IDLE_SLEEP`, so a release run needs
+the 5-minute minimum per cycle.
+
+With the fake OMP (`tests/lead.rs`, debug, `idle_sleep` 2 s, after a hub restart with the lead asleep):
+`lead send` to the message in the resumed session's file 236 ms.
+
+# Live voice: delegation, commentary and reply path (0.2.4 fix, 2026-11-27)
+
+The owner-gated live test (`tests/live_voice.rs`) against the real API, Linux x64, release build,
+`gpt-live-1` with backend `gpt-5.6-luna`, voice `marin`. Approved budget for this fix: 1.00 USD, run
+with the test's own ledger and limit (`CATALY_LIVE_VOICE_MAX_USD`). Costs are the test ledger's
+estimate: backend spending at the test's default prices (0.25 / 0.025 / 0.30 / 2.00 USD per million
+input / cached / write / output tokens) plus billed speech seconds at 0.06 USD a minute, both above
+the published 0.20 / 0.02 / 0.25 / 1.20 USD and 0.05 USD a minute. The owner's request ("Please pass
+this to the lead: check the build.") was a 4.3 s, 24 kHz recording made once with OpenAI's speech
+endpoint (`gpt-4o-mini-tts`, about 0.002 USD, an estimate from its token prices).
+
+| Run | Transports | Result | Cost |
+| --- | --- | --- | --- |
+| 1 | WebSocket | held "over 3 s of input audio pending": the test fed its quiet audio at 1.25x real time (each short feed took the interval's immediate first tick), which only overflows once the call stays open past the pass; the test's feed fixed | 0.0550 USD |
+| 2 | WebSocket | no hold: `response.create` without `delegation_id` accepted, the delegation continued and finished; the lead's reply was never offered | 0.0721 USD |
+| 3, 4 | WebSocket | traced runs: the provider streams output audio every ~20-60 ms, silence included, so voice never saw output go quiet (no reply piece, no idle close) | 0.0705 + 0.0702 USD |
+| 5 | WebSocket, then WebRTC | passed: pass to the lead received, delegation continued, the lead's reply offered with `session.commentary.append`, acknowledged and proven spoken, no hold; then the low-cap call wound down with `session.instructions.append` and refused a new session | 0.0373 + 0.0360 USD |
+
+Total for this fix: 0.3411 USD in the test ledger, about 0.343 USD with the recording.
+
+Run (from the worktree, the key in `OPENAI_API_KEY`):
+`CATALY_LIVE_VOICE_MAX_USD=0.72 CATALY_LIVE_VOICE_RECORDING=request.pcm cargo test --release --features voice --test live_voice -- --ignored --nocapture`.

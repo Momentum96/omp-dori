@@ -4,6 +4,7 @@
 //! file is never applied.
 
 pub(crate) mod coord;
+pub(crate) mod file;
 pub(crate) mod lanes;
 pub(crate) mod ops;
 pub(crate) mod owner;
@@ -211,7 +212,25 @@ impl DiscordSettings {
     }
 }
 
+/// What `cataly config check` and `cataly health` say about an obsolete key at `path`.
+pub(crate) fn obsolete_notice(path: &str) -> String {
+    format!(
+        "{path} no longer does anything and can be deleted; the hub removes the line at start \
+         when it can write the file"
+    )
+}
+
 impl Config {
+    /// The obsolete `hold` keys still in quota job sections, by setting path (`jobs.<name>.hold`).
+    /// They are accepted and ignored; the hub removes them at start when it can write the file.
+    pub(crate) fn obsolete_hold(&self) -> Vec<String> {
+        self.jobs
+            .values()
+            .filter(|j| matches!(&j.work, Work::Owner(Owner::Quota(q)) if q.obsolete_hold))
+            .map(|j| format!("jobs.{}.hold", j.name))
+            .collect()
+    }
+
     /// A destination by name; [`HOME_DESTINATION`] is the owner's home room when a relay has one.
     pub(crate) fn destination(&self, name: &str) -> Option<Destination> {
         if name != HOME_DESTINATION {

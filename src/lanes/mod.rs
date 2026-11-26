@@ -55,6 +55,8 @@ const READ_MAX: usize = 40;
 const ANSWER_MAX: usize = 64 * 1024;
 /// Report text in the lead's wake line (EVR req. 17).
 const WAKE_TEXT: usize = 500;
+/// The kickoff line the lead gives a new thread, in characters.
+const KICKOFF_MAX: usize = 1000;
 /// The look-only tool set (OPC-46), also the reviewer's. OMP 19.1.1 refuses `--tools` naming an
 /// unknown tool (`ls`) or one unavailable in the session (`find` needs a native judge model).
 const LOOK_ONLY: &str = "read,grep,glob";
@@ -98,7 +100,6 @@ pub(crate) struct Env<R: Runtime> {
     pub(crate) state_dir: PathBuf,
     pub(crate) events: Events,
     pub(crate) make: Factory<R>,
-    pub(crate) quota_hold: crate::jobs::owner::quota::QuotaHold,
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     /// Whether the lead's session is live (it counts toward the session cap).
     pub(crate) lead_live: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -339,15 +340,8 @@ impl<R: Runtime> Lanes<R> {
         Ok(self.overlay.get_or_init(|| path).clone())
     }
 
-    /// Admission for every open, reopen and restart (LANE req. 18; OJ-08; C14). `new_model` is the
-    /// model of a new session, which the quota gate judges; a resume of an existing session passes
-    /// `None`, since the gate holds new sessions only.
-    async fn admission(
-        &self,
-        config: &Config,
-        cwd: &Path,
-        new_model: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    /// Admission for every open, reopen and restart (LANE req. 18; C14).
+    async fn admission(&self, config: &Config, cwd: &Path) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -355,9 +349,6 @@ impl<R: Runtime> Lanes<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if let Some(held) = new_model.and_then(|m| (self.env.quota_hold)(m)) {
-            return Err(held.to_string());
-        }
         (self.env.bridge_link)()?;
         let live = self.live_map().values().filter(|s| s.alive()).count();
         let sessions = live + usize::from((self.env.lead_live)());
@@ -548,10 +539,7 @@ impl<R: Runtime> Lanes<R> {
                     .map(PathBuf::from)
                     .or_else(|| config.lanes.cwd.clone())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                let model = s(input, "model")
-                    .or(config.lanes.model.as_deref())
-                    .unwrap_or_default();
-                Ok(match self.admission(&config, &cwd, Some(model)).await {
+                Ok(match self.admission(&config, &cwd).await {
                     Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
                     Err(e) => json!({ "admit": false, "detail": e }),
                 })
@@ -865,6 +853,13 @@ impl<R: Runtime> Lanes<R> {
             .as_object_mut()
             .and_then(|m| m.remove("thread_from"))
             .and_then(|v| v.as_str().map(str::to_string));
+        let kickoff = match input_value
+            .as_object_mut()
+            .and_then(|m| m.remove("kickoff"))
+        {
+            None => None,
+            Some(v) => Some(Self::kickoff_line(&v, thread_from.is_some())?),
+        };
         let open: OpenInput =
             serde_json::from_value(input_value.clone()).map_err(|e| format!("open: {e}"))?;
         let config = self.cfg();
@@ -922,7 +917,7 @@ impl<R: Runtime> Lanes<R> {
             opening.push(valid.key.clone());
         }
         let result = self
-            .open_one(valid, open.request_id.clone(), digest, thread_from)
+            .open_one(valid, open.request_id.clone(), digest, thread_from, kickoff)
             .await;
         self.opening
             .lock()
@@ -947,7 +942,10 @@ impl<R: Runtime> Lanes<R> {
             brief: v.brief.clone(),
             checks: v.checks.clone(),
             thread: v.thread.clone(),
-            cwd: v.cwd.display().to_string(),
+            cwd: v
+                .worktree
+                .as_ref()
+                .map_or_else(|| v.cwd.display().to_string(), |w| w.path.clone()),
             model: v.model.clone(),
             thinking: v.thinking.clone(),
             origin: v.origin.clone(),
@@ -999,14 +997,13 @@ impl<R: Runtime> Lanes<R> {
         request_id: Option<String>,
         digest: String,
         thread_from: Option<String>,
+        kickoff: Option<String>,
     ) -> Result<String, String> {
         if self.row(&valid.key).await?.is_some() {
             return Err(format!("the key {} is already used by a lane", valid.key));
         }
         let config = self.cfg();
-        let exe = self
-            .admission(&config, &valid.cwd, Some(&valid.model))
-            .await?;
+        let exe = self.admission(&config, &valid.cwd).await?;
         let mut rec = Self::build(&valid, &config, crate::host::random_hex(8));
         self.tern_spend(&config, &rec).await?;
         if let Some(source) = thread_from {
@@ -1015,6 +1012,10 @@ impl<R: Runtime> Lanes<R> {
         if let Some(w) = &valid.worktree {
             git::add_worktree(&valid.cwd, &w.path, &w.branch, &w.base).await?;
             rec.worktrees.push(w.path.clone());
+            // The lane works in its own worktree, stored canonical like any working directory.
+            if let Ok(real) = std::fs::canonicalize(&w.path) {
+                rec.cwd = real.display().to_string();
+            }
         }
         // Record first, then spawn (LANE req. 15c).
         let rev = match self.save(&rec, None, Some("opened".into())).await {
@@ -1037,6 +1038,7 @@ impl<R: Runtime> Lanes<R> {
                 })
                 .await;
         }
+        let (key, thread) = (rec.key.clone(), rec.thread.clone());
         let outcome = self.start(rec, rev, exe, &config, None).await;
         if let Some(rid) = request_id
             && outcome != "unconfirmed"
@@ -1053,7 +1055,43 @@ impl<R: Runtime> Lanes<R> {
         if outcome.starts_with("failed") {
             return Err(outcome);
         }
+        if let (Some(text), Some(thread)) = (kickoff, thread) {
+            self.post_kickoff(&key, &thread, &text).await;
+        }
         Ok(outcome)
+    }
+
+    /// The lead's kickoff line for a new thread: one line, only with `thread_from`.
+    fn kickoff_line(v: &Value, new_thread: bool) -> Result<String, String> {
+        let text = v.as_str().unwrap_or_default().trim();
+        if !new_thread {
+            return Err("kickoff goes with thread_from".into());
+        }
+        if text.is_empty() || text.contains('\n') || text.chars().count() > KICKOFF_MAX {
+            return Err(format!(
+                "kickoff must be one line of 1 to {KICKOFF_MAX} characters"
+            ));
+        }
+        Ok(text.to_string())
+    }
+
+    /// Posts the kickoff line once into the lane's new thread; a failure is an alert.
+    async fn post_kickoff(&self, key: &str, thread: &str, text: &str) {
+        let Some(id) = thread.strip_prefix("discord:") else {
+            return;
+        };
+        let home = std::env::var("HOME").ok();
+        let body = evidence::thread_text(text, home.as_deref());
+        let seed = format!("lane-kickoff:{key}");
+        match self.env.threads.post(id, &body, &seed).await {
+            Posted::Confirmed => {
+                let now = now_ms();
+                self.keep(key, |r| r.watch.thread_post_ms = Some(now)).await;
+            }
+            Posted::Rejected(why) | Posted::Uncertain(why) => {
+                self.alert(key, "kickoff not posted", &why, false);
+            }
+        }
     }
 
     /// A thread for the lane from the owner's message, journaled before the request (DISC-OUT

@@ -161,6 +161,9 @@ resto: la tua stanza principale `#cataly`, la stanza di stato `#cataly-ops`, il
 modello del lead, i pulsanti di approvazione, i job predefiniti e un servizio utente
 (systemd su Linux, un agente launchd su macOS) che avvia l'hub. Poi scrivi in `#cataly`.
 
+`cataly setup --voice on` aggiunge le chiamate vocali su Discord con impostazioni predefinite
+sensate; le chiamate costano denaro sulla tua chiave OpenAI, con un limite di 30 minuti e 3 USD al giorno.
+
 ## Uso quotidiano
 
 | Comando | Cosa fa |

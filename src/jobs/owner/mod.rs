@@ -1,8 +1,10 @@
 //! The owner job kinds (DESIGN 6.1) on the common tick rules, written once here (DESIGN 6.2, OJ req.
 //! 3-10): a tick loads its job's transition memory (live or dry), runs the kind under the per-tick
 //! deadline, and on success commits the kind's memory after its events entered the stream. A failed
-//! or overrunning tick leaves the kind's state untouched and warns once per distinct reason; the
-//! first good tick after failures emits one recovery note. The first tick takes a baseline.
+//! or overrunning tick leaves the kind's state untouched and warns once per distinct reason; a
+//! transient failure (the server or the way to it) is retried on the next tick and warns only when
+//! it happens twice in a row. The first good tick after a reported failure emits one recovery note.
+//! The first tick takes a baseline.
 
 pub(crate) mod backup;
 mod github;
@@ -24,7 +26,7 @@ use super::{Ctx, JobsError};
 use crate::config::{Job, Owner};
 use crate::store::{Apply, EventRecord};
 use crate::sys::command::{self, Finished, KILL_GRACE, Output, Spec};
-use crate::sys::now_ms;
+use crate::sys::{ErrorClass, now_ms};
 
 /// Memory subject of the tick bookkeeping every kind shares.
 pub(crate) const TICK: &str = "_tick";
@@ -39,8 +41,8 @@ pub(crate) struct Tick<'a> {
     pub(crate) memory: Memory,
     pub(crate) emits: Vec<Emit>,
     pub(crate) now: i64,
-    /// A kind sets this when it read nothing new but still has state to keep (the quota gate's
-    /// time-based release while usage data is unavailable).
+    /// A kind sets this when it read nothing new but still has state to keep (the quota job's
+    /// bands while usage data is unavailable).
     pub(crate) soft_failure: Option<String>,
 }
 
@@ -127,6 +129,55 @@ pub(crate) fn gh_answer(args: &[&str], done: &Finished) -> Result<serde_json::Va
         .map_err(|_| format!("gh {} printed no JSON", args.join(" ")))
 }
 
+/// Network failures as `gh`, `git` and the hub's own deadlines word them, lower case.
+const NETWORK: [&str; 11] = [
+    "timed out",
+    "timeout",
+    "overran its",
+    "connection refused",
+    "connection reset",
+    "no such host",
+    "network is unreachable",
+    "temporary failure in name resolution",
+    "unexpected eof",
+    "tls handshake",
+    "error connecting to",
+];
+
+/// The HTTP statuses a reason names, as `gh` words them (`HTTP 404`, `(HTTP 502)`).
+fn http_statuses(lower: &str) -> impl Iterator<Item = u16> + '_ {
+    lower.match_indices("http ").filter_map(|(i, m)| {
+        let rest = lower.get(i + m.len()..)?;
+        let digits = rest.get(..3)?;
+        let more = rest.as_bytes().get(3).is_some_and(u8::is_ascii_digit);
+        if more || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse().ok()
+    })
+}
+
+/// The decision class of a failed tick's reason (DESIGN 9.5): transient when the server or the way
+/// to it failed (an HTTP 408, 429 or 5xx, a time limit, a network error), so the next tick tries
+/// again; rejected for anything else, such as a 4xx (404, 401) or a bad config.
+pub(crate) fn failure_class(reason: &str) -> ErrorClass {
+    let lower = reason.to_ascii_lowercase();
+    let server =
+        http_statuses(&lower).any(|s| crate::relay::http::status_class(s) == ErrorClass::Transient);
+    if server || NETWORK.iter().any(|w| lower.contains(w)) {
+        ErrorClass::Transient
+    } else {
+        ErrorClass::Rejected
+    }
+}
+
+/// Whether a failure seen `failures` times in a row is reported (an event, and so a note for the
+/// lead): a permanent one at once, a transient one only from the second in a row, the count that
+/// opens a job alert in the ops room (`alerts.jobs`).
+pub(crate) fn reported(failures: i64, reason: &str) -> bool {
+    failures >= super::ops::JOB_FAILURES || failure_class(reason) != ErrorClass::Transient
+}
+
 /// Runs one tick of an owner job and returns its events.
 pub(crate) async fn tick(
     ctx: &Ctx,
@@ -169,11 +220,11 @@ pub(crate) async fn tick(
     if let Some(reason) = failure {
         let failures = memory
             .get(TICK, "failures")
-            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0)
             + 1;
         memory.transition(TICK, "failures", &failures.to_string());
-        if memory.transition(TICK, "error", &reason) {
+        if reported(failures, &reason) && memory.transition(TICK, "error", &reason) {
             emits.push(
                 Emit::new(EventKind::TickFailed, Severity::Warning, false, &job.name)
                     .with("job", &job.name)
@@ -181,8 +232,10 @@ pub(crate) async fn tick(
             );
         }
     } else {
-        if let Some(failures) = memory.clear(TICK, "failures") {
-            memory.clear(TICK, "error");
+        // Only a reported failure has a recovery to report.
+        if let Some(failures) = memory.clear(TICK, "failures")
+            && memory.clear(TICK, "error").is_some()
+        {
             emits.push(
                 Emit::new(EventKind::TickRecovered, Severity::Info, false, &job.name)
                     .with("job", &job.name)
@@ -267,6 +320,82 @@ pub(crate) mod tests {
         assert!(
             memory.iter().any(|(s, c, _)| s == "a" && c == "seen"),
             "baseline recorded"
+        );
+    }
+
+    #[test]
+    fn failure_classes() {
+        for transient in [
+            "gh api notifications failed: gh: HTTP 500",
+            "gh api x failed: gh: Server Error (HTTP 502)",
+            "gh: API rate limit exceeded (HTTP 429)",
+            "gh timed out after 30 s",
+            "tick overran its 60 s deadline",
+            "error connecting to api.github.com",
+            "dial tcp: lookup api.github.com: no such host",
+        ] {
+            assert_eq!(
+                failure_class(transient),
+                ErrorClass::Transient,
+                "{transient}"
+            );
+        }
+        for rejected in [
+            "gh api repos/o/r failed: gh: Not Found (HTTP 404)",
+            "gh: Bad credentials (HTTP 401)",
+            "HTTP 5000 is no status",
+            "repos: required",
+        ] {
+            assert_eq!(failure_class(rejected), ErrorClass::Rejected, "{rejected}");
+        }
+    }
+
+    /// A one-off server error is retried on the next tick and never becomes an event (so never a
+    /// note for the lead); the same kind of failure twice in a row does. A 404 is reported at once.
+    #[tokio::test]
+    async fn a_transient_failure_is_reported_only_twice_in_a_row() {
+        let dir = crate::sys::fs::tests::scratch("owner-transient");
+        let script = dir.join("items.sh");
+        let (ok, said) = (dir.join("ok"), dir.join("said"));
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ -e {ok} ]; then printf 'a\\tfirst\\n'; else cat {said} >&2; exit 1; fi\n",
+                ok = ok.display(),
+                said = said.display()
+            ),
+        )
+        .unwrap();
+        crate::sys::fs::tests::make_executable(&script);
+        let cfg = format!(
+            "[jobs.mail]\nkind = \"items\"\nargv = [\"{s}\"]\n\n[jobs.gone]\nkind = \"items\"\nargv = [\"{s}\"]\n",
+            s = script.display()
+        );
+        let (ctx, _stop, _dir) = ctx_with(&cfg, "owner-transient-ctx");
+        let say = |text: &str| std::fs::write(&said, format!("{text}\n")).unwrap();
+        say("gh api notifications failed: gh: HTTP 500");
+        assert!(live_tick(&ctx, "mail").await.is_empty(), "one 500: retried");
+        std::fs::write(&ok, "").unwrap();
+        assert!(
+            live_tick(&ctx, "mail").await.is_empty(),
+            "nothing was reported, so nothing recovers"
+        );
+        std::fs::remove_file(&ok).unwrap();
+        assert!(live_tick(&ctx, "mail").await.is_empty(), "one 500 again");
+        say("gh api notifications failed: gh: Server Error (HTTP 502)");
+        assert_eq!(
+            live_tick(&ctx, "mail").await,
+            ["job.failed"],
+            "twice in a row"
+        );
+        std::fs::write(&ok, "").unwrap();
+        assert_eq!(live_tick(&ctx, "mail").await, ["job.recovered"]);
+        std::fs::remove_file(&ok).unwrap();
+        say("gh api repos/o/r failed: gh: Not Found (HTTP 404)");
+        assert_eq!(
+            live_tick(&ctx, "gone").await,
+            ["job.failed"],
+            "a 404 is reported at once"
         );
     }
 }

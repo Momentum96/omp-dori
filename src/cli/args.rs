@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 55] = [
+pub(crate) const COMMANDS: [Spec; 53] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -198,13 +198,21 @@ pub(crate) const COMMANDS: [Spec; 55] = [
             "--slack-owner",
             "--fallback-on",
             "--fallback-chain",
+            "--voice",
+            "--voice-channel",
+            "--voice-daily-minutes",
+            "--voice-cap-usd",
+            "--voice-key-file",
         ],
         summary: "the whole setup in one run: asks for the Discord bot token, then fills in defaults \
                   (owner, #cataly and #cataly-ops, lead model, remote approvals, bot avatar and banner, \
                   home backup, health and pressure jobs, user service), shows a short summary and asks \
                   once; again later it changes only what a flag names. --yes answers in scripts; \
                   --owner <id|app>, --guild <id>, --lead-model <provider/id>, --approvals/--backup/--service \
-                  on|off, --backup-repo owner/name, --profile re-applies the bot's avatar and banner",
+                  on|off, --backup-repo owner/name, --profile re-applies the bot's avatar and banner; \
+                  --voice on|off turns Discord voice calls on (paid, on your OpenAI key) or off, with \
+                  --voice-channel <id|name>, --voice-daily-minutes <n>, --voice-cap-usd <usd> and \
+                  --voice-key-file <path>",
     },
     Spec {
         path: &["health"],
@@ -219,20 +227,6 @@ pub(crate) const COMMANDS: [Spec; 55] = [
         flags: &["--json", "--refresh"],
         values: &[],
         summary: "show account usage limits from OMP (cached; --refresh reads now)",
-    },
-    Spec {
-        path: &["quota"],
-        args: &[],
-        flags: &["--json"],
-        values: &[],
-        summary: "show the quota gate",
-    },
-    Spec {
-        path: &["quota", "lift"],
-        args: &[],
-        flags: &["--json"],
-        values: &[],
-        summary: "lift the quota gate until the windows that closed it reset",
     },
     Spec {
         path: &["pr", "follow"],

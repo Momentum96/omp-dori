@@ -210,6 +210,9 @@ Totals: KEEP 12, SIMPLIFY 8, MERGE 4, DROP 4.
 53. A lane may create or change a thread only through a request bound to the owner's original
     message (the source): it must be an owner message in the current intake scope, and the target
     must be that message's channel (its parent for creation; the source's own thread for changes).
+    A source inside a followed thread under a listed channel gets a thread without a starter
+    message in that listed channel, since Discord nests no threads. A creating open may carry one
+    kickoff line from the lead, posted once as the new thread's first message after the lane starts.
 54. Lane thread operations are journaled before the request is sent: source, lane, parent, a
     fingerprint of the requested operation, time, state (pending, created, confirmed), and any
     thread ID seen. The journal is written atomically and fsynced.

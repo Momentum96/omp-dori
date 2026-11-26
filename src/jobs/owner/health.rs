@@ -56,6 +56,15 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
         )),
         None => out.push(check("config", "ok", "valid and applied", None)),
     }
+    // Left only when the hub could not write the file at start.
+    for path in config.obsolete_hold() {
+        out.push(check(
+            &path,
+            "info",
+            crate::config::obsolete_notice(&path),
+            Some("delete that line from the config file, then run cataly config reload"),
+        ));
+    }
     out.push(match ctx.omp.report() {
         None => check("omp", "info", "not probed yet", None),
         Some(r) => match r.sessions() {
@@ -119,6 +128,39 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
         ));
     }
     out
+}
+
+/// The configured lead's line in `cataly health`. Never a warning: a lead that cannot start alerts
+/// on its own, and a sleeping lead is a normal state.
+pub(crate) fn lead_check(view: &crate::host::lead::View) -> Check {
+    use crate::host::lead::Phase;
+    let said = |state: &str| match &view.reason {
+        Some(reason) => format!("{state}: {reason}"),
+        None => state.to_string(),
+    };
+    match &view.phase {
+        Phase::Asleep => {
+            let since = view.asleep.as_ref().map_or_else(String::new, |a| {
+                format!(" since {}", crate::jobs::instant_text(a.since_ms))
+            });
+            check(
+                "lead",
+                "ok",
+                format!("asleep{since}; it wakes on the same session when a message needs it"),
+                None,
+            )
+        }
+        Phase::Live => check("lead", "ok", said("running"), None),
+        Phase::Starting => check("lead", "ok", "starting", None),
+        Phase::NotStarted => check("lead", "info", said("not started"), None),
+        Phase::Stopped => check("lead", "info", said("stopped"), None),
+        Phase::Held => check(
+            "lead",
+            "info",
+            said("held"),
+            Some("cataly lead status, then cataly lead start"),
+        ),
+    }
 }
 
 /// Whether a relay's token file holds a token.

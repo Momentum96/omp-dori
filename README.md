@@ -156,6 +156,9 @@ your home room `#cataly`, the status room `#cataly-ops`, the lead's model,
 approval buttons, the default jobs, and a user service (a systemd user unit on
 Linux, a launchd agent on macOS) that starts the hub. Then write in `#cataly`.
 
+`cataly setup --voice on` adds Discord voice calls with sensible defaults; calls
+cost money on your OpenAI key, capped at 30 minutes and 3 USD a day.
+
 ## Everyday use
 
 | Command | What it does |

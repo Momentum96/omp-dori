@@ -35,6 +35,8 @@ pub(crate) enum EventKind {
     HubStalled,
     ConfigInvalid,
     ConfigValid,
+    /// The hub removed obsolete lines from the config file at start and kept the original.
+    ConfigCleaned,
     RunDone,
     RunSkipped,
     RunBroken,
@@ -55,8 +57,6 @@ pub(crate) enum EventKind {
     PrReopened,
     QuotaLevel,
     QuotaRecovered,
-    QuotaHold,
-    QuotaReleased,
     BackupRefused,
     BackupClean,
     BackupPushFailed,
@@ -121,7 +121,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 67] = [
+const KINDS: [KindRow; 66] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -145,6 +145,12 @@ const KINDS: [KindRow; 67] = [
         "config.valid",
         &[],
         "config valid again and applied",
+    ),
+    (
+        EventKind::ConfigCleaned,
+        "config.cleaned",
+        &["removed", "backup"],
+        "removed the obsolete {removed} from the config; the original is kept at {backup}",
     ),
     (
         EventKind::RunDone,
@@ -270,18 +276,6 @@ const KINDS: [KindRow; 67] = [
         "quota.recovered",
         &["limit", "provider", "account", "percent"],
         "quota {provider} account {account} {limit} is back to {percent}%",
-    ),
-    (
-        EventKind::QuotaHold,
-        "quota.hold",
-        &["limits", "level"],
-        "quota gate closed at {level}%: new session starts wait ({limits})",
-    ),
-    (
-        EventKind::QuotaReleased,
-        "quota.released",
-        &["reason"],
-        "quota gate open: {reason}",
     ),
     (
         EventKind::BackupRefused,

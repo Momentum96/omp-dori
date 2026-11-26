@@ -17,13 +17,14 @@ pub(crate) mod voice;
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::cli::exit;
+use crate::config::file::{Cleanup, remove_obsolete_hold};
 use crate::config::session::RuntimeKind;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
@@ -58,9 +59,6 @@ pub(crate) struct Hub {
     started_ms: i64,
     store: Store,
     jobs: Jobs,
-    config_tx: watch::Sender<Arc<Config>>,
-    /// SHA-256 of the config file as last applied, so `setup` can tell whether a saved file is live.
-    config_digest: Mutex<Option<String>>,
     control_latency: Latency,
     dedupe: Dedupe,
     shutdown: watch::Receiver<bool>,
@@ -86,18 +84,17 @@ impl Hub {
             Some(r) => r.sessions().err(),
             None => Some("OMP has not been probed yet".into()),
         };
-        let model = self
-            .config_tx
-            .borrow()
-            .lead
-            .as_ref()
-            .map(|l| l.model.clone());
+        let model = self.config().lead.as_ref().map(|l| l.model.clone());
         let lead = match model {
             Some(model) => {
-                let phase = serde_json::to_value(self.lead.view().await.phase)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
-                    .unwrap_or_default();
+                let view = self.lead.view().await;
+                let phase = match &view.asleep {
+                    Some(a) => format!("asleep since {}", crate::jobs::instant_text(a.since_ms)),
+                    None => serde_json::to_value(view.phase)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
+                        .unwrap_or_default(),
+                };
                 Some(format!("{model}, {phase}"))
             }
             None => None,
@@ -112,19 +109,16 @@ impl Hub {
             state_dir: self.paths.state_dir.display().to_string(),
             config_file: self.paths.config_file.display().to_string(),
             config_error: self.jobs.ctx().config_error(),
-            config_digest: self
-                .config_digest
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-            jobs: self.config_tx.borrow().jobs.len(),
+            config_digest: self.jobs.ctx().config_digest(),
+            jobs: self.config().jobs.len(),
             jobs_running: self.jobs.running_count(),
             last_event_id,
             task_restarts: self.supervisor.restarts(),
             panics: self.supervisor.panics(),
             omp,
             sessions_refused: sessions,
-            quota_gate: self.jobs.gate(),
+            // For 0.2.3 updaters only; removable once no 0.2.3 hub or CLI can still be updating.
+            quota_gate: crate::proto::legacy_gate(),
             lead,
             resumed: self.resumed(),
         })
@@ -133,21 +127,29 @@ impl Hub {
     /// The sessions brought back at start, once the lead and the lanes settled.
     fn resumed(&self) -> Option<crate::proto::Resumed> {
         let how = self.lead.settled()?;
-        let lead_start = self.config_tx.borrow().lead.is_some().then_some(how);
+        let lead_start = self.config().lead.is_some().then_some(how);
         let lane_names = self.lanes.resumed.get()?.clone();
         let not_running = lead_start == Some(crate::proto::LeadStart::NotRunning);
-        let lead_held = self.lead.quota_held().filter(|_| not_running);
+        let lead_asleep_ms = self
+            .lead
+            .asleep()
+            .filter(|_| not_running)
+            .map(|a| a.since_ms);
+        // An older CLI reads only the reason.
         let lead_reason = self
             .lead
             .refusal()
-            .filter(|_| not_running && lead_held.is_none());
+            .or_else(|| {
+                lead_asleep_ms.map(|_| "it is asleep and wakes when it is needed".to_string())
+            })
+            .filter(|_| not_running);
         Some(crate::proto::Resumed {
             lead: lead_start == Some(crate::proto::LeadStart::Resumed),
             lanes: lane_names.len(),
             lead_start,
             lane_names,
-            lead_held,
             lead_reason,
+            lead_asleep_ms,
         })
     }
 
@@ -184,44 +186,8 @@ impl Hub {
         }
     }
 
-    /// Reloads the config file. An invalid file is refused and the running config stays in force.
-    async fn reload(&self) -> Result<usize, String> {
-        let digest = config::file_digest(&self.paths.config_file);
-        match config::load(&self.paths.config_file) {
-            Ok(config) => {
-                let jobs = config.jobs.len();
-                log::set_level(config.hub.log_level);
-                self.config_tx.send_replace(Arc::new(config));
-                self.jobs.ctx().set_config_error(None);
-                *self
-                    .config_digest
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = digest;
-                if let Err(e) = self.jobs.config_outcome(None).await {
-                    log::warn("config event not recorded", &[("error", &e)]);
-                }
-                log::info("config reloaded", &[("jobs", &jobs)]);
-                Ok(jobs)
-            }
-            Err(errors) => {
-                let text = config::describe(&errors);
-                self.jobs.ctx().set_config_error(Some(text.clone()));
-                if let Err(e) = self.jobs.config_outcome(Some(&text)).await {
-                    log::warn("config event not recorded", &[("error", &e)]);
-                }
-                log::warn(
-                    "config refused; the previous one stays in force",
-                    &[("error", &text)],
-                );
-                Err(format!(
-                    "config not applied, the previous one stays in force: {text}"
-                ))
-            }
-        }
-    }
-
     fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config_tx.borrow())
+        Arc::clone(&self.jobs.ctx().config.borrow())
     }
 
     /// Refuses the orderly stop while a session works or waits on a dialog (IR req. 33); busy
@@ -323,6 +289,8 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
+    // 0.2.4 dropped quota jobs' `hold`: its line goes before the config is read, the original kept.
+    let cleanup = clean_config(&paths.config_file);
     let config = match config::load(&paths.config_file) {
         Ok(config) => config,
         Err(errors) => {
@@ -362,7 +330,7 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
-    let code = runtime.block_on(serve(&paths, config, store));
+    let code = runtime.block_on(serve(&paths, config, store, cleanup));
     runtime.shutdown_timeout(Duration::from_secs(1));
     ExitCode::from(code)
 }
@@ -401,7 +369,7 @@ fn stream_cwd(config: &Config) -> std::path::PathBuf {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
+async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) -> u8 {
     let (signals, listener) = match open(paths) {
         Ok(opened) => opened,
         Err(code) => return code,
@@ -409,7 +377,6 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (supervisor, mut exit_rx) = Supervisor::new(Policy::HUB, shutdown_rx.clone());
     let job_count = config.jobs.len();
-    let config_digest = config::file_digest(&paths.config_file);
     let (config_tx, config_rx) = watch::channel(Arc::new(config));
     let omp = Omp::new();
     let files = Files {
@@ -419,7 +386,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     };
     let ctx = Ctx::new(
         store.clone(),
-        config_rx.clone(),
+        config_tx,
         files,
         Arc::clone(&omp),
         shutdown_rx.clone(),
@@ -462,8 +429,6 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         started_ms: now_ms(),
         store: store.clone(),
         jobs: jobs.clone(),
-        config_tx,
-        config_digest: Mutex::new(config_digest),
         control_latency: Latency::default(),
         dedupe: Dedupe::new(),
         shutdown: shutdown_rx.clone(),
@@ -494,7 +459,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     if let Err(e) = start_detector(heartbeat, Arc::clone(&notifier), marker.clone()) {
         log::warn("stall detector not started", &[("error", &e)]);
     }
-    announce(&jobs, &marker, job_count).await;
+    announce(&jobs, &marker, job_count, cleanup).await;
     notifier.ready();
     log::info(
         "hub ready",
@@ -547,11 +512,9 @@ fn sessions(
 ) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
-    let gate = jobs.clone();
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         events: Arc::clone(&events),
         store: store.clone(),
@@ -735,7 +698,7 @@ fn lanes(
     links: &Arc<crate::host::bridge::Links>,
     lead: &Arc<Lead<Hosted>>,
 ) -> Arc<crate::lanes::Lanes<Hosted>> {
-    let (gate, rest, lead) = (jobs.clone(), jobs.clone(), Arc::clone(lead));
+    let (rest, lead) = (jobs.clone(), Arc::clone(lead));
     crate::lanes::Lanes::new(crate::lanes::Env {
         config: config.clone(),
         omp: Arc::clone(omp),
@@ -743,7 +706,6 @@ fn lanes(
         state_dir: paths.state_dir.clone(),
         events: Arc::clone(events),
         make: runtime(paths, agent_start, links),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         lead_live: Arc::new(move || lead.snapshot().is_some()),
         threads: Arc::new(crate::relay::discord::threads::DiscordThreads {
@@ -780,7 +742,7 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 (None, Phase::Starting) => LeadState::Starting,
                 (None, Phase::Stopped) => LeadState::Stopped,
                 (None, Phase::Held) => LeadState::Held,
-                (None, Phase::NotStarted) if view.quota.is_some() => LeadState::Held,
+                (None, Phase::Asleep) => LeadState::Asleep,
                 (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
             };
             // The lead counts as live exactly as the lanes' session cap counts it.
@@ -797,7 +759,6 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 running,
                 waiting,
                 models,
-                lead_quota: view.quota,
             }
         })
     }));
@@ -925,7 +886,36 @@ fn spawn_release_tasks(hub: &Arc<Hub>, supervisor: &Supervisor, shutdown: &watch
     });
 }
 
-async fn announce(jobs: &Jobs, marker: &Path, job_count: usize) {
+/// Removes obsolete lines from the config file and logs what happened; a file the hub cannot write
+/// keeps them, ignored, and `cataly health` names them.
+fn clean_config(path: &Path) -> Cleanup {
+    let cleanup = remove_obsolete_hold(path);
+    match &cleanup {
+        Cleanup::Nothing => {}
+        Cleanup::Removed { keys, backup } => log::info(
+            "obsolete config lines removed",
+            &[
+                ("settings", &keys.join(", ")),
+                ("backup", &backup.display()),
+            ],
+        ),
+        Cleanup::Kept { keys, why } => log::warn(
+            "obsolete config lines kept and ignored",
+            &[("settings", &keys.join(", ")), ("why", why)],
+        ),
+    }
+    cleanup
+}
+
+async fn announce(jobs: &Jobs, marker: &Path, job_count: usize, cleanup: Cleanup) {
+    if let Cleanup::Removed { keys, backup } = cleanup {
+        let emit = Emit::new(EventKind::ConfigCleaned, Severity::Info, false, "config")
+            .with("removed", keys.join(", "))
+            .with("backup", backup.display());
+        if let Err(e) = jobs.hub_event(emit).await {
+            log::warn("clean-up event not recorded", &[("error", &e)]);
+        }
+    }
     if let Ok(Some(bytes)) = crate::sys::fs::read_private(marker, 256) {
         let at = String::from_utf8_lossy(&bytes).trim().to_string();
         let emit = Emit::new(EventKind::HubStalled, Severity::Warning, false, "hub").with("at", at);
@@ -1039,7 +1029,7 @@ async fn wait_for_stop(
             _ = term.recv() => return exit::OK,
             _ = int.recv() => return exit::OK,
             _ = hup.recv() => {
-                let _ = hub.reload().await;
+                let _ = hub.jobs.reload().await;
             }
             changed = exit_rx.changed() => {
                 if changed.is_err() {

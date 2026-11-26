@@ -162,6 +162,9 @@ richtet sie den Rest ein: deinen Heimraum `#cataly`, den Statusraum `#cataly-ops
 Modell des Leads, Freigabe-Buttons, die Standard-Jobs und einen Benutzerdienst
 (systemd unter Linux, ein launchd-Agent unter macOS), der den Hub startet. Danach schreib in `#cataly`.
 
+`cataly setup --voice on` fügt Discord-Sprachanrufe mit sinnvollen Vorgaben hinzu; Anrufe kosten
+Geld über deinen OpenAI-Schlüssel, begrenzt auf 30 Minuten und 3 USD am Tag.
+
 ## Im Alltag
 
 | Befehl | Was er tut |

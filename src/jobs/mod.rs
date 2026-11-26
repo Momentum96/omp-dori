@@ -32,7 +32,6 @@ use crate::store::{Apply, EventRecord, JobPatch, MemoryWrite, Store, StoreError}
 use crate::sys::{ErrorClass, now_ms};
 use event::{Emit, EventKind, Severity};
 use memory::Memory;
-use owner::quota::{Gate, GateView};
 pub(crate) use stream::Stream;
 
 /// Job commands running at once across the hub (OJ req. 9).
@@ -101,13 +100,17 @@ pub(crate) struct Ctx {
     pub(crate) store: Store,
     pub(crate) stream: Stream,
     pub(crate) config: watch::Receiver<Arc<Config>>,
+    /// Applies a reloaded config (`config.reload`, SIGHUP, the ops panel's channel picker).
+    config_tx: watch::Sender<Arc<Config>>,
+    /// SHA-256 of the config file as last applied, so `setup` can tell whether a saved file is live.
+    config_digest: Mutex<Option<String>>,
+    /// When the config in force was applied (Unix ms).
+    config_applied_ms: std::sync::atomic::AtomicI64,
     pub(crate) files_dir: PathBuf,
     pub(crate) event_log: PathBuf,
     /// The config file; its directory holds `secrets/`.
     pub(crate) config_file: PathBuf,
     pub(crate) omp: Arc<Omp>,
-    /// The quota gate (OJ-08).
-    pub(crate) gate: Gate,
     pub(crate) shutdown: watch::Receiver<bool>,
     config_error: Mutex<Option<String>>,
     /// The Discord client, rebuilt when the token or settings change.
@@ -132,7 +135,7 @@ pub(crate) struct Files {
 impl Ctx {
     pub(crate) fn new(
         store: Store,
-        config: watch::Receiver<Arc<Config>>,
+        config_tx: watch::Sender<Arc<Config>>,
         files: Files,
         omp: Arc<Omp>,
         shutdown: watch::Receiver<bool>,
@@ -142,12 +145,14 @@ impl Ctx {
         Arc::new(Self {
             stream: Stream::new(store.clone(), Arc::clone(&route_wake)),
             store,
-            config,
+            config: config_tx.subscribe(),
+            config_tx,
+            config_digest: Mutex::new(crate::config::file_digest(&files.config_file)),
+            config_applied_ms: std::sync::atomic::AtomicI64::new(now_ms()),
             files_dir: files.dir,
             event_log: files.event_log,
             config_file: files.config_file,
             omp,
-            gate: Gate::default(),
             shutdown,
             config_error: Mutex::new(None),
             discord: Mutex::new(None),
@@ -173,11 +178,18 @@ impl Ctx {
             .clone()
     }
 
-    pub(crate) fn set_config_error(&self, error: Option<String>) {
-        *self
-            .config_error
+    /// SHA-256 of the config file as last applied.
+    pub(crate) fn config_digest(&self) -> Option<String> {
+        self.config_digest
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = error;
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// When the config in force was applied (Unix ms): at start or by the last reload.
+    pub(crate) fn config_applied_ms(&self) -> i64 {
+        self.config_applied_ms
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The Discord client for the current settings and token; rebuilt when either changes.
@@ -263,10 +275,6 @@ pub(crate) async fn perform(
     }
 }
 
-/// Memory job and subject of the owner's quota-gate lifts.
-const HUB: &str = "hub";
-const LIFT: &str = "quota.lift";
-
 /// The engine as the hub sees it.
 #[derive(Clone)]
 pub(crate) struct Jobs {
@@ -274,11 +282,10 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
-    /// Recovers runs and deliveries left by the previous hub, restores the quota gate, then starts
-    /// the scheduler and the router under the supervisor.
+    /// Recovers runs and deliveries left by the previous hub, then starts the scheduler and the
+    /// router under the supervisor.
     pub(crate) async fn start(ctx: Arc<Ctx>, supervisor: &Supervisor) -> Result<Self, JobsError> {
         run::recover(&ctx).await?;
-        restore_gate(&ctx).await?;
         let sched = Arc::clone(&ctx);
         supervisor.spawn("scheduler", move || schedule::scheduler(Arc::clone(&sched)));
         let router = Arc::clone(&ctx);
@@ -476,6 +483,49 @@ impl Jobs {
             .map_err(|_| JobsError::Stopped)
     }
 
+    /// Reloads the config file. An invalid file is refused and the running config stays in force;
+    /// returns the number of jobs applied.
+    pub(crate) async fn reload(&self) -> Result<usize, String> {
+        let ctx = &self.ctx;
+        let digest = crate::config::file_digest(&ctx.config_file);
+        match crate::config::load(&ctx.config_file) {
+            Ok(config) => {
+                let jobs = config.jobs.len();
+                log::set_level(config.hub.log_level);
+                ctx.config_applied_ms
+                    .store(now_ms(), std::sync::atomic::Ordering::Release);
+                ctx.config_tx.send_replace(Arc::new(config));
+                *ctx.config_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                *ctx.config_digest
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = digest;
+                if let Err(e) = self.config_outcome(None).await {
+                    log::warn("config event not recorded", &[("error", &e)]);
+                }
+                log::info("config reloaded", &[("jobs", &jobs)]);
+                Ok(jobs)
+            }
+            Err(errors) => {
+                let text = crate::config::describe(&errors);
+                *ctx.config_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(text.clone());
+                if let Err(e) = self.config_outcome(Some(&text)).await {
+                    log::warn("config event not recorded", &[("error", &e)]);
+                }
+                log::warn(
+                    "config refused; the previous one stays in force",
+                    &[("error", &text)],
+                );
+                Err(format!(
+                    "config not applied, the previous one stays in force: {text}"
+                ))
+            }
+        }
+    }
+
     /// Records whether the config file on disk is valid: one event per distinct error, one when it is
     /// valid again (transition memory of job `hub`).
     pub(crate) async fn config_outcome(&self, error: Option<&str>) -> Result<(), JobsError> {
@@ -511,20 +561,6 @@ impl Jobs {
         let event = event::build("hub", emit, &[], false, &[], now_ms());
         self.ctx.stream.append(vec![event]).await?;
         Ok(())
-    }
-
-    /// The quota gate now.
-    pub(crate) fn gate(&self) -> GateView {
-        self.ctx.gate.view(now_ms())
-    }
-
-    /// The owner lifts the quota gate until the current windows reset (OJ req. 25); the lift
-    /// survives a restart.
-    pub(crate) async fn lift(&self) -> Result<GateView, JobsError> {
-        let view = self.ctx.gate.lift(now_ms());
-        let value = self.ctx.gate.lifted_until().map(|until| until.to_string());
-        self.write_memory(HUB, LIFT, "until", value).await?;
-        Ok(view)
     }
 
     async fn write_memory(
@@ -652,32 +688,6 @@ impl Jobs {
     }
 }
 
-/// Rebuilds the quota gate from each quota job's stored causes and the owner's stored lift.
-async fn restore_gate(ctx: &Ctx) -> Result<(), JobsError> {
-    let config = ctx.config();
-    for (name, job) in &config.jobs {
-        if !matches!(job.work, Work::Owner(Owner::Quota(_))) {
-            continue;
-        }
-        let key = name.clone();
-        let rows = ctx.store.read(move |r| r.memory(&key, false)).await?;
-        let memory = Memory::new(name, false, rows);
-        ctx.gate.set(
-            name,
-            owner::quota::stored_causes(memory.get("gate", "hold")),
-        );
-    }
-    let rows = ctx.store.read(|r| r.memory(HUB, false)).await?;
-    let memory = Memory::new(HUB, false, rows);
-    if let Some(until) = memory
-        .get(LIFT, "until")
-        .and_then(|v| v.parse::<i64>().ok())
-    {
-        ctx.gate.restore_lift(Some(until));
-    }
-    Ok(())
-}
-
 pub(crate) fn duration_ms(d: Duration) -> i64 {
     i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
 }
@@ -716,7 +726,7 @@ pub(crate) mod tests {
         config_text: &str,
     ) -> (Arc<Ctx>, watch::Sender<bool>) {
         let config = Arc::new(config::parse(config_text).unwrap());
-        let (_config_tx, config_rx) = watch::channel(config);
+        let (config_tx, _) = watch::channel(config);
         let (stop_tx, stop_rx) = watch::channel(false);
         let files = dir.join("files");
         crate::sys::fs::ensure_private_dir(&files).unwrap();
@@ -725,7 +735,7 @@ pub(crate) mod tests {
             event_log: dir.join("events.jsonl"),
             config_file: dir.join("config.toml"),
         };
-        let ctx = Ctx::new(store, config_rx, paths, Omp::new(), stop_rx);
+        let ctx = Ctx::new(store, config_tx, paths, Omp::new(), stop_rx);
         (ctx, stop_tx)
     }
 
