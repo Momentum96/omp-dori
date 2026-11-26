@@ -270,10 +270,13 @@ fn a_bun_install_updates_through_bun() {
     ));
     trust_test_key(&mut hub);
     hub.install_fake("omp");
-    executable(
-        &hub.root.join("bin/systemctl"),
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/manager.log\"\n",
-    );
+    // Both service managers are fakes: on macOS a real `launchctl` would start the hub.
+    for manager in ["systemctl", "launchctl"] {
+        executable(
+            &hub.root.join("bin").join(manager),
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/manager.log\"\n",
+        );
+    }
     let new = variant(&v2, false);
     github.publish(&format!("v{v2}"), release(&hub.root.join("r2"), &new, &v2));
     let home = std::fs::canonicalize(&hub.root).unwrap().join("bun");
@@ -326,6 +329,16 @@ fn a_bun_install_updates_through_bun() {
         assert!(
             unit.contains(&format!("ExecStart={} hub\n", binary.display())),
             "{unit}"
+        );
+    } else {
+        let agent = std::fs::read_to_string(
+            hub.root
+                .join("home/Library/LaunchAgents/dev.cataly.hub.plist"),
+        )
+        .unwrap();
+        assert!(
+            agent.contains(&format!("<string>{}</string></array>", binary.display())),
+            "{agent}"
         );
     }
     std::fs::remove_file(root.join("service")).unwrap();
