@@ -257,7 +257,7 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         let method = request.method.clone();
         match method.as_str() {
             "bridge.ping" | "bridge.reply" => {}
-            "bridge.event" => event(hub, &handle, role, &request.params).await,
+            "bridge.event" => event(hub, &handle, role, &request.params),
             "bridge.form" => {
                 let reply = form.unwrap_or_else(|| json!({ "mirrored": false }));
                 let _ = tx.send(Response::ok(request.id, reply)).await;
@@ -429,7 +429,7 @@ fn answer_later(
     });
 }
 
-async fn event(hub: &Arc<Hub>, handle: &str, role: Role, params: &Value) {
+fn event(hub: &Arc<Hub>, handle: &str, role: Role, params: &Value) {
     let seq = params.get("seq").and_then(Value::as_u64).unwrap_or(0);
     let session = params.get("session").and_then(Value::as_str);
     let kind = params
