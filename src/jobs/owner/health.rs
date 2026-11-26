@@ -56,6 +56,15 @@ fn hub_checks(ctx: &Ctx, config: &Config) -> Vec<Check> {
         )),
         None => out.push(check("config", "ok", "valid and applied", None)),
     }
+    // Left only when the hub could not write the file at start.
+    for path in config.obsolete_hold() {
+        out.push(check(
+            &path,
+            "info",
+            crate::config::obsolete_notice(&path),
+            Some("delete that line from the config file, then run cataly config reload"),
+        ));
+    }
     out.push(match ctx.omp.report() {
         None => check("omp", "info", "not probed yet", None),
         Some(r) => match r.sessions() {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.4 (Unreleased)
+
+- Usage no longer holds session starts. The `quota` job keeps its alerts (one warning per level,
+  `levels` default `[70, 85, 95]`, and one note when a limit falls back below every level), and
+  the ops panel keeps its usage bars and turns amber at 90 % for a provider a live session uses.
+  `cataly quota`, `cataly quota lift`, the `quota.hold` and `quota.released` events and the
+  held-lead lines of `cataly lead status`, the panel and the update message are gone; `cataly
+  limits` shows usage. `alerts.quota` now posts a usage alert (`quota.level`).
+- A quota job's `hold` setting no longer does anything. The hub removes its line at start, keeps
+  the file as it was in `config.toml.before-0.2.4` and records a `config.cleaned` event; a file it
+  cannot write keeps the line, ignored, and `cataly health` and `cataly config check` name it.
+- An owner job's one-off server or network failure (HTTP 5xx, 429, a timeout) is retried on the
+  next tick and becomes a `job.failed` event, and so a note for the lead, only when it happens
+  twice in a row; a 404, 401 or bad setting is reported at once as before.
+- The planner no longer logs "planner pass failed" when it skips a pass that is not due yet.
+
 ## 0.2.3 (2026-11-27)
 
 - `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that

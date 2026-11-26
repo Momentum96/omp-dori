@@ -273,105 +273,6 @@ fn lead_resumes_through_a_symlinked_state_directory() {
     assert!(hub.stop().success());
 }
 
-/// The usage OMP reports: one `fake` limit at `percent`, resetting in 2100.
-fn usage(percent: u32) -> String {
-    serde_json::json!({
-        "generatedAt": 1, "reports": [{ "provider": "fake", "fetchedAt": 1,
-            "limits": [{ "id": "five", "label": "5h", "resetsAt": 4_102_444_800_000_i64,
-                         "amount": { "used": percent, "limit": 100, "unit": "percent" } }] }],
-        "accountsWithoutUsage": [], "disabledCredentials": [], "capacity": {}
-    })
-    .to_string()
-}
-
-/// OJ-08 holds new sessions only. With the gate held on the lead's provider, a hub restart (as
-/// after `cataly update`) resumes the lead's existing session, and so does `lead start`; a fresh
-/// lead waits, and `lead start --fresh` and `lead status` name the provider, the limit, its reset
-/// time and `cataly quota lift`.
-#[test]
-fn the_quota_gate_holds_a_fresh_lead_but_never_a_resume() {
-    let mut hub = TestHub::new("");
-    let omp = hub.install_fake("omp");
-    hub.fixture("omp", "rpc", Some(""));
-    hub.fixture("omp", "usage.json", Some(&usage(10)));
-    let work = hub.root.join("work");
-    std::fs::create_dir_all(&work).unwrap();
-    let config = format!(
-        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n\
-         [jobs.q]\nkind = \"quota\"\nenabled = false\n",
-        omp.display(),
-        work.display()
-    );
-    hub.write_config(&config);
-    hub.start();
-    let first = live(&hub, &Value::Null);
-    let session = first["session"]["session_id"].clone();
-    assert!(session.is_string(), "{first}");
-    assert!(hub.stop().success());
-
-    // The first live quota tick, at this start, closes the gate on `fake` and stores it.
-    hub.fixture("omp", "usage.json", Some(&usage(90)));
-    hub.write_config(&config.replace("enabled = false\n", ""));
-    hub.start();
-    hub.until(Duration::from_secs(20), || {
-        (hub.json(&["quota", "--json"])["providers"] == serde_json::json!(["fake"])).then_some(())
-    });
-    let second = live(&hub, &first["session"]["pid"]);
-    assert_eq!(second["session"]["session_id"], session, "{second}");
-    assert!(hub.stop().success());
-
-    // The next hub restores the held gate before the lead starts: the lead still resumes.
-    hub.start();
-    assert_eq!(
-        hub.json(&["quota", "--json"])["providers"],
-        serde_json::json!(["fake"])
-    );
-    let third = live(&hub, &second["session"]["pid"]);
-    assert_eq!(third["session"]["session_id"], session, "{third}");
-
-    // A fresh lead is a new session: held, and said plainly. The stop is recorded as the child
-    // exits, so the refusal is asked again until it is the last word on the stopped lead.
-    let stopped = hub.cli(&["lead", "stop"]);
-    assert!(stopped.status.success(), "{stopped:?}");
-    let (said, status) = hub.until(Duration::from_secs(20), || {
-        let fresh = hub.cli(&["lead", "start", "--fresh"]);
-        assert!(!fresh.status.success(), "{fresh:?}");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&fresh.stdout),
-            String::from_utf8_lossy(&fresh.stderr)
-        );
-        let status = hub.json(&["lead", "status", "--json"]);
-        (status["quota"]["provider"] == "fake").then_some((said, status))
-    });
-    for part in [
-        "quota gate holds new sessions on fake",
-        "fake#",
-        "until 2100-01-01T00:00:00Z",
-        "`cataly quota lift`",
-    ] {
-        assert!(said.contains(part), "{part}: {said}");
-    }
-    assert_eq!(
-        status["phase"], "stopped",
-        "the stopped lead stays stopped: {status}"
-    );
-    assert!(
-        status["reason"]
-            .as_str()
-            .is_some_and(|r| r.contains("`cataly quota lift`")),
-        "{status}"
-    );
-
-    // `lead start` without `--fresh` resumes the existing session through the held gate.
-    let resumed = hub.cli(&["lead", "start"]);
-    assert!(resumed.status.success(), "{resumed:?}");
-    let fourth = live(&hub, &third["session"]["pid"]);
-    assert_eq!(fourth["session"]["session_id"], session, "{fourth}");
-    assert!(hub.json(&["lead", "status", "--json"])["quota"].is_null());
-    assert!(hub.stop().success());
-}
-
 /// DESIGN 8: a process inside the lead's session (a child of its OMP) has the lead's role on the
 /// control socket, even without its launch token, and is refused every owner-only method; it reads
 /// status, and finds the hub through `CATALY_SOCKET` alone. A plain shell is the owner. A caller
@@ -386,7 +287,7 @@ fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
         "omp",
         "child",
         Some(&format!(
-            "{bin} quota lift; echo \"lift=$?\"\n\
+            "{bin} config reload; echo \"reload=$?\"\n\
              {bin} job enable x --ack; echo \"enable=$?\"\n\
              {bin} setup --yes --backup off; echo \"setup=$?\"\n\
              {bin} status --json > /dev/null; echo \"status=$?\"\n\
@@ -409,7 +310,7 @@ fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
             .ok()
             .filter(|t| t.contains("done"))
     });
-    for refused in ["lift=1", "enable=1", "setup=1", "untokened=1"] {
+    for refused in ["reload=1", "enable=1", "setup=1", "untokened=1"] {
         assert!(text.contains(refused), "{refused}: {text}");
     }
     assert!(text.contains("status=0"), "{text}");
@@ -417,16 +318,16 @@ fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
     assert!(text.contains("only the owner may run this"), "{text}");
 
     // The test process is a plain shell of the owner.
-    let lifted = hub.cli(&["quota", "lift"]);
+    let reloaded = hub.cli(&["config", "reload"]);
     assert!(
-        lifted.status.success(),
+        reloaded.status.success(),
         "{}",
-        String::from_utf8_lossy(&lifted.stderr)
+        String::from_utf8_lossy(&reloaded.stderr)
     );
     let me = hub.request(r#"{"v":1,"id":1,"method":"whoami"}"#);
     assert_eq!(me["ok"]["role"], "owner", "{me}");
     // A launch token outside every session: reads only.
-    let tokened = hub.request(r#"{"v":1,"id":2,"method":"quota.lift","launch":"t"}"#);
+    let tokened = hub.request(r#"{"v":1,"id":2,"method":"config.reload","launch":"t"}"#);
     assert!(
         tokened["err"]["message"]
             .as_str()

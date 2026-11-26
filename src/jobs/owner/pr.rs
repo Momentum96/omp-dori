@@ -24,6 +24,8 @@ const EXCERPT: usize = 160;
 pub(crate) const FOLLOW: &str = "follow";
 const CURSOR: &str = "cursor";
 const ERROR: &str = "error";
+/// Failures in a row of one followed PR.
+const FAILURES: &str = "failures";
 /// Memory subject caching the authenticated `gh` login.
 const OWN: &str = "_own";
 const FAILED_CHECKS: [&str; 5] = [
@@ -516,7 +518,8 @@ fn moved(pr: &str, before: &str, state: &str, got: &Read) -> Option<Emit> {
     }
 }
 
-/// Follows every PR this job follows; a PR that fails warns once per reason and stays as it was.
+/// Follows every PR this job follows; a PR that fails warns once per reason (a transient failure
+/// only from the second in a row) and stays as it was.
 pub(super) async fn follow_all(
     t: &mut Tick<'_>,
     gh: &str,
@@ -525,9 +528,18 @@ pub(super) async fn follow_all(
 ) -> Result<(), String> {
     let login = own_login(t, gh, own).await?;
     for (pr, _) in t.memory.with_condition(FOLLOW) {
-        if let Err(reason) = follow_one(t, gh, &login, own, &pr, announce).await
-            && t.memory.transition(&pr, ERROR, &reason)
-        {
+        let Err(reason) = follow_one(t, gh, &login, own, &pr, announce).await else {
+            t.memory.clear(&pr, FAILURES);
+            continue;
+        };
+        let failures = t
+            .memory
+            .get(&pr, FAILURES)
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+            + 1;
+        t.memory.transition(&pr, FAILURES, &failures.to_string());
+        if super::reported(failures, &reason) && t.memory.transition(&pr, ERROR, &reason) {
             let name = t.job.name.clone();
             t.emit(
                 Emit::new(EventKind::TickFailed, Severity::Warning, false, &pr)

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::jobs::owner::health::Check;
-use crate::jobs::owner::quota::GateView;
 use crate::omp::probe::Report;
 use crate::store::EventRecord;
 use crate::sys::host::{Disk, Load, Memory};
@@ -33,8 +32,6 @@ pub(crate) mod method {
     pub(crate) const CONFIG_RELOAD: &str = "config.reload";
     pub(crate) const HEALTH: &str = "health";
     pub(crate) const LIMITS: &str = "limits";
-    pub(crate) const QUOTA: &str = "quota";
-    pub(crate) const QUOTA_LIFT: &str = "quota.lift";
     pub(crate) const PR_FOLLOW: &str = "pr.follow";
     pub(crate) const PR_UNFOLLOW: &str = "pr.unfollow";
     pub(crate) const PR_LIST: &str = "pr.list";
@@ -228,13 +225,22 @@ pub(crate) struct Status {
     /// Why no session may start with this OMP, if none may (PATCH-09).
     #[serde(default)]
     pub(crate) sessions_refused: Option<String>,
-    pub(crate) quota_gate: GateView,
+    /// Always [`legacy_gate`]: `cataly update` of 0.2.3 and older reads the new hub's status and
+    /// needs this field, which named a feature since removed. To be removed once no supported
+    /// version reads it (DESIGN, "Leftovers").
+    #[serde(default = "legacy_gate")]
+    pub(crate) quota_gate: Value,
     /// The lead's model and phase; `None` when the config has no `[lead]`.
     #[serde(default)]
     pub(crate) lead: Option<String>,
     /// The sessions this hub brought back at start (DESIGN decision 9); `None` while recovering.
     #[serde(default)]
     pub(crate) resumed: Option<Resumed>,
+}
+
+/// The `quota_gate` value older clients parse: open, nothing holding it.
+pub(crate) fn legacy_gate() -> Value {
+    serde_json::json!({ "held": false, "causes": [], "lifted_until_ms": null })
 }
 
 /// The sessions a hub brought back at start. `lead` and `lanes` keep the shape a 0.1.1 `cataly update`
@@ -249,10 +255,7 @@ pub(crate) struct Resumed {
     /// The lanes running again, by name.
     #[serde(default)]
     pub(crate) lane_names: Vec<String>,
-    /// The quota gate holds the lead: no session to resume, and a new one waits for the gate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) lead_held: Option<crate::jobs::owner::quota::Held>,
-    /// Why the hub did not start the lead, when another rule than the quota gate held it.
+    /// Why the hub did not start the lead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lead_reason: Option<String>,
 }

@@ -57,7 +57,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 44] = [
+const METHODS: [Method; 42] = [
     Method {
         name: method::STATUS,
         needs: Needs::Any,
@@ -107,17 +107,6 @@ const METHODS: [Method; 44] = [
         name: method::LIMITS,
         needs: Needs::Any,
         mutating: false,
-    },
-    Method {
-        name: method::QUOTA,
-        needs: Needs::Any,
-        mutating: false,
-    },
-    // Only the owner lifts the quota gate (OJ req. 25).
-    Method {
-        name: method::QUOTA_LIFT,
-        needs: Needs::Owner,
-        mutating: true,
     },
     Method {
         name: method::PR_FOLLOW,
@@ -482,11 +471,6 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         method::LIMITS => {
             let p: LimitsParams = params(raw)?;
             ok(&limits(hub, p.refresh).await?)
-        }
-        method::QUOTA => ok(&hub.jobs.gate()),
-        method::QUOTA_LIFT => {
-            let _: Mutation = params(raw)?;
-            ok(&hub.jobs.lift().await?)
         }
         method::PR_FOLLOW | method::PR_UNFOLLOW => {
             let p: TargetParams = params(raw)?;

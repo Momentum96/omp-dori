@@ -161,7 +161,6 @@ impl Room {
         };
         let extra = Extra {
             host: "부하 172%".into(),
-            quota_release_ms: Some(now + HOUR_MS),
         };
         turn.run(panel, events, jobs, &extra, false).await
     }
@@ -170,7 +169,6 @@ impl Room {
 fn panel_with(load: f64, state: HostState) -> Panel {
     let mut p = render::tests::sample();
     p.limits = Some(Vec::new());
-    p.held.clear();
     p.host.load = Some(load);
     p.host.state = state;
     p
@@ -365,24 +363,25 @@ async fn pressure_alert_resolves_in_place() {
     let again = event("pressure.alert", "host", START + 20 * MIN, None);
     room.at(START + 20 * MIN, hot(), vec![again], &[], ko).await;
     assert_eq!(room.fake.count("create"), creates);
-    // Muted: a quota hold opens no post, but the panel still says so.
+    // Muted: a usage alert opens no post, but the panel still says so.
     let mute = Mute {
         until_ms: Some(START + 2 * HOUR_MS),
     };
     docs::put(&room.store, STATE, MUTE_ID, &mute, None)
         .await
         .unwrap();
-    let hold = event(
-        "quota.hold",
-        "quota",
+    let level = event(
+        "quota.level",
+        "anthropic#1/five_hour",
         START + 90 * MIN,
-        Some(r#"{"limits":"anthropic#1/five_hour","level":"85"}"#),
+        Some(r#"{"provider":"anthropic","percent":"85"}"#),
     );
-    room.at(START + 90 * MIN, calm(), vec![hold], &[], ko).await;
+    room.at(START + 90 * MIN, calm(), vec![level], &[], ko)
+        .await;
     assert_eq!(room.fake.count("create"), creates);
     let last = room.fake.calls().last().cloned().unwrap();
     assert!(last.0.starts_with("edit") && last.1.contains("🔕 알림 꺼짐"));
-    assert!(last.1.contains("⛔ 사용량 한도: anthropic 새 세션 보류"));
+    assert!(last.1.contains("🔋 anthropic 사용량 85%"));
 }
 
 /// A job routed here that fails twice opens one alert, resolved when it works again; the English
@@ -448,34 +447,31 @@ const OMP_19_2_1: &str = r#"{"generatedAt":1795660240551,"reports":[
   "accountsWithoutUsage":[],"disabledCredentials":[],"capacity":{}}"#;
 
 /// The 0.1.3 panel on the owner's machine: the lead live on anthropic, `openai-codex` and `devin`
-/// held by the quota gate.
+/// spent.
 #[test]
 fn the_live_omp_usage_renders_named_providers_and_green() {
     let usage = crate::omp::usage::parse_usage(OMP_19_2_1.as_bytes()).unwrap();
-    let held = vec!["devin".to_string(), "openai-codex".to_string()];
-    let limits = worst_per_provider(&usage.limits, &held);
-    let shown: Vec<(&str, Option<f64>, bool)> = limits
+    let limits = worst_per_provider(&usage.limits);
+    let shown: Vec<(&str, Option<f64>)> = limits
         .iter()
-        .map(|l| (l.provider.as_str(), l.percent, l.held))
+        .map(|l| (l.provider.as_str(), l.percent))
         .collect();
     assert_eq!(
         shown,
         [
-            ("openai-codex", Some(100.0), true),
-            ("anthropic", Some(83.0), false),
-            ("devin", Some(100.0), true),
+            ("openai-codex", Some(100.0)),
+            ("anthropic", Some(83.0)),
+            ("devin", Some(100.0)),
         ]
     );
     let mut p = render::tests::sample();
     p.limits = Some(limits);
-    p.held = held;
     p.people = People {
         lead: render::LeadState::Idle,
         model: Some("anthropic/claude-opus-5-5".into()),
         running: 0,
         waiting: 0,
         models: vec!["anthropic/claude-opus-5-5".into()],
-        lead_quota: None,
     };
     p.host.sessions = p.people.models.len();
     for (lang, words) in [
@@ -483,18 +479,16 @@ fn the_live_omp_usage_renders_named_providers_and_green() {
             Language::Korean,
             [
                 "🟢 모두 정상",
-                "⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요",
                 "세션 1/20",
-                "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R> · ⛔ 보류",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R>",
             ],
         ),
         (
             Language::English,
             [
                 "🟢 All fine",
-                "⛔ Held: devin, openai-codex · sessions on other providers start normally",
                 "Sessions 1/20",
-                "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R> · ⛔ held",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R>",
             ],
         ),
     ] {

@@ -1,6 +1,6 @@
 //! Work items and the planner (COORD-19 to COORD-23, COORD-25 to COORD-30; COORD req. 26-41): a
 //! queue of later work and an hourly pass that reconciles items with their lanes, audits, starts the
-//! next items under the lead, the quota gate, admission and the lane maximum, asks open questions
+//! next items under the lead, admission and the lane maximum, asks open questions
 //! through the lead, runs the owner-notes refresh step and records the run. The planner only opens
 //! lanes, emits to the lead and writes its own and the items' records; its GitHub calls are reads.
 
@@ -67,6 +67,29 @@ pub(crate) struct Planner {
     pub(crate) last_run_ms: Option<i64>,
     /// The local date whose owner-notes refresh was queued (COORD req. 49).
     pub(crate) notes_date: Option<String>,
+}
+
+/// Why a pass did not run to its end.
+#[derive(Debug)]
+pub(crate) enum NoPass {
+    /// The last run is less than an interval ago: nothing to do, not a failure.
+    TooSoon,
+    Failed(String),
+}
+
+impl From<String> for NoPass {
+    fn from(e: String) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl std::fmt::Display for NoPass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooSoon => f.write_str("skipped: the last run is less than an interval ago"),
+            Self::Failed(e) => f.write_str(e),
+        }
+    }
 }
 
 /// One recorded pass (COORD req. 34).
@@ -228,7 +251,11 @@ impl<R: Runtime> Lanes<R> {
                 text(format!("item {id} dropped"))
             }
             "item-import" => self.item_import(input).await,
-            "plan" => self.plan_pass(true).await.map(|r| json!(r.summary())),
+            "plan" => self
+                .plan_pass(true)
+                .await
+                .map(|r| json!(r.summary()))
+                .map_err(|e| e.to_string()),
             "plan-status" => {
                 let (state, _) = self.planner_state().await?;
                 let (runs, _) = docs::all::<Run>(&self.env.store, PLAN_RUN).await?;
@@ -410,7 +437,7 @@ impl<R: Runtime> Lanes<R> {
         Ok(json!({ "added": added, "warning": warning }))
     }
 
-    /// The planner task (COORD req. 35): once at start (subject to the gate), then at last run plus
+    /// The planner task (COORD req. 35): once at start, then at last run plus
     /// the interval.
     pub(crate) async fn plan_loop(
         self: Arc<Self>,
@@ -433,7 +460,9 @@ impl<R: Runtime> Lanes<R> {
             if self.cfg().coord.planner.enabled {
                 match self.plan_pass(false).await {
                     Ok(_) => {}
-                    Err(e) => log::warn("planner pass failed", &[("error", &e)]),
+                    // A skip is no failure: the loop waits for the due time below.
+                    Err(NoPass::TooSoon) => log::debug("planner pass skipped", &[]),
+                    Err(NoPass::Failed(e)) => log::warn("planner pass failed", &[("error", &e)]),
                 }
                 if let Ok((state, _)) = self.planner_state().await
                     && let Some(last) = state.last_run_ms
@@ -454,11 +483,11 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// One pass (COORD req. 27-34). `force` skips the interval gate, never the stop switch.
-    pub(crate) async fn plan_pass(self: &Arc<Self>, force: bool) -> Result<Run, String> {
+    pub(crate) async fn plan_pass(self: &Arc<Self>, force: bool) -> Result<Run, NoPass> {
         let _one = self.planning.lock().await;
         let (state, state_v) = self.planner_state().await?;
         if let Some(why) = &state.stopped {
-            return Err(format!("the planner is stopped: {why}"));
+            return Err(format!("the planner is stopped: {why}").into());
         }
         let config = self.cfg();
         let p = &config.coord.planner;
@@ -469,7 +498,7 @@ impl<R: Runtime> Lanes<R> {
                 .last_run_ms
                 .is_some_and(|last| began - last < interval)
         {
-            return Err("skipped: the last run is less than an interval ago".into());
+            return Err(NoPass::TooSoon);
         }
         let mut run = Run {
             at_ms: began,
@@ -701,19 +730,13 @@ impl<R: Runtime> Lanes<R> {
         };
         let open = u32::try_from(lanes.len()).unwrap_or(u32::MAX);
         let free = p.max_open.saturating_sub(open).min(p.max_starts);
-        // Planner starts run on the lanes' configured model.
-        let model = config.lanes.model.as_deref().unwrap_or_default();
-        let mut why = (self.env.quota_hold)(model).map(|h| h.to_string());
-        if why.is_none() {
-            if !(self.env.lead_live)() {
-                why = Some("no lead".into());
-            } else if let Err(e) = self
-                .admission(&config, std::path::Path::new(&first.cwd), Some(model))
+        let why = if (self.env.lead_live)() {
+            self.admission(&config, std::path::Path::new(&first.cwd))
                 .await
-            {
-                why = Some(e);
-            }
-        }
+                .err()
+        } else {
+            Some("no lead".to_string())
+        };
         if let Some(why) = why {
             run.held
                 .push(format!("{} item(s) held: {why}", candidates.len()));

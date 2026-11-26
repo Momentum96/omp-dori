@@ -24,6 +24,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::cli::exit;
+use crate::cli::setup::{Cleanup, remove_obsolete_hold};
 use crate::config::session::RuntimeKind;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
@@ -124,7 +125,7 @@ impl Hub {
             panics: self.supervisor.panics(),
             omp,
             sessions_refused: sessions,
-            quota_gate: self.jobs.gate(),
+            quota_gate: crate::proto::legacy_gate(),
             lead,
             resumed: self.resumed(),
         })
@@ -136,17 +137,12 @@ impl Hub {
         let lead_start = self.config_tx.borrow().lead.is_some().then_some(how);
         let lane_names = self.lanes.resumed.get()?.clone();
         let not_running = lead_start == Some(crate::proto::LeadStart::NotRunning);
-        let lead_held = self.lead.quota_held().filter(|_| not_running);
-        let lead_reason = self
-            .lead
-            .refusal()
-            .filter(|_| not_running && lead_held.is_none());
+        let lead_reason = self.lead.refusal().filter(|_| not_running);
         Some(crate::proto::Resumed {
             lead: lead_start == Some(crate::proto::LeadStart::Resumed),
             lanes: lane_names.len(),
             lead_start,
             lane_names,
-            lead_held,
             lead_reason,
         })
     }
@@ -323,6 +319,8 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
+    // 0.2.4 dropped quota jobs' `hold`: its line goes before the config is read, the original kept.
+    let cleanup = clean_config(&paths.config_file);
     let config = match config::load(&paths.config_file) {
         Ok(config) => config,
         Err(errors) => {
@@ -362,7 +360,7 @@ pub(crate) fn run(paths: &Paths) -> ExitCode {
             return ExitCode::from(exit::FAILED);
         }
     };
-    let code = runtime.block_on(serve(&paths, config, store));
+    let code = runtime.block_on(serve(&paths, config, store, cleanup));
     runtime.shutdown_timeout(Duration::from_secs(1));
     ExitCode::from(code)
 }
@@ -401,7 +399,7 @@ fn stream_cwd(config: &Config) -> std::path::PathBuf {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
+async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) -> u8 {
     let (signals, listener) = match open(paths) {
         Ok(opened) => opened,
         Err(code) => return code,
@@ -494,7 +492,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
     if let Err(e) = start_detector(heartbeat, Arc::clone(&notifier), marker.clone()) {
         log::warn("stall detector not started", &[("error", &e)]);
     }
-    announce(&jobs, &marker, job_count).await;
+    announce(&jobs, &marker, job_count, cleanup).await;
     notifier.ready();
     log::info(
         "hub ready",
@@ -547,11 +545,9 @@ fn sessions(
 ) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
-    let gate = jobs.clone();
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         events: Arc::clone(&events),
         store: store.clone(),
@@ -735,7 +731,7 @@ fn lanes(
     links: &Arc<crate::host::bridge::Links>,
     lead: &Arc<Lead<Hosted>>,
 ) -> Arc<crate::lanes::Lanes<Hosted>> {
-    let (gate, rest, lead) = (jobs.clone(), jobs.clone(), Arc::clone(lead));
+    let (rest, lead) = (jobs.clone(), Arc::clone(lead));
     crate::lanes::Lanes::new(crate::lanes::Env {
         config: config.clone(),
         omp: Arc::clone(omp),
@@ -743,7 +739,6 @@ fn lanes(
         state_dir: paths.state_dir.clone(),
         events: Arc::clone(events),
         make: runtime(paths, agent_start, links),
-        quota_hold: Arc::new(move |model: &str| gate.gate().hold(model)),
         bridge_link: Arc::new(crate::omp::extension::check),
         lead_live: Arc::new(move || lead.snapshot().is_some()),
         threads: Arc::new(crate::relay::discord::threads::DiscordThreads {
@@ -780,7 +775,6 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 (None, Phase::Starting) => LeadState::Starting,
                 (None, Phase::Stopped) => LeadState::Stopped,
                 (None, Phase::Held) => LeadState::Held,
-                (None, Phase::NotStarted) if view.quota.is_some() => LeadState::Held,
                 (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
             };
             // The lead counts as live exactly as the lanes' session cap counts it.
@@ -797,7 +791,6 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 running,
                 waiting,
                 models,
-                lead_quota: view.quota,
             }
         })
     }));
@@ -925,7 +918,36 @@ fn spawn_release_tasks(hub: &Arc<Hub>, supervisor: &Supervisor, shutdown: &watch
     });
 }
 
-async fn announce(jobs: &Jobs, marker: &Path, job_count: usize) {
+/// Removes obsolete lines from the config file and logs what happened; a file the hub cannot write
+/// keeps them, ignored, and `cataly health` names them.
+fn clean_config(path: &Path) -> Cleanup {
+    let cleanup = remove_obsolete_hold(path);
+    match &cleanup {
+        Cleanup::Nothing => {}
+        Cleanup::Removed { keys, backup } => log::info(
+            "obsolete config lines removed",
+            &[
+                ("settings", &keys.join(", ")),
+                ("backup", &backup.display()),
+            ],
+        ),
+        Cleanup::Kept { keys, why } => log::warn(
+            "obsolete config lines kept and ignored",
+            &[("settings", &keys.join(", ")), ("why", why)],
+        ),
+    }
+    cleanup
+}
+
+async fn announce(jobs: &Jobs, marker: &Path, job_count: usize, cleanup: Cleanup) {
+    if let Cleanup::Removed { keys, backup } = cleanup {
+        let emit = Emit::new(EventKind::ConfigCleaned, Severity::Info, false, "config")
+            .with("removed", keys.join(", "))
+            .with("backup", backup.display());
+        if let Err(e) = jobs.hub_event(emit).await {
+            log::warn("clean-up event not recorded", &[("error", &e)]);
+        }
+    }
     if let Ok(Some(bytes)) = crate::sys::fs::read_private(marker, 256) {
         let at = String::from_utf8_lossy(&bytes).trim().to_string();
         let emit = Emit::new(EventKind::HubStalled, Severity::Warning, false, "hub").with("at", at);

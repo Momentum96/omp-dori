@@ -54,15 +54,16 @@ pub(crate) struct Pr {
     pub(crate) own: Own,
 }
 
-/// `kind = "quota"` (OJ-07, OJ-08, WS-23).
+/// `kind = "quota"` (OJ-07, WS-23).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Quota {
     /// Providers watched; empty means all that OMP reports.
     pub(crate) providers: Vec<String>,
     /// Alert levels in per cent, ascending.
     pub(crate) levels: Vec<u8>,
-    /// The quota gate closes at this level.
-    pub(crate) hold: u8,
+    /// The obsolete `hold` key is still in the section: accepted and ignored. The hub removes the
+    /// line at start; `cataly health` and `cataly config check` name it while it stays.
+    pub(crate) obsolete_hold: bool,
 }
 
 /// `kind = "backup"` (OJ-15).
@@ -243,8 +244,6 @@ impl Owner {
                 COMMON[1],
                 EventKind::QuotaLevel,
                 EventKind::QuotaRecovered,
-                EventKind::QuotaHold,
-                EventKind::QuotaReleased,
             ],
             Self::Backup(_) => &[
                 COMMON[0],
@@ -366,10 +365,7 @@ fn quota(errors: &mut Vec<ConfigError>, s: &mut Section<'_>) -> Quota {
     Quota {
         providers: s.strings(errors, "providers").unwrap_or_default(),
         levels,
-        hold: s
-            .integer(errors, "hold", 1, 100)
-            .and_then(|n| u8::try_from(n).ok())
-            .unwrap_or(85),
+        obsolete_hold: s.get("hold").is_some(),
     }
 }
 
@@ -528,7 +524,8 @@ kind = "pressure"
         let Work::Owner(super::Owner::Quota(q)) = &c.jobs["q"].work else {
             panic!("quota kind");
         };
-        assert_eq!((q.levels.as_slice(), q.hold), (&[70, 85, 95][..], 85));
+        assert_eq!(q.levels.as_slice(), &[70, 85, 95][..]);
+        assert!(!q.obsolete_hold);
         assert_eq!(c.jobs["b"].kind(), "backup");
         assert_eq!(
             c.jobs["host"].trigger.every(),

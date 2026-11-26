@@ -15,7 +15,7 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) const COMMANDS: [Spec; 55] = [
+pub(crate) const COMMANDS: [Spec; 53] = [
     Spec {
         path: &["slot"],
         args: &["name"],
@@ -219,20 +219,6 @@ pub(crate) const COMMANDS: [Spec; 55] = [
         flags: &["--json", "--refresh"],
         values: &[],
         summary: "show account usage limits from OMP (cached; --refresh reads now)",
-    },
-    Spec {
-        path: &["quota"],
-        args: &[],
-        flags: &["--json"],
-        values: &[],
-        summary: "show the quota gate",
-    },
-    Spec {
-        path: &["quota", "lift"],
-        args: &[],
-        flags: &["--json"],
-        values: &[],
-        summary: "lift the quota gate until the windows that closed it reset",
     },
     Spec {
         path: &["pr", "follow"],

@@ -32,7 +32,6 @@ use crate::store::{Apply, EventRecord, JobPatch, MemoryWrite, Store, StoreError}
 use crate::sys::{ErrorClass, now_ms};
 use event::{Emit, EventKind, Severity};
 use memory::Memory;
-use owner::quota::{Gate, GateView};
 pub(crate) use stream::Stream;
 
 /// Job commands running at once across the hub (OJ req. 9).
@@ -106,8 +105,6 @@ pub(crate) struct Ctx {
     /// The config file; its directory holds `secrets/`.
     pub(crate) config_file: PathBuf,
     pub(crate) omp: Arc<Omp>,
-    /// The quota gate (OJ-08).
-    pub(crate) gate: Gate,
     pub(crate) shutdown: watch::Receiver<bool>,
     config_error: Mutex<Option<String>>,
     /// The Discord client, rebuilt when the token or settings change.
@@ -147,7 +144,6 @@ impl Ctx {
             event_log: files.event_log,
             config_file: files.config_file,
             omp,
-            gate: Gate::default(),
             shutdown,
             config_error: Mutex::new(None),
             discord: Mutex::new(None),
@@ -263,10 +259,6 @@ pub(crate) async fn perform(
     }
 }
 
-/// Memory job and subject of the owner's quota-gate lifts.
-const HUB: &str = "hub";
-const LIFT: &str = "quota.lift";
-
 /// The engine as the hub sees it.
 #[derive(Clone)]
 pub(crate) struct Jobs {
@@ -274,11 +266,10 @@ pub(crate) struct Jobs {
 }
 
 impl Jobs {
-    /// Recovers runs and deliveries left by the previous hub, restores the quota gate, then starts
-    /// the scheduler and the router under the supervisor.
+    /// Recovers runs and deliveries left by the previous hub, then starts the scheduler and the
+    /// router under the supervisor.
     pub(crate) async fn start(ctx: Arc<Ctx>, supervisor: &Supervisor) -> Result<Self, JobsError> {
         run::recover(&ctx).await?;
-        restore_gate(&ctx).await?;
         let sched = Arc::clone(&ctx);
         supervisor.spawn("scheduler", move || schedule::scheduler(Arc::clone(&sched)));
         let router = Arc::clone(&ctx);
@@ -513,20 +504,6 @@ impl Jobs {
         Ok(())
     }
 
-    /// The quota gate now.
-    pub(crate) fn gate(&self) -> GateView {
-        self.ctx.gate.view(now_ms())
-    }
-
-    /// The owner lifts the quota gate until the current windows reset (OJ req. 25); the lift
-    /// survives a restart.
-    pub(crate) async fn lift(&self) -> Result<GateView, JobsError> {
-        let view = self.ctx.gate.lift(now_ms());
-        let value = self.ctx.gate.lifted_until().map(|until| until.to_string());
-        self.write_memory(HUB, LIFT, "until", value).await?;
-        Ok(view)
-    }
-
     async fn write_memory(
         &self,
         job: &str,
@@ -650,32 +627,6 @@ impl Jobs {
     pub(crate) async fn health(&self) -> Result<Vec<owner::health::Check>, JobsError> {
         owner::health::checks(&self.ctx).await
     }
-}
-
-/// Rebuilds the quota gate from each quota job's stored causes and the owner's stored lift.
-async fn restore_gate(ctx: &Ctx) -> Result<(), JobsError> {
-    let config = ctx.config();
-    for (name, job) in &config.jobs {
-        if !matches!(job.work, Work::Owner(Owner::Quota(_))) {
-            continue;
-        }
-        let key = name.clone();
-        let rows = ctx.store.read(move |r| r.memory(&key, false)).await?;
-        let memory = Memory::new(name, false, rows);
-        ctx.gate.set(
-            name,
-            owner::quota::stored_causes(memory.get("gate", "hold")),
-        );
-    }
-    let rows = ctx.store.read(|r| r.memory(HUB, false)).await?;
-    let memory = Memory::new(HUB, false, rows);
-    if let Some(until) = memory
-        .get(LIFT, "until")
-        .and_then(|v| v.parse::<i64>().ok())
-    {
-        ctx.gate.restore_lift(Some(until));
-    }
-    Ok(())
 }
 
 pub(crate) fn duration_ms(d: Duration) -> i64 {
