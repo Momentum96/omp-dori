@@ -56,14 +56,13 @@ Cargo cache per OS, CPU, target and `Cargo.lock`, and Bun with its cache per `ex
 - `release smoke (<target>)`, on pushes to `main` and dispatches only: the release binary built
   with a throwaway key, installed by `install.sh` from a signed local folder into an empty home,
   then `cataly version` and `cataly health`.
+- `release binary (<target>)`, on a dispatch with `binaries` ticked only: the release binary of
+  each target built with the release key, the commit and its time, uploaded as the artifact
+  `cataly-<version>-<target>` for `scripts/release.sh --add`.
 
 A newer push to a pull request cancels its running checks. On macOS the tests' waits for
 something to happen are three times as long (`CATALY_TEST_PATIENCE`, read by `tests/support`);
-what they check is the same on every target.
-
-`.github/workflows/build.yml`, dispatched by hand, builds the release binary of every target with
-the release key, the commit and its time, and uploads each as `cataly-<version>-<target>` for
-`scripts/release.sh --add`. Windows is not a target.
+what they check is the same on every target. Windows is not a target.
 
 ## Licence and CLA
 

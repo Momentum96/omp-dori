@@ -14,6 +14,10 @@ on:
         type: choice
         options: [all, linux, macos]
         default: all
+      binaries:
+        description: "Also build each target's release binary with the release key and upload it as cataly-<version>-<target>"
+        type: boolean
+        default: false
   # The release workflow runs the full CI on the tagged commit (IR req. 42).
   workflow_call:
 
@@ -47,10 +51,10 @@ jobs:
         run: |
           set -euo pipefail
           all='[
-            {"target": "linux-x64", "family": "linux", "os": "ubuntu-latest", "patience": 1},
-            {"target": "linux-arm64", "family": "linux", "os": "ubuntu-24.04-arm", "patience": 1},
-            {"target": "darwin-arm64", "family": "macos", "os": "macos-latest", "patience": 3},
-            {"target": "darwin-x64", "family": "macos", "os": "macos-15-intel", "patience": 3}
+            {"target": "linux-x64", "family": "linux", "os": "ubuntu-latest", "patience": 1, "format": "ELF 64-bit LSB.*x86-64"},
+            {"target": "linux-arm64", "family": "linux", "os": "ubuntu-24.04-arm", "patience": 1, "format": "ELF 64-bit LSB.*ARM aarch64"},
+            {"target": "darwin-arm64", "family": "macos", "os": "macos-latest", "patience": 3, "format": "Mach-O 64-bit.*arm64"},
+            {"target": "darwin-x64", "family": "macos", "os": "macos-15-intel", "patience": 3, "format": "Mach-O 64-bit.*x86_64"}
           ]'
           matrix=$(echo "$all" | jq -c --arg os "$OS" '{include: map(select($os == "all" or .family == $os))}')
           echo "$matrix"
@@ -186,6 +190,51 @@ jobs:
         env:
           CATALY_CONTRACT_OMP: "1"
         run: cargo test --locked --release --no-fail-fast --test 'contract*' -- --nocapture
+
+  # Release binaries without a release, for scripts/release.sh --add: on a dispatch with `binaries`,
+  # each target builds `cargo build --locked --release --features voice` with the release public key
+  # (repository variable CATALY_RELEASE_KEY), CATALY_COMMIT = the commit and SOURCE_DATE_EPOCH = its
+  # time, checks the format and version report, and uploads the artifact cataly-<version>-<target>.
+  # Nothing is signed or published: the owner signs on his own machine.
+  binary:
+    name: release binary (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.binaries
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          bun: "false"
+      - id: build
+        name: Release build (voice) with the release key, commit and commit time
+        shell: bash
+        env:
+          CATALY_RELEASE_KEY: ${{ vars.CATALY_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          echo "$CATALY_RELEASE_KEY" | grep -Eq '^[0-9a-f]{64}$' || { echo "repository variable CATALY_RELEASE_KEY is not 64 hex digits"; exit 1; }
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          CATALY_COMMIT="$GITHUB_SHA" SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+            cargo build --locked --release --features voice
+          b=target/release/cataly
+          file "$b" | grep -Eq "${{ matrix.format }}"
+          "$b" version --json | tee report.json
+          jq -e --arg v "$version" --arg t "${{ matrix.target }}" --arg c "$GITHUB_SHA" \
+            '.version == $v and .target == $t and .commit == $c' report.json
+          mkdir -p out
+          cp "$b" "out/cataly-$version-${{ matrix.target }}"
+          echo "name=cataly-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.build.outputs.name }}
+          path: out/${{ steps.build.outputs.name }}
+          if-no-files-found: error
 
   # The release binary as a user gets it, on pushes to main and manual dispatches only: built with a
   # throwaway release key made in the job, its assets listed in a SHA256SUMS signed with that key,

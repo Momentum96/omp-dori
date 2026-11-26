@@ -782,8 +782,8 @@ rest on the registry's own integrity check, not on the release signature (11.4).
   rests on HTTPS alone.
 - `scripts/release.sh <version> [--add <target>=<binary>]...` builds and signs a release on the owner's
   machine (clean tree, Cargo version, `--locked`, `SOURCE_DATE_EPOCH`, key from `~/.config/cataly-release`
-  handed to cargo through `env` only): linux-x64 is built there; the other targets come from the `build`
-  workflow (a manual dispatch, the same build with the release key, commit and commit time, uploaded as
+  handed to cargo through `env` only): linux-x64 is built there; the other targets come from a `ci`
+  dispatch with `binaries` (the same build with the release key, commit and commit time, uploaded as
   `cataly-<version>-<target>` artifacts). Each added binary is checked without running it: `file` reports
   its target's format and its bytes hold the release's version, commit and key. It packs the npm packages
   with `scripts/npm-pack.sh`. Signing stays on the owner's machine; publishing is a separate, manual step.

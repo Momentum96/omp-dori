@@ -8,7 +8,7 @@
 # The build is `cargo build --locked --release --features voice` into target/local-release, with the
 # release public key, the commit and the commit time handed to cargo through `env` (never exported
 # into this shell). Each --add names a binary of another target (linux-arm64, darwin-arm64,
-# darwin-x64), as the `build` workflow uploads it (artifact cataly-<version>-<target>). It cannot
+# darwin-x64), as a ci dispatch with `binaries` uploads it (artifact cataly-<version>-<target>). It cannot
 # run here, so it is checked without running it: `file` reports that target's executable format,
 # and its bytes hold this release's version (the HTTP user agent `cataly/<version>`), this commit
 # and the release key, so it was built from this commit with this key. Into release-local/v<version>,
