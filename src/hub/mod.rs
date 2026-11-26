@@ -747,8 +747,9 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
         let (lead, lanes) = (Arc::clone(&lead), Arc::clone(&lanes));
         Box::pin(async move {
             let view = lead.view().await;
-            let (running, waiting, live) = lanes.ops_counts().await;
+            let (running, waiting, lane_models) = lanes.ops_counts().await;
             let state = match (&view.session, &view.phase) {
+                (Some(s), _) if s.quota_blocked.is_some() => LeadState::Held,
                 (Some(s), _) => match s.status {
                     Status::Working => LeadState::Working,
                     Status::Blocked => LeadState::Blocked,
@@ -760,12 +761,20 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 (None, Phase::Held) => LeadState::Held,
                 (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
             };
+            // The lead counts as live exactly as the lanes' session cap counts it.
+            let mut models: Vec<String> = view
+                .session
+                .as_ref()
+                .map(|s| s.model.clone().unwrap_or_else(|| s.requested_model.clone()))
+                .into_iter()
+                .collect();
+            models.extend(lane_models);
             People {
                 lead: state,
                 model: view.session.and_then(|s| s.model),
                 running,
                 waiting,
-                live,
+                models,
             }
         })
     }));

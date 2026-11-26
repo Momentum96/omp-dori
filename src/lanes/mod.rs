@@ -373,8 +373,9 @@ impl<R: Runtime> Lanes<R> {
             })
             .unwrap_or_default();
         let sample = crate::jobs::owner::pressure::sample(cwd).await;
+        // `max_sessions` counts every live session, the lead's included (C14).
         let sample = crate::jobs::owner::pressure::Sample {
-            sessions: u32::try_from(live).ok(),
+            sessions: u32::try_from(sessions).ok(),
             ..sample
         };
         let held = crate::jobs::owner::pressure::admission(&sample, &pressure);

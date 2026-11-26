@@ -74,7 +74,7 @@ pub(crate) fn admission(s: &Sample, p: &Pressure) -> Vec<String> {
     held
 }
 
-/// Takes one sample. Live lane sessions do not exist before milestone 2, so their count is 0.
+/// Takes one sample with a session count of 0; a lane start puts the live count in its place.
 pub(crate) async fn sample(disk_path: &Path) -> Sample {
     #[allow(clippy::cast_precision_loss)]
     let load_percent = host::load()

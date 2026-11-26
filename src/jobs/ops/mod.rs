@@ -564,13 +564,7 @@ impl Embeds {
     fn body(&self, text: &str) -> Result<Value, String> {
         let mut body: Value =
             serde_json::from_str(text).map_err(|e| format!("not a message body: {e}"))?;
-        // The panel shows when it was updated; Discord prints the time in the reader's zone.
-        if let Some(embed) = body.pointer_mut("/embeds/0")
-            && embed.get("footer").is_some()
-            && let Ok(at) = jiff::Timestamp::from_millisecond(self.now)
-        {
-            render::set(embed, "timestamp", json!(at.to_string()));
-        }
+        render::stamp(&mut body, self.now);
         Ok(body)
     }
 }
@@ -779,7 +773,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         load: sample.load_percent,
         memory_free: sample.memory_free_percent,
         disk_free_gb: sample.disk_free_gb,
-        sessions: people.live,
+        sessions: people.models.len(),
         max_sessions: limits.max_sessions,
         state,
     };
@@ -808,6 +802,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
     let panel = Panel {
         host,
         limits,
+        held: gate.providers,
         people,
         jobs: jobs.len(),
         issues,
@@ -821,7 +816,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
 
 fn limit_of(l: &crate::omp::usage::Limit, held: &[String]) -> Limit {
     Limit {
-        provider: l.provider_shown().to_string(),
+        provider: l.provider.clone(),
         label: l.label.clone(),
         percent: l.used_percent,
         reset_ms: l.reset_ms,

@@ -26,22 +26,6 @@ const OUTPUT_CAP: u64 = 1024 * 1024;
 /// `omp config get modelRoles --json`: 10 s.
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Provider names shown as they are; anything else shows as "unknown" (WS req. 37).
-const KNOWN_PROVIDERS: [&str; 12] = [
-    "anthropic",
-    "openai",
-    "openai-codex",
-    "google",
-    "google-gemini-cli",
-    "google-antigravity",
-    "github-copilot",
-    "xai",
-    "zai",
-    "kimi-code",
-    "minimax",
-    "cursor",
-];
-
 /// One usage limit of one account.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Limit {
@@ -68,14 +52,6 @@ impl Limit {
     /// Stable identity: provider, account ordinal and limit ID (OJ req. 20).
     pub(crate) fn key(&self) -> String {
         format!("{}#{}/{}", self.provider, self.account, self.id)
-    }
-
-    pub(crate) fn provider_shown(&self) -> &str {
-        if KNOWN_PROVIDERS.contains(&self.provider.as_str()) {
-            &self.provider
-        } else {
-            "unknown"
-        }
     }
 }
 
@@ -411,7 +387,10 @@ pub(crate) mod tests {
         assert_eq!(l.used_percent, Some(86.0));
         assert_eq!(l.window_ms, Some(5 * 3_600_000));
         assert_eq!(l.reset_ms, None, "no reset field in the verified shape");
-        assert_eq!(l.provider_shown(), "unknown");
+        assert_eq!(
+            l.provider, "cyfake",
+            "an extension provider keeps the name OMP reports"
+        );
         let empty = parse_usage(br#"{"generatedAt":1,"reports":[],"accountsWithoutUsage":[],"disabledCredentials":[],"capacity":{}}"#).unwrap();
         assert!(empty.limits.is_empty(), "no reports, no limits");
     }

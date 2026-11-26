@@ -197,8 +197,9 @@ fn cut(text: &str, max: usize) -> String {
 }
 
 impl<R: Runtime> Lanes<R> {
-    /// Lanes for the ops panel: working, the other open ones, and live lane sessions.
-    pub(crate) async fn ops_counts(&self) -> (usize, usize, usize) {
+    /// Lanes for the ops panel: working, the other open ones, and the model of each live lane
+    /// session (`provider/id`, or the requested selector until OMP names one).
+    pub(crate) async fn ops_counts(&self) -> (usize, usize, Vec<String>) {
         let rows = self
             .env
             .store
@@ -212,8 +213,18 @@ impl<R: Runtime> Lanes<R> {
                     .is_some_and(|s| s.snapshot().status == Status::Working)
             })
             .count();
-        let live = self.live_map().values().filter(|s| s.alive()).count();
-        (running, rows.len() - running, live)
+        let models = self
+            .live_map()
+            .values()
+            .filter(|s| s.alive())
+            .map(|s| {
+                let snap = s.snapshot();
+                snap.model
+                    .clone()
+                    .unwrap_or_else(|| snap.requested_model.clone())
+            })
+            .collect();
+        (running, rows.len() - running, models)
     }
 
     /// The body (EVR req. 51), without the update time when `stamp` is false.

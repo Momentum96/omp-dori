@@ -286,7 +286,7 @@ fn bands(t: &mut Tick<'_>, q: &Quota, l: &Limit) {
         t.emit(
             Emit::new(EventKind::QuotaLevel, Severity::Warning, true, &key)
                 .with("limit", &l.id)
-                .with("provider", l.provider_shown())
+                .with("provider", &l.provider)
                 .with("account", l.account)
                 .with("percent", shown)
                 .with("window", window)
@@ -296,7 +296,7 @@ fn bands(t: &mut Tick<'_>, q: &Quota, l: &Limit) {
         t.emit(
             Emit::new(EventKind::QuotaRecovered, Severity::Info, false, &key)
                 .with("limit", &l.id)
-                .with("provider", l.provider_shown())
+                .with("provider", &l.provider)
                 .with("account", l.account)
                 .with("percent", shown),
         );

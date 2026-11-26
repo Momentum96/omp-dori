@@ -97,8 +97,9 @@ pub(crate) struct People {
     pub(crate) model: Option<String>,
     pub(crate) running: usize,
     pub(crate) waiting: usize,
-    /// Live lane sessions.
-    pub(crate) live: usize,
+    /// The model (`provider/id`, or the requested selector until OMP names one) of every live
+    /// session the hub runs, the lead's first. Its length is the count the session cap holds.
+    pub(crate) models: Vec<String>,
 }
 
 impl Default for People {
@@ -108,7 +109,7 @@ impl Default for People {
             model: None,
             running: 0,
             waiting: 0,
-            live: 0,
+            models: Vec::new(),
         }
     }
 }
@@ -140,6 +141,8 @@ pub(crate) struct Panel {
     pub(crate) host: Host,
     /// `None` when no usage data was read.
     pub(crate) limits: Option<Vec<Limit>>,
+    /// The providers the quota gate holds, in order.
+    pub(crate) held: Vec<String>,
     pub(crate) people: People,
     pub(crate) jobs: usize,
     pub(crate) issues: Vec<Issue>,
@@ -151,9 +154,36 @@ pub(crate) struct Panel {
     pub(crate) pin_refused: bool,
 }
 
-/// The footer: the version and update word, after the unpinned note while the bot may not pin.
+/// Stands for the update time in a rendered panel; [`stamp`] puts the time in its place when the
+/// message is sent, so an unchanged panel renders the same body.
+const UPDATED_AT: &str = "\u{1}updated\u{1}";
+
+/// Puts the update time `now` on a message body's first embed when it has a footer: the embed's
+/// timestamp, which Discord prints after the footer in the reader's zone, and the panel's
+/// "updated" line as a relative time.
+pub(crate) fn stamp(body: &mut Value, now: i64) {
+    let Some(embed) = body.pointer_mut("/embeds/0") else {
+        return;
+    };
+    let Ok(at) = jiff::Timestamp::from_millisecond(now) else {
+        return;
+    };
+    if embed.get("footer").is_none() {
+        return;
+    }
+    set(embed, "timestamp", json!(at.to_string()));
+    if let Some(d) = embed.get("description").and_then(Value::as_str)
+        && d.contains(UPDATED_AT)
+    {
+        let d = d.replace(UPDATED_AT, &when(now, 'R'));
+        set(embed, "description", json!(d));
+    }
+}
+
+/// The footer: the version, after the unpinned note while the bot may not pin. Discord shows the
+/// embed's timestamp after it.
 fn footer(pin_refused: bool, lang: Language, version: &str) -> String {
-    let tail = format!("Cataly {version} · {}", t(lang, "마지막 갱신", "updated"));
+    let tail = format!("Cataly {version}");
     if pin_refused {
         let note = t(
             lang,
@@ -225,10 +255,17 @@ fn plain(text: &str) -> String {
 }
 
 impl Panel {
+    /// Red only when the owner must act: the host overloaded, a job failing or waiting for an ack,
+    /// the lead held, or a held provider a live session uses. A held provider no live session uses
+    /// is worth a look: sessions on the other providers start normally.
     pub(crate) fn level(&self) -> Level {
-        let held = self.limits.iter().flatten().any(|l| l.held);
         let failing = self.issues.iter().any(|i| i.failures >= 2 || i.needs_ack);
-        if self.host.state == HostState::Alert || held || failing {
+        let (used, _) = self.held_split();
+        if self.host.state == HostState::Alert
+            || failing
+            || !used.is_empty()
+            || self.people.lead == LeadState::Held
+        {
             return Level::Act;
         }
         let high = self
@@ -238,13 +275,62 @@ impl Panel {
             .any(|l| l.percent.is_some_and(|p| p >= 70.0));
         if self.host.state == HostState::Busy
             || high
+            || !self.held.is_empty()
             || !self.issues.is_empty()
-            || matches!(self.people.lead, LeadState::Error | LeadState::Held)
+            || self.people.lead == LeadState::Error
         {
             Level::Watch
         } else {
             Level::Fine
         }
+    }
+
+    /// The held providers a live session uses, then the others. A model without a provider may
+    /// use any of them, as the quota gate judges a start.
+    fn held_split(&self) -> (Vec<&str>, Vec<&str>) {
+        self.held.iter().map(String::as_str).partition(|held| {
+            self.people.models.iter().any(|m| match m.split_once('/') {
+                Some((provider, _)) if !provider.is_empty() => provider == *held,
+                _ => true,
+            })
+        })
+    }
+
+    /// The summary's held-provider line, when the gate holds one.
+    fn held_line(&self, lang: Language) -> Option<String> {
+        if self.held.is_empty() {
+            return None;
+        }
+        let names = |list: &[&str]| list.iter().map(|p| plain(p)).collect::<Vec<_>>().join(", ");
+        let all: Vec<&str> = self.held.iter().map(String::as_str).collect();
+        let (used, idle) = self.held_split();
+        let mut line = format!("⛔ {} {}", t(lang, "보류:", "Held:"), names(&all));
+        if used.is_empty() {
+            line.push_str(t(
+                lang,
+                " · 다른 제공자의 세션은 정상적으로 시작해요",
+                " · sessions on other providers start normally",
+            ));
+        } else {
+            let _ = write!(
+                line,
+                " · {} {}",
+                t(
+                    lang,
+                    "실행 중인 세션이 쓰는 제공자:",
+                    "used by a live session:"
+                ),
+                names(&used)
+            );
+            if !idle.is_empty() {
+                line.push_str(t(
+                    lang,
+                    " · 그 밖의 제공자 세션은 정상적으로 시작해요",
+                    " · sessions on the other providers start normally",
+                ));
+            }
+        }
+        Some(line)
     }
 }
 
@@ -416,8 +502,8 @@ fn recent_value(recent: &[Recent], lang: Language) -> String {
         .join("\n")
 }
 
-/// The panel message without its update time (the caller adds it), so equal bodies mean nothing
-/// changed.
+/// The panel message with [`UPDATED_AT`] for its update time (the messenger fills it in), so equal
+/// bodies mean nothing changed.
 pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
     let (colour, summary) = match p.level() {
         Level::Fine => (GREEN, t(lang, "🟢 모두 정상", "🟢 All fine")),
@@ -425,6 +511,9 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
         Level::Act => (RED, t(lang, "🔴 확인이 필요해요", "🔴 Needs you")),
     };
     let mut description = summary.to_string();
+    if let Some(held) = p.held_line(lang) {
+        let _ = write!(description, "\n{held}");
+    }
     if let Some(until) = p.muted_until_ms {
         let _ = write!(
             description,
@@ -436,6 +525,11 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
             description.push_str("까지");
         }
     }
+    let _ = write!(
+        description,
+        "\n🕒 {} {UPDATED_AT}",
+        t(lang, "마지막 갱신", "Updated")
+    );
     let field = |name: &str, value: String, inline: bool| json!({ "name": cut(name, FIELD_NAME_MAX), "value": cut(&value, FIELD_VALUE_MAX), "inline": inline });
     let fields = vec![
         field(
@@ -839,12 +933,17 @@ pub(crate) mod tests {
                     held: true,
                 },
             ]),
+            held: vec!["openai-codex".into()],
             people: People {
                 lead: LeadState::Working,
                 model: Some("anthropic/claude-opus-5-5".into()),
                 running: 2,
                 waiting: 1,
-                live: 3,
+                models: vec![
+                    "anthropic/claude-opus-5-5".into(),
+                    "openai-codex/gpt-5.5".into(),
+                    "anthropic/claude-sonnet-5".into(),
+                ],
             },
             jobs: 5,
             issues: Vec::new(),
@@ -909,6 +1008,7 @@ pub(crate) mod tests {
         }
         let mut calm = sample();
         calm.limits = Some(Vec::new());
+        calm.held.clear();
         assert_eq!(
             panel(&calm, Language::Korean, "x")["embeds"][0]["color"],
             GREEN
@@ -1026,5 +1126,99 @@ pub(crate) mod tests {
                 .starts_with("✅ 해결됨 · ")
         );
         assert_eq!(done["embeds"][0]["color"], GREEN);
+    }
+
+    /// The live panel of 0.1.3: the lead alone on anthropic, `openai-codex` and `devin` held.
+    fn held_elsewhere() -> Panel {
+        let mut p = sample();
+        p.held = vec!["devin".into(), "openai-codex".into()];
+        p.limits = Some(Vec::new());
+        p.people.running = 0;
+        p.people.waiting = 0;
+        p.people.models = vec!["anthropic/claude-opus-5-5".into()];
+        p.host.sessions = p.people.models.len();
+        p
+    }
+
+    fn description(p: &Panel, lang: Language) -> String {
+        panel(p, lang, "x")["embeds"][0]["description"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn a_held_provider_no_live_session_uses_is_amber() {
+        let p = held_elsewhere();
+        assert_eq!(p.level(), Level::Watch);
+        let ko = panel(&p, Language::Korean, "x");
+        assert_eq!(ko["embeds"][0]["color"], AMBER);
+        let d = description(&p, Language::Korean);
+        assert!(d.starts_with("🟡 살펴볼 것이 있어요\n"), "{d}");
+        assert!(
+            d.contains("⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요"),
+            "{d}"
+        );
+        assert!(!d.contains("확인이 필요해요"), "{d}");
+        let d = description(&p, Language::English);
+        assert!(d.starts_with("🟡 Worth a look\n"), "{d}");
+        assert!(
+            d.contains("⛔ Held: devin, openai-codex · sessions on other providers start normally"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn the_held_provider_of_a_live_session_is_red() {
+        let mut p = held_elsewhere();
+        p.held = vec!["anthropic".into(), "devin".into()];
+        assert_eq!(p.level(), Level::Act, "the lead's own provider is held");
+        let d = description(&p, Language::Korean);
+        assert!(d.starts_with("🔴 확인이 필요해요\n"), "{d}");
+        assert!(
+            d.contains(
+                "⛔ 보류: anthropic, devin · 실행 중인 세션이 쓰는 제공자: anthropic · 그 밖의 제공자 세션은 정상적으로 시작해요"
+            ),
+            "{d}"
+        );
+        let d = description(&p, Language::English);
+        assert!(
+            d.contains(
+                "⛔ Held: anthropic, devin · used by a live session: anthropic · sessions on the other providers start normally"
+            ),
+            "{d}"
+        );
+        // A lane on a held provider counts as much as the lead.
+        let mut p = held_elsewhere();
+        p.people.models.push("devin/swe-1".into());
+        assert_eq!(p.level(), Level::Act);
+        // A lead held by the quota gate or by OMP's usage limit needs the owner.
+        let mut p = held_elsewhere();
+        p.held.clear();
+        p.people.lead = LeadState::Held;
+        assert_eq!(p.level(), Level::Act);
+    }
+
+    #[test]
+    fn sessions_count_the_lead_and_the_time_is_relative() {
+        let p = held_elsewhere();
+        for (lang, want, updated) in [
+            (Language::Korean, "세션 1/20", "🕒 마지막 갱신 "),
+            (Language::English, "Sessions 1/20", "🕒 Updated "),
+        ] {
+            let mut body = panel(&p, lang, "0.1.4");
+            assert!(body.to_string().contains(want), "{want}");
+            assert_eq!(body["embeds"][0]["footer"]["text"], "Cataly 0.1.4");
+            stamp(&mut body, 1_795_660_240_551);
+            let embed = &body["embeds"][0];
+            let d = embed["description"].as_str().unwrap();
+            assert!(d.ends_with(&format!("{updated}<t:1795660240:R>")), "{d}");
+            assert_eq!(embed["timestamp"], "2026-11-26T02:30:40.551Z");
+        }
+        // An alert keeps its text; only the timestamp is added.
+        let mut a = alert("t", "d", 0, Level::Watch, Language::Korean);
+        let before = a["embeds"][0]["description"].clone();
+        stamp(&mut a, 1_795_660_240_551);
+        assert_eq!(a["embeds"][0]["description"], before);
     }
 }

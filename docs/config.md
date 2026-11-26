@@ -644,18 +644,22 @@ minute, like the [board](#coordination-coord). After an uncertain create it is n
 it stays in doubt until the lead names the message it found (board destination
 `ops:<channel id>`).
 Its colour is the worst state: green when all is fine, amber when something is worth a look (host
-busy, a limit at 70 % or more, a job with a failure, the lead in error or held), red when it needs
-you (host in alert, a provider held, a job failing twice or waiting for your ack). It shows:
+busy, a limit at 70 % or more, a provider held that no live session uses, a job with a failure,
+the lead in error), red when it needs you (host in alert, a held provider a live session uses, the
+lead held by the quota gate or its provider's limit, a job failing twice or waiting for your ack).
+Under the summary, a held provider gets a line naming the held providers and saying whether a live
+session uses one or sessions on the other providers start normally. It shows:
 
-- 🖥️ host: load bar and per cent, free memory and disk, live lane sessions of `max_sessions`
-  (load and memory rounded to 5 %, so noise does not edit the panel);
-- 🔋 usage: one line per provider with its most used limit, a bar, the per cent and the reset time;
-  held providers marked;
+- 🖥️ host: load bar and per cent, free memory and disk, live sessions (the lead and the lanes)
+  of `max_sessions` (load and memory rounded to 5 %, so noise does not edit the panel);
+- 🔋 usage: one line per provider, by the name OMP reports, with its most used limit, a bar, the
+  per cent and the reset time; held providers marked;
 - 👥 sessions: the lead's state and model, lanes running and waiting;
 - 🛠️ jobs: all fine, or which jobs need attention;
 - 📮 recent: the last three events routed here (busy and ready changes left out), with relative
   times;
-- the footer: the version and the update time.
+- the last update as a relative time under the summary, and the version in the footer with the
+  update time beside it.
 
 Buttons, for the owner only (anyone else gets a private refusal): 🔄 refresh (once a minute at
 most), 📊 usage details (a private reply with every limit), 🔕 mute (silences new alerts for
@@ -884,7 +888,7 @@ tick. Without a pressure job, session starts use the same rule with the defaults
 | `min_free_memory` | integer | `20` | 0–100 | Free memory (and container headroom) share, in per cent, below which starts wait. |
 | `min_free_disk_gb` | integer | `50` | 0–1000000 | Free disk in GB below which starts wait. |
 | `disk_path` | string | your home folder | absolute path | File system checked for disk space. |
-| `max_sessions` | integer | `20` | 0–1000; `0` = off | Live lane sessions at or above this hold starts. |
+| `max_sessions` | integer | `20` | 0–1000; `0` = off | Live sessions, the lead's included, at or above this hold lane starts. |
 
 Events: `pressure.alert` (`reasons`), `pressure.clear`, `pressure.ready` (`load`),
 `pressure.busy` (`load`).

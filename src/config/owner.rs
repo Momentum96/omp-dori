@@ -114,7 +114,7 @@ pub(crate) struct Pressure {
     pub(crate) min_free_disk_gb: u64,
     /// The file system checked for disk space; default the home directory.
     pub(crate) disk_path: Option<PathBuf>,
-    /// Live lane sessions at or above this hold starts; 0 disables the check.
+    /// Live sessions (the lead and the lanes) at or above this hold lane starts; 0 disables the check.
     pub(crate) max_sessions: u32,
 }
 

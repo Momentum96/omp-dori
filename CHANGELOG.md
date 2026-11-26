@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.4 (Unreleased)
+
+- The ops panel, `cataly limits` and quota events name every provider as OMP reports it, an
+  extension provider such as `devin` included, instead of "unknown".
+- The panel's session count includes the lead, and the `max_sessions` check on a lane start now
+  counts the lead too, so both use the same number.
+- A held provider that no live session uses turns the panel amber, not red, and a line under the
+  summary names the held providers and says sessions on other providers start normally. The
+  panel turns red when a live session's provider is held or the lead is held.
+- The panel says when it was last updated as a relative time under the summary; the footer shows
+  the version with the update time beside it.
+
 ## 0.1.3 (2026-11-26)
 
 - The ops panel tries again to pin itself when a pin fails: right after the hub starts, then at

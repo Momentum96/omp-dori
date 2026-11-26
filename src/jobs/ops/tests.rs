@@ -170,6 +170,7 @@ impl Room {
 fn panel_with(load: f64, state: HostState) -> Panel {
     let mut p = render::tests::sample();
     p.limits = Some(Vec::new());
+    p.held.clear();
     p.host.load = Some(load);
     p.host.state = state;
     p
@@ -421,4 +422,87 @@ async fn job_failing_twice_alerts_once_and_resolves() {
         .into_iter()
         .rfind(|(_, t)| t.contains("Cataly status"));
     assert!(panel.is_some_and(|(_, t)| t.contains("🔋 Usage")));
+}
+
+/// The shapes stock OMP 19.2.1 printed on the owner's machine (account fields left out): every
+/// provider shows by the name OMP reports, the extension provider `devin` included.
+const OMP_19_2_1: &str = r#"{"generatedAt":1795660240551,"reports":[
+  {"provider":"openai-codex","fetchedAt":1795660096970,"limits":[{"id":"openai-codex:primary","label":"7 days",
+    "scope":{"provider":"openai-codex","windowId":"7d","shared":true},
+    "window":{"id":"7d","label":"7 days","durationMs":604800000,"resetsAt":1795757995000},
+    "amount":{"used":100,"limit":100,"remaining":0,"usedFraction":1,"remainingFraction":0,"unit":"percent"},"status":"exhausted"}]},
+  {"provider":"anthropic","fetchedAt":1795660229304,"limits":[
+    {"id":"anthropic:5h","label":"Claude 5 Hour","scope":{"provider":"anthropic","windowId":"5h","shared":true},
+      "window":{"id":"5h","label":"5 Hour","durationMs":18000000,"resetsAt":1795677600000},
+      "amount":{"used":6,"limit":100,"remaining":94,"usedFraction":0.06,"remainingFraction":0.94,"unit":"percent"},"status":"ok"},
+    {"id":"anthropic:7d","label":"Claude 7 Day","scope":{"provider":"anthropic","windowId":"7d","shared":true},
+      "window":{"id":"7d","label":"7 Day","durationMs":604800000,"resetsAt":1795834800000},
+      "amount":{"used":83,"limit":100,"remaining":17,"usedFraction":0.83,"remainingFraction":0.17,"unit":"percent"},"status":"ok"},
+    {"id":"anthropic:7d:fable","label":"Claude 7 Day (Fable)","scope":{"provider":"anthropic","windowId":"7d","tier":"fable"},
+      "window":{"id":"7d","label":"7 Day","durationMs":604800000,"resetsAt":1795834800000},
+      "amount":{"used":20,"limit":100,"remaining":80,"usedFraction":0.2,"remainingFraction":0.8,"unit":"percent"},"status":"ok"}]},
+  {"provider":"devin","limits":[{"id":"devin:quota:weekly","label":"Weekly Quota",
+    "scope":{"provider":"devin","tier":"Max","windowId":"7d"},
+    "window":{"id":"7d","label":"Weekly Quota","durationMs":604800000,"resetsAt":1795939200000},
+    "amount":{"used":100,"limit":100,"remaining":0,"usedFraction":1,"remainingFraction":0,"unit":"percent"},"status":"exhausted"}]}],
+  "accountsWithoutUsage":[],"disabledCredentials":[],"capacity":{}}"#;
+
+/// The 0.1.3 panel on the owner's machine: the lead live on anthropic, `openai-codex` and `devin`
+/// held by the quota gate.
+#[test]
+fn the_live_omp_usage_renders_named_providers_and_amber() {
+    let usage = crate::omp::usage::parse_usage(OMP_19_2_1.as_bytes()).unwrap();
+    let held = vec!["devin".to_string(), "openai-codex".to_string()];
+    let limits = worst_per_provider(&usage.limits, &held);
+    let shown: Vec<(&str, Option<f64>, bool)> = limits
+        .iter()
+        .map(|l| (l.provider.as_str(), l.percent, l.held))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("openai-codex", Some(100.0), true),
+            ("anthropic", Some(83.0), false),
+            ("devin", Some(100.0), true),
+        ]
+    );
+    let mut p = render::tests::sample();
+    p.limits = Some(limits);
+    p.held = held;
+    p.people = People {
+        lead: render::LeadState::Idle,
+        model: Some("anthropic/claude-opus-5-5".into()),
+        running: 0,
+        waiting: 0,
+        models: vec!["anthropic/claude-opus-5-5".into()],
+    };
+    p.host.sessions = p.people.models.len();
+    for (lang, words) in [
+        (
+            Language::Korean,
+            [
+                "🟡 살펴볼 것이 있어요",
+                "⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요",
+                "세션 1/20",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R> · ⛔ 보류",
+            ],
+        ),
+        (
+            Language::English,
+            [
+                "🟡 Worth a look",
+                "⛔ Held: devin, openai-codex · sessions on other providers start normally",
+                "Sessions 1/20",
+                "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R> · ⛔ held",
+            ],
+        ),
+    ] {
+        let body = render::panel(&p, lang, "0.1.4");
+        assert_eq!(body["embeds"][0]["color"], 0x00F1_C40F, "amber");
+        let text = body.to_string();
+        for want in words {
+            assert!(text.contains(want), "{want} in {text}");
+        }
+        assert!(!text.contains("unknown"), "{text}");
+    }
 }

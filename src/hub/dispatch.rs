@@ -808,11 +808,11 @@ async fn limits(hub: &Hub, refresh: bool) -> Result<Limits, Failure> {
             };
             match accounts
                 .iter_mut()
-                .find(|a| a.provider == l.provider_shown() && a.account == l.account)
+                .find(|a| a.provider == l.provider && a.account == l.account)
             {
                 Some(a) => a.windows.push(window),
                 None => accounts.push(LimitAccount {
-                    provider: l.provider_shown().to_string(),
+                    provider: l.provider.clone(),
                     account: l.account,
                     windows: vec![window],
                     notes: Vec::new(),
@@ -847,7 +847,7 @@ fn snapshot_windows(snapshot: Option<&crate::omp::usage::Snapshot>, a: &LimitAcc
         s.usage
             .limits
             .iter()
-            .filter(|l| l.provider_shown() == a.provider && l.account == a.account)
+            .filter(|l| l.provider == a.provider && l.account == a.account)
             .filter_map(|l| l.window_ms)
             .collect()
     })
