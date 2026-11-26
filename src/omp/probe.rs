@@ -14,7 +14,7 @@ use tokio::time::timeout;
 
 use super::rpc::{self, RESPONSE_TIMEOUT, Rpc, RpcError};
 use super::{MINIMUM, TESTED, Version, child_env, usage};
-use crate::sys::command::{self, KILL_GRACE, Output, Spec};
+use crate::sys::command::{self, KILL_GRACE, Output, Spec, Step};
 use crate::sys::now_ms;
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -273,13 +273,30 @@ async fn exchange(
     })
     .await
     .unwrap_or_else(|_| Err("the rpc exchange took longer than 20 s".into()));
-    let (exit, _) = child.close(CLOSE_WAIT, KILL_GRACE).await;
-    if result.is_ok() && exit != command::Exit::Code(0) {
-        return Err(format!(
+    let (exit, step) = child.close(CLOSE_WAIT, KILL_GRACE).await;
+    result.and_then(|()| ended_well(exit, step))
+}
+
+/// Whether the probe child ended as an OMP that works: by itself with status 0 after end of input,
+/// or, slower than [`CLOSE_WAIT`] on a loaded host, at TERM (DESIGN 4.2's recovery), which a live
+/// OMP still answers. A failed exit, or one that needed KILL, is a broken OMP.
+fn ended_well(exit: command::Exit, step: Step) -> Result<(), String> {
+    match step {
+        Step::Input if exit == command::Exit::Code(0) => Ok(()),
+        Step::Input => Err(format!(
             "OMP did not exit cleanly after end of input ({exit:?})"
-        ));
+        )),
+        Step::Term => {
+            crate::log::warn(
+                "OMP was slow to exit after end of input and ended at TERM",
+                &[("exit", &format!("{exit:?}"))],
+            );
+            Ok(())
+        }
+        Step::Kill => Err(format!(
+            "OMP did not end after end of input or TERM ({exit:?})"
+        )),
     }
-    result
 }
 
 async fn steps(rpc: &Rpc, report: &mut Report) -> Result<(), String> {
@@ -401,5 +418,22 @@ mod tests {
         assert!(r.error.unwrap().contains("not found"));
         let r = probe(Some(Path::new("/nonexistent/omp")), None).await;
         assert!(r.version.is_none() && r.error.is_some());
+    }
+
+    /// A slow exit that TERM ended is no failed probe; a failed exit or one that needed KILL is.
+    #[test]
+    fn a_slow_exit_ended_at_term_is_no_failure() {
+        use command::Exit;
+        assert!(ended_well(Exit::Code(0), Step::Input).is_ok());
+        assert!(ended_well(Exit::Code(143), Step::Term).is_ok());
+        assert!(ended_well(Exit::Signal(15), Step::Term).is_ok());
+        assert_eq!(
+            ended_well(Exit::Code(1), Step::Input).unwrap_err(),
+            "OMP did not exit cleanly after end of input (Code(1))"
+        );
+        assert_eq!(
+            ended_well(Exit::Signal(9), Step::Kill).unwrap_err(),
+            "OMP did not end after end of input or TERM (Signal(9))"
+        );
     }
 }
