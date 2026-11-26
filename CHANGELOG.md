@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.4 (Unreleased)
+## 0.1.4 (2026-11-26)
 
 - The ops panel, `cataly limits` and quota events name every provider as OMP reports it, an
   extension provider such as `devin` included, instead of "unknown".
