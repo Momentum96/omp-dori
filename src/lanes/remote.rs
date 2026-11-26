@@ -348,6 +348,9 @@ impl<R: Runtime> Lanes<R> {
     /// (design 2.4, Option B): through the same restart as after a hub restart, on the exact
     /// session file. Deliveries in doubt at the drop stay in doubt; nothing is resent.
     pub(super) async fn reattach(self: &Arc<Self>) {
+        if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         let Ok(rows) = self.env.store.read(|r| r.lanes(false)).await else {
             return;
         };

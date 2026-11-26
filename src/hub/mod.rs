@@ -497,6 +497,8 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     lead.shutdown().await;
     // Lanes end their input; the next hub brings them back on their files (decision 9).
     lanes.shutdown().await;
+    // Then the worker connections: a worker closes what is left of its lanes when its stream ends.
+    hub.workers.shutdown().await;
     // Running job children get TERM, then KILL after the grace; their real end is recorded.
     jobs.drain(KILL_GRACE * 2 + Duration::from_secs(2)).await;
     let _ = std::fs::remove_file(&paths.socket);

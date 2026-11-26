@@ -1026,6 +1026,8 @@ impl<R: Runtime> Lanes<R> {
     /// Hub shutdown: lanes are closed with end of input so their files stay theirs; the next hub
     /// brings them back (decision 9). Records keep their state.
     pub(crate) async fn shutdown(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::Release);
         let sessions: Vec<(String, Arc<R::Session>)> = self.live_map().drain().collect();
         let closes = sessions.iter().map(|(_, s)| async move {
             let _ = tokio::time::timeout(crate::host::lead::STOP_BUDGET, s.close(true)).await;

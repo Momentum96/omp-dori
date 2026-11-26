@@ -695,6 +695,8 @@ pub(crate) struct Workers {
     failed: Mutex<HashMap<String, Instant>>,
     /// Counts connections made and lost, so lanes hear a worker come or go.
     changed: watch::Sender<u64>,
+    /// Set at hub stop: no connection is made any more.
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 impl Workers {
@@ -717,6 +719,7 @@ impl Workers {
             hook: OnceLock::new(),
             failed: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
+            stopped: std::sync::atomic::AtomicBool::new(false),
         });
         let _ = REGISTRY.set(Arc::clone(&workers));
         workers
@@ -803,11 +806,16 @@ impl Workers {
                 self.set(&link.name, State::Idle, None, None).await;
             }
         }
+        Ok(())
+    }
+
+    /// Hub stop, after the lanes ended their input: no new connection, and every one closed.
+    pub(crate) async fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Release);
         let all: Vec<Arc<Link>> = self.links().drain().map(|(_, l)| l).collect();
         for link in all {
             link.close().await;
         }
-        Ok(())
     }
 
     async fn set(&self, name: &str, state: State, reason: Option<String>, hello: Option<Hello>) {
@@ -860,6 +868,9 @@ impl Workers {
                 .or_default(),
         );
         let _one = gate.lock().await;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(format!("{name}: the hub is stopping"));
+        }
         if let Some(link) = self.links().get(name).filter(|l| !l.mux.is_closed()) {
             link.touch();
             return Ok(Arc::clone(link));

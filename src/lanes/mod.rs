@@ -141,6 +141,8 @@ pub(crate) struct Lanes<R: Runtime> {
     planning: AsyncMutex<()>,
     /// The lanes live once start-up recovery finished, by name (DESIGN decision 9); unset before.
     pub(crate) resumed: OnceLock<Vec<String>>,
+    /// Set at hub stop: no lane is reattached or started by itself any more.
+    stopping: std::sync::atomic::AtomicBool,
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -187,6 +189,7 @@ impl<R: Runtime> Lanes<R> {
             slots,
             planning: AsyncMutex::new(()),
             resumed: OnceLock::new(),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1660,6 +1663,8 @@ impl<R: Runtime> Lanes<R> {
                 "key": rec.key,
                 "title": rec.title,
                 "thread": rec.thread,
+                "worker": rec.worker,
+                "cwd": rec.cwd,
                 "state": rec.state.name(),
                 "status": rec.status(),
                 "outcome": rec.outcome,

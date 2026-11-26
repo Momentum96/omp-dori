@@ -1,5 +1,8 @@
-//! Remote workers (docs/design/workers.md), phase 1: enrolment in two steps, the pinned host key, the
-//! forced command and its marker, `worker list`, `doctor` and `remove`, and worker mode itself. The
+//! Remote workers (docs/design/workers.md). Phase 1: enrolment in two steps, the pinned host key, the
+//! forced command and its marker, `worker list`, `doctor` and `remove`, and worker mode itself.
+//! Phase 2: lanes on a worker, opened from an owner's thread message, running in the worker's own
+//! worktree with their `command` check there, surviving a dropped connection on the same session,
+//! queued while their worker is offline, and bridge channels kept to their own worker's lanes. The
 //! worker is a second Cataly home on this machine; `tests/support/fake-ssh` plays its sshd and
 //! honours the `authorized_keys` line exactly as sshd applies a forced command, so the real
 //! `cataly worker serve` speaks the real stream to the real hub.
@@ -13,12 +16,20 @@
 
 mod support;
 
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use support::discord::FakeDiscord;
 use support::{BIN, TestHub, path_without_omp};
+
+const WAIT: Duration = Duration::from_secs(60);
+const OWNER: &str = "400000000000000001";
+const CH: &str = "600000000000000001";
 
 /// A worker: its own home, config, state and runtime folders, a host key, and a fake OMP.
 struct WorkerBox {
@@ -447,4 +458,480 @@ fn offline_workers_and_serve_refusals() {
         .stdin(Stdio::null());
     let out = wrong.output().unwrap();
     assert!(!out.status.success() && stderr(&out).contains("runs only Cataly worker mode"));
+}
+
+// Phase 2: lanes on workers.
+
+impl WorkerBox {
+    /// The worker's fake OMP runs rpc-ui sessions with turns, as a logged-in OMP would.
+    fn runs_lanes(&self) {
+        for f in ["rpc", "turns"] {
+            std::fs::write(self.root.join("bin/omp-data").join(f), "").unwrap();
+        }
+    }
+
+    /// The bridge socket `serve` opens for the hub's sessions.
+    fn socket(&self, hub_id: &str) -> PathBuf {
+        self.root.join(format!("run/cataly/worker-{hub_id}.sock"))
+    }
+
+    /// The launch token the worker's fake OMP recorded for `session`, and how many starts did.
+    fn tokens(&self, session: &Value) -> Vec<String> {
+        let text =
+            std::fs::read_to_string(self.root.join("bin/omp-data/launch")).unwrap_or_default();
+        text.lines()
+            .filter(|l| l.split(' ').nth(1) == session.as_str())
+            .filter_map(|l| l.split(' ').next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The PID of the `serve` that holds this hub's connection now.
+    fn serve_pid(&self, hub_id: &str) -> Option<i32> {
+        let lock = self
+            .root
+            .join(format!("state/cataly/worker/{hub_id}/serve.lock"));
+        std::fs::read_to_string(lock).ok()?.trim().parse().ok()
+    }
+}
+
+/// Enrols `w` as `dest` in both steps; returns the hub ID of the key's line.
+fn enrol(hub: &TestHub, w: &WorkerBox, dest: &str, extra: &[&str]) -> String {
+    let key = first_add(hub, dest, extra);
+    let fingerprint = w.init(&key, &[]);
+    let mut args = vec!["worker", "add", dest, "--host-key", &fingerprint];
+    args.extend_from_slice(extra);
+    let added = hub.cli(&args);
+    assert!(added.status.success(), "{added:?}");
+    w.runs_lanes();
+    after(&key, "cataly-hub-").to_string()
+}
+
+/// A hub that runs lanes (the fake OMP here too, for its lead), with a repository whose origin is
+/// a bare repository on this machine, its commit pushed. Returns the checkout.
+fn lane_hub(extra: &str) -> (TestHub, PathBuf) {
+    let hub = hub();
+    let omp = hub.install_fake("omp");
+    for f in ["rpc", "turns"] {
+        hub.fixture("omp", f, Some(""));
+    }
+    let work = hub.root.join("work");
+    let repo = work.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let origin = work.join("origin.git");
+    git(&work, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "1").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lanes]\nmodel = \"fake/primary\"\ncwd = \"{}\"\nobjection = \"2s\"\n{extra}",
+        omp.display(),
+        work.display()
+    ));
+    (hub, repo)
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// Starts the hub and waits until the OMP probe finished (starts need it).
+fn start(hub: &mut TestHub) {
+    hub.start();
+    hub.until(WAIT, || {
+        hub.json(&["status", "--json"])["omp"]
+            .is_object()
+            .then_some(())
+    });
+}
+
+/// One lane operation as the owner; `Err` is the refusal.
+fn lane(hub: &TestHub, op: &str, params: &Value) -> Result<Value, String> {
+    let out = hub.cli(&["lane", op, "--json", "--params", &params.to_string()]);
+    if out.status.success() {
+        Ok(serde_json::from_slice(&out.stdout).unwrap())
+    } else {
+        Err(stderr(&out))
+    }
+}
+
+fn record(hub: &TestHub, key: &str) -> Value {
+    lane(hub, "list", &json!({ "all": true }))
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["key"] == key)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// The session file a worker lane recorded (`worker:<name>:/path`), read on this machine.
+fn remote_text(rec: &Value) -> String {
+    let file = rec["session_file"].as_str().unwrap_or_default();
+    let path = file.splitn(3, ':').nth(2).unwrap_or_default();
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// A test-side bridge connection on a socket.
+struct Bridge {
+    reader: BufReader<UnixStream>,
+    writer: UnixStream,
+    next: u64,
+}
+
+impl Bridge {
+    fn connect(socket: &Path, params: Value) -> (Self, Value) {
+        let writer = UnixStream::connect(socket).unwrap();
+        writer
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let reader = BufReader::new(writer.try_clone().unwrap());
+        let mut b = Self {
+            reader,
+            writer,
+            next: 1,
+        };
+        let answer = b.call("bridge.hello", params);
+        (b, answer)
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next;
+        self.next += 1;
+        let mut line = json!({ "v": 1, "id": id, "method": method });
+        line["params"] = params;
+        self.writer
+            .write_all(format!("{line}\n").as_bytes())
+            .unwrap();
+        loop {
+            let mut reply = String::new();
+            self.reader.read_line(&mut reply).unwrap();
+            let v: Value = serde_json::from_str(&reply).unwrap();
+            if v["id"] == id {
+                return v["ok"].clone();
+            }
+        }
+    }
+
+    fn tool(&mut self, call: &str, tool: &str, session: &Value, input: Value) -> Value {
+        let mut params = json!({ "call": call, "tool": tool, "session": session });
+        params["input"] = input;
+        self.call("bridge.tool", params)
+    }
+}
+
+/// The lead's bridge with its launch token, and its session.
+fn lead_bridge(hub: &TestHub) -> (Bridge, Value) {
+    let session = hub.until(WAIT, || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live").then(|| v["session"]["session_id"].clone())
+    });
+    let launch = std::fs::read_to_string(hub.root.join("bin/omp-data/launch")).unwrap();
+    let token = launch
+        .lines()
+        .rfind(|l| l.split(' ').nth(1) == session.as_str())
+        .and_then(|l| l.split(' ').next())
+        .unwrap()
+        .to_string();
+    let hello = json!({ "ext": 1, "token": token, "session": session, "agent": "main" });
+    let (bridge, answer) = Bridge::connect(&hub.socket(), hello);
+    assert_eq!(answer["role"], "lead", "{answer}");
+    (bridge, session)
+}
+
+fn lead_tool(b: &mut Bridge, session: &Value, call: &str, input: Value) -> (String, bool) {
+    let v = b.tool(call, "cataly_lead", session, input);
+    (
+        v["text"].as_str().unwrap_or_default().to_string(),
+        v["error"] == true,
+    )
+}
+
+/// A worker lane opened by the lead from the owner's message: its thread with the kickoff saying
+/// where it runs, its session in the worker's own worktree at the pushed commit, a report through
+/// the worker's bridge socket reaching the thread, an owner reply in the thread reaching the lane,
+/// its `command` check run on the worker, and the close removing the worker's worktree.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_worker_lane_runs_from_a_thread_and_checks_there() {
+    let fake = FakeDiscord::start();
+    let (mut hub, repo) = lane_hub("");
+    let token = hub.private_file("token", "fake-token");
+    fake.channel(CH, 0, None);
+    let config = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!(
+        "{config}[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n{}",
+        repo.display(),
+        fake.config(&token, OWNER, &[CH])
+    ));
+    let w = WorkerBox::new(&hub, "box", 22);
+    let hub_id = enrol(&hub, &w, "dev@box", &[]);
+    // An uncommitted edit here stays behind; the open says so.
+    std::fs::write(repo.join("a.txt"), "edited here").unwrap();
+    start(&mut hub);
+    hub.until(WAIT, || {
+        (hub.json(&["discord", "status", "--json"])["healthy"] == true).then_some(())
+    });
+    let (mut b, s) = lead_bridge(&hub);
+    let (listed, _) = lead_tool(&mut b, &s, "w0", json!({ "op": "lane.workers" }));
+    assert!(listed.starts_with("- box: "), "{listed}");
+    let asked = 800_000_000_000_000_101u64;
+    fake.say(FakeDiscord::message(
+        CH,
+        asked,
+        OWNER,
+        "run the tests on box",
+    ));
+    let open = json!({
+        "op": "lane.open", "key": "box-test", "title": "Test on box",
+        "brief": "Run the tests.",
+        "checks": [{ "kind": "command", "argv": ["sh", "-c", "pwd -P | grep -q /cataly/worker/"] }],
+        "thread_from": format!("discord:{CH}/{asked}"),
+        "kickoff": "Testing on box; done when the check passes.",
+        "cwd": repo, "worker": "box",
+    });
+    let (text, err) = lead_tool(&mut b, &s, "l1", open);
+    assert!(!err && text.contains("started"), "{text}");
+    assert!(
+        text.contains("uncommitted edits are not on the worker"),
+        "{text}"
+    );
+    let rec = record(&hub, "box-test");
+    assert_eq!(rec["worker"], "box", "{rec}");
+    let root = w.root.join(format!("state/cataly/worker/{hub_id}"));
+    let cwd = rec["cwd"].as_str().unwrap();
+    assert!(
+        Path::new(cwd).starts_with(root.join("lanes")),
+        "the lane works in the worker's worktree: {rec}"
+    );
+    assert!(
+        rec["session_file"]
+            .as_str()
+            .unwrap()
+            .starts_with("worker:box:"),
+        "{rec}"
+    );
+    let header: Value = serde_json::from_str(remote_text(&rec).lines().next().unwrap()).unwrap();
+    assert_eq!(header["cwd"], cwd, "OMP runs in the worktree");
+    assert_eq!(
+        std::fs::read_to_string(Path::new(cwd).join("a.txt")).unwrap(),
+        "1",
+        "the worktree holds the pushed commit, not the edit"
+    );
+    // The thread under the owner's message, its kickoff naming the machine and the commit.
+    let thread = asked.to_string();
+    let kickoff = fake.wait(WAIT, |f| f.bot_messages(&thread).first().cloned());
+    let first = kickoff["content"].as_str().unwrap();
+    assert!(first.starts_with("Testing on box"), "{first}");
+    assert!(first.contains("box (Linux"), "{first}");
+
+    // A report through the worker's bridge socket reaches the thread.
+    let tokens = w.tokens(&rec["session_id"]);
+    let hello =
+        json!({ "ext": 1, "token": tokens[0], "session": rec["session_id"], "agent": "main" });
+    let (mut lb, welcome) = Bridge::connect(&w.socket(&hub_id), hello);
+    assert_eq!(welcome["role"], "lane", "{welcome}");
+    lb.tool(
+        "r1",
+        "cataly_lane",
+        &rec["session_id"],
+        json!({ "op": "report", "kind": "stuck", "text": "the box needs a fixture" }),
+    );
+    fake.wait(WAIT, |f| {
+        f.bot_messages(&thread)
+            .iter()
+            .any(|m| m["content"] == "Lane update: the box needs a fixture")
+            .then_some(())
+    });
+    // An owner message in the thread reaches the lane on the worker.
+    fake.say(FakeDiscord::message(
+        &thread,
+        800_000_000_000_000_102,
+        OWNER,
+        "also check logout",
+    ));
+    hub.until(WAIT, || {
+        remote_text(&rec)
+            .contains("also check logout")
+            .then_some(())
+    });
+    // The close runs the command check on the worker and removes its worktree there.
+    let mut n = 0;
+    let closed = hub.until(WAIT, || {
+        n += 1;
+        let close = json!({ "op": "lane.close", "key": "box-test", "note": "tested" });
+        let (text, err) = lead_tool(&mut b, &s, &format!("c{n}"), close);
+        (!err).then_some(text)
+    });
+    assert!(closed.contains("closed"), "{closed}");
+    let rec = record(&hub, "box-test");
+    let receipt = rec["receipt"].to_string();
+    assert!(
+        receipt.contains("pass command sh (box): exit 0"),
+        "{receipt}"
+    );
+    assert!(!Path::new(cwd).exists(), "{receipt}");
+    drop((b, lb));
+    hub.stop();
+}
+
+/// The worker's `serve` dies mid-lane (as when the machine or its network drops): the lane is lost,
+/// then comes back by itself on the same session file once the worker answers, and takes messages.
+#[test]
+fn a_dropped_worker_lane_resumes_on_its_session() {
+    let (mut hub, repo) = lane_hub("");
+    let w = WorkerBox::new(&hub, "box", 22);
+    let hub_id = enrol(&hub, &w, "dev@box", &[]);
+    start(&mut hub);
+    let open = json!({
+        "key": "drop", "title": "Survive a drop", "brief": "Work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+        "cwd": repo, "worker": "box",
+    });
+    let opened = lane(&hub, "open", &open).unwrap();
+    assert_eq!(opened["outcome"], "started", "{opened}");
+    let rec = record(&hub, "drop");
+    let pid = w.serve_pid(&hub_id).unwrap();
+    rustix_kill(pid);
+    // Back on the same session: a second start of that session on the worker, the lane live.
+    hub.until(WAIT, || {
+        (w.tokens(&rec["session_id"]).len() >= 2).then_some(())
+    });
+    let back = hub.until(WAIT, || {
+        let r = record(&hub, "drop");
+        (r["live"] == true && r["lost"].is_null()).then_some(r)
+    });
+    assert_eq!(back["session_id"], rec["session_id"]);
+    assert_eq!(back["session_file"], rec["session_file"]);
+    assert_ne!(w.serve_pid(&hub_id), Some(pid), "a new serve took over");
+    let lost = hub
+        .events()
+        .into_iter()
+        .any(|e| e["kind"] == "lane.lost" && e.to_string().contains("box"));
+    assert!(lost, "{:?}", hub.event_kinds());
+    lane(
+        &hub,
+        "send",
+        &json!({ "key": "drop", "text": "after the drop" }),
+    )
+    .unwrap();
+    hub.until(WAIT, || {
+        remote_text(&back).contains("after the drop").then_some(())
+    });
+    hub.stop();
+}
+
+/// SIGKILL, as a crash or a reboot ends the process.
+fn rustix_kill(pid: i32) {
+    let killed = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+}
+
+/// A lane for a worker that is offline is queued, and starts by itself once the worker answers.
+#[test]
+fn a_lane_for_an_offline_worker_waits_and_starts() {
+    let (mut hub, repo) = lane_hub("");
+    let w = WorkerBox::new(&hub, "box", 22);
+    enrol(&hub, &w, "dev@box", &[]);
+    start(&mut hub);
+    hub.fixture("ssh", "down", Some(""));
+    let open = json!({
+        "key": "later", "title": "Wait for box", "brief": "Work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+        "cwd": repo, "worker": "box",
+    });
+    let queued = lane(&hub, "open", &open).unwrap();
+    let outcome = queued["outcome"].as_str().unwrap();
+    assert!(outcome.starts_with("queued: box is offline"), "{queued}");
+    assert!(record(&hub, "later").is_null());
+    let listed = lane(&hub, "queued", &json!({})).unwrap();
+    assert_eq!(listed["queued"][0]["key"], "later", "{listed}");
+    // The worker comes back; the owner's doctor reaches it, and the lane starts there.
+    std::fs::remove_file(hub.root.join("bin/ssh-data/down")).unwrap();
+    let doctor = hub.cli(&["worker", "doctor", "box"]);
+    assert!(doctor.status.success(), "{doctor:?}");
+    let rec = hub.until(WAIT, || {
+        let r = record(&hub, "later");
+        (r["live"] == true && r["state"] == "running").then_some(r)
+    });
+    assert_eq!(rec["worker"], "box");
+    assert!(remote_text(&rec).contains("Lane instructions"), "{rec}");
+    hub.stop();
+}
+
+/// Bridge channels stay with their worker: a lane's reconnect key works through its own worker's
+/// socket only, never another worker's nor this machine's, and no worker can say hello as the lead.
+#[test]
+fn a_worker_bridge_reaches_only_its_own_lanes() {
+    let (mut hub, repo) = lane_hub("");
+    let config = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!(
+        "{config}[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        repo.display()
+    ));
+    let w = WorkerBox::new(&hub, "box", 22);
+    let other = WorkerBox::new(&hub, "other", 22);
+    let hub_id = enrol(&hub, &w, "dev@box", &[]);
+    enrol(&hub, &other, "dev@other", &[]);
+    start(&mut hub);
+    let open = json!({
+        "key": "mine", "title": "Mine", "brief": "Work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+        "cwd": repo, "worker": "box",
+    });
+    assert_eq!(lane(&hub, "open", &open).unwrap()["outcome"], "started");
+    let rec = record(&hub, "mine");
+    let token = w.tokens(&rec["session_id"])[0].clone();
+    let hello = json!({ "ext": 1, "token": token, "session": rec["session_id"], "agent": "main" });
+    let (_own, welcome) = Bridge::connect(&w.socket(&hub_id), hello);
+    assert_eq!(welcome["role"], "lane", "{welcome}");
+    let key = welcome["key"].clone();
+    // The other worker is connected too, its socket open.
+    assert!(hub.cli(&["worker", "doctor", "other"]).status.success());
+    let again = json!({ "ext": 1, "key": key, "session": rec["session_id"], "agent": "main" });
+    let (_x, through_other) = Bridge::connect(&other.socket(&hub_id), again.clone());
+    assert_eq!(through_other["role"], "none", "{through_other}");
+    assert!(
+        through_other["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not a lane that runs on other"),
+        "{through_other}"
+    );
+    let (_y, through_hub) = Bridge::connect(&hub.socket(), again);
+    assert_eq!(through_hub["role"], "none", "{through_hub}");
+    // The lead's session identity gets nothing through a worker.
+    let lead = hub.until(WAIT, || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live").then(|| v["session"]["session_id"].clone())
+    });
+    let marker = json!({ "ext": 1, "marker": true, "session": lead, "agent": "main" });
+    let (_z, as_lead) = Bridge::connect(&w.socket(&hub_id), marker);
+    assert_eq!(as_lead["role"], "none", "{as_lead}");
+    // A worker channel speaks only the bridge.
+    let mut raw = UnixStream::connect(w.socket(&hub_id)).unwrap();
+    raw.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    raw.write_all(b"{\"v\":1,\"id\":1,\"method\":\"lane.list\",\"params\":{}}\n")
+        .unwrap();
+    let mut reply = String::new();
+    BufReader::new(raw).read_line(&mut reply).unwrap();
+    assert!(reply.contains("carries only the bridge"), "{reply}");
+    hub.stop();
 }

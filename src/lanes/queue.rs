@@ -209,7 +209,10 @@ impl<R: Runtime> Lanes<R> {
                 Err(e) if e == "expired" => e,
                 Err(e) => format!("held: {e}"),
             };
-            if state == "ready" && q.waits_for_worker() {
+            if state == "ready"
+                && q.waits_for_worker()
+                && !self.stopping.load(std::sync::atomic::Ordering::Acquire)
+            {
                 let detail = match self.start_queued(&q.key).await {
                     Ok(v) => format!(
                         "started on {}: {}",
