@@ -15,6 +15,14 @@
   next tick and becomes a `job.failed` event, and so a note for the lead, only when it happens
   twice in a row; a 404, 401 or bad setting is reported at once as before.
 - The planner no longer logs "planner pass failed" when it skips a pass that is not due yet.
+- On macOS the CLI now reports a control connection the hub closed without an answer as "the hub
+  closed the connection", as on Linux, instead of "Invalid argument (os error 22)". macOS can
+  report such a close as EINVAL or ENOTCONN rather than end of stream; these, like EPIPE and
+  ECONNRESET, count as closed without an answer on every platform, so `cataly update` and
+  `cataly rollback` count the stop once the hub has ended.
+- An OMP that is slow to exit after end of input on a loaded host no longer fails the OMP probe
+  when it ends at TERM; only a failed exit or one that needs KILL does. At hub shutdown each lane
+  now gets the same 27 s as the lead, so a slow exit keeps its full TERM grace before any KILL.
 
 ## 0.2.3 (2026-11-27)
 

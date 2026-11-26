@@ -43,8 +43,10 @@ const CONFIRM_TICK: Duration = Duration::from_secs(5);
 const SWEEP: Duration = Duration::from_mins(5);
 /// How often an automatic start that is waiting looks again.
 const AUTOSTART_TICK: Duration = Duration::from_secs(30);
-/// Bound for a graceful stop at hub shutdown: 15 s, TERM, 5 s, KILL.
-pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(22);
+/// Bound for a graceful stop at hub shutdown: end of input, 15 s, TERM, 5 s, KILL and 5 s to reap
+/// it, with 2 s for the state read before. The lead and every lane get all of it, so a slow exit
+/// keeps its TERM grace in full instead of being dropped, and so killed, before its KILL is due.
+pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(27);
 
 /// Builds the runtime of one start from the config in force, the resolved OMP executable and the
 /// runtime the session runs on: the config's for a new session, the stored one for a resume.
@@ -1443,8 +1445,7 @@ impl<R: Runtime> Lead<R> {
         };
         let handle = session.snapshot().handle.clone();
         self.closing.store(true, Ordering::Release);
-        match tokio::time::timeout(STOP_BUDGET + Duration::from_secs(5), session.close(true)).await
-        {
+        match tokio::time::timeout(STOP_BUDGET, session.close(true)).await {
             Ok(Ok(record)) => {
                 self.update(SessionUpdate {
                     handle,

@@ -207,9 +207,13 @@ impl Rpc {
         self.until(|f| f["type"] == "prompt_result" && f["id"] == id)
     }
 
+    /// Ends input and waits for OMP's own exit. This test's budget mirrors the hub's 15 s close
+    /// wait; it is stretched by `CATALY_TEST_PATIENCE` on the slower runners, where an OMP that
+    /// shares the host with the other contract tests can take longer to exit.
     fn close(mut self) {
         drop(self.stdin.take());
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let wait = support::patience(Duration::from_secs(15));
+        let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
                 assert!(status.success(), "OMP exit {status}");
@@ -218,7 +222,7 @@ impl Rpc {
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = self.child.kill();
-        panic!("OMP did not exit within 15 s of end of input");
+        panic!("OMP did not exit within {wait:?} of end of input");
     }
 }
 
