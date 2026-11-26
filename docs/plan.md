@@ -367,7 +367,6 @@ onboarding on first contact.
   IR-16, IR-17, IR-18, IR-19, IR-20, IR-23, IR-24, IR-27, IR-43.
 - Update notice: IR-21, IR-22.
 - Release workflow and supply chain: IR-30, IR-31, IR-32, IR-34, IR-35, IR-40.
-- Usage counts (off by default, no default collector): COORD-50.
 - Onboarding and first run: OPC-66, OPC-67, OPC-68, OPC-69, OPC-70, OPC-72, OPC-73.
 - Not code: file the upstream reports for PATCH-02, PATCH-04, PATCH-05 and the expected-session option of
   PATCH-01 with OMP's maintainers, if the owner agrees (DESIGN section 12.2, row A30).

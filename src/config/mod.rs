@@ -62,7 +62,6 @@ pub(crate) struct Config {
     pub(crate) lanes: lanes::LaneSettings,
     pub(crate) coord: coord::CoordSettings,
     pub(crate) update: release::UpdateSettings,
-    pub(crate) usage: release::UsageSettings,
     pub(crate) ops: ops::OpsSettings,
     pub(crate) setup: SetupSettings,
     pub(crate) destinations: BTreeMap<String, Destination>,
@@ -84,7 +83,6 @@ impl Default for Config {
             slack: relays::SlackSettings::default(),
             context: relays::ContextSettings::default(),
             update: release::UpdateSettings::default(),
-            usage: release::UsageSettings::default(),
             ops: ops::OpsSettings::default(),
             setup: SetupSettings::default(),
             outgoing: Checks::default(),
@@ -679,7 +677,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
         &mut config.slack,
         &mut config.context,
     );
-    release::parse(errors, root, &mut config.update, &mut config.usage);
+    release::parse(errors, root, &mut config.update);
     config.voice = voice::parse(errors, root, &config.discord);
     voice::parse_transcribe(errors, root, &mut config.transcribe);
 }

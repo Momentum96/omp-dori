@@ -37,7 +37,6 @@ trimmed, must not be empty). Default locations, next to the config file:
 | Telegram bot token | `secrets/telegram-token` | `[telegram] token_file` |
 | Slack tokens, one per line: `app=xapp-…` and `api=xoxb-…` (app role) or `api=xoxp-…` (member role) | `secrets/slack-tokens` | `[slack] token_file` |
 | Voice provider key | `secrets/voice-key` | `[voice] key_file` |
-| Usage collector key (optional) | none | `[usage] key_file` |
 
 Every `token_file` / `key_file` value must be an absolute path. A token file that is missing, empty,
 owned by someone else or readable by others is refused, and the error names only the path.
@@ -560,7 +559,7 @@ Each check reports `ok`, `info` or `warn`, and a warning names its fix:
 ignore = ["bridge"]
 ```
 
-## `[update]` and `[usage]`
+## `[update]`
 
 Each newer stable release is announced once, never one you rolled back from. The notice only
 tells you; `cataly update` installs (it restarts a running hub on the new version; see the README).
@@ -578,9 +577,6 @@ or your DM. With neither, they stay in the event log; for Slack, name a destinat
 | `update.template` | string | see below | fields `{current}`, `{latest}`, `{url}`; `{{`/`}}` for braces | The notice wording; line breaks are kept. |
 | `update.updated_template` | string | see below | fields `{previous}`, `{latest}`, `{sessions}` | The wording after an update; a rollback keeps its default. |
 | `update.destinations` | list of strings | your home room | names from `[destinations]`, `log` | Where the notice and the update message go instead. |
-| `usage.enabled` | boolean | `false` | needs `endpoint` | Sends usage counts. There is no default collector. |
-| `usage.endpoint` | string | none | URL | OTLP/HTTP logs endpoint, such as `https://collector.example/v1/logs`. |
-| `usage.key_file` | string | none | absolute path | Owner-only file with the collector's key, sent as a bearer token. |
 
 Default notice, in `[hub] language` (`ko`, then `en`):
 

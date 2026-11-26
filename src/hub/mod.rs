@@ -480,7 +480,7 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
         });
     }
     spawn_lead_tasks(&hub, &supervisor, &shutdown_rx);
-    spawn_release_tasks(&hub, &supervisor, paths, &shutdown_rx);
+    spawn_release_tasks(&hub, &supervisor, &shutdown_rx);
     streams.resume().await;
     let heartbeat = spawn_background(&supervisor, paths, omp, config_rx, &store, &shutdown_rx);
     let notifier = Arc::new(Notifier::from_env());
@@ -902,31 +902,20 @@ fn spawn_background(
     heartbeat
 }
 
-/// The daily release notice and the opt-in usage counts.
-fn spawn_release_tasks(
-    hub: &Arc<Hub>,
-    supervisor: &Supervisor,
-    paths: &Paths,
-    shutdown: &watch::Receiver<bool>,
-) {
-    let jobs = &hub.jobs;
+/// The daily release notice.
+fn spawn_release_tasks(hub: &Arc<Hub>, supervisor: &Supervisor, shutdown: &watch::Receiver<bool>) {
+    let jobs = hub.jobs.clone();
     let layout = crate::sys::install::Layout::of_running().ok();
-    {
-        let (jobs, stop) = (jobs.clone(), shutdown.clone());
-        let hub = Arc::clone(hub);
-        let resumed: crate::jobs::update::ResumedView = Arc::new(move || hub.resumed());
-        supervisor.spawn("update", move || {
-            crate::jobs::update::run(
-                jobs.clone(),
-                layout.clone(),
-                Arc::clone(&resumed),
-                stop.clone(),
-            )
-        });
-    }
-    let (jobs, stop, state) = (jobs.clone(), shutdown.clone(), paths.state_dir.clone());
-    supervisor.spawn("usage", move || {
-        crate::jobs::usage::run(jobs.clone(), state.clone(), stop.clone())
+    let stop = shutdown.clone();
+    let hub = Arc::clone(hub);
+    let resumed: crate::jobs::update::ResumedView = Arc::new(move || hub.resumed());
+    supervisor.spawn("update", move || {
+        crate::jobs::update::run(
+            jobs.clone(),
+            layout.clone(),
+            Arc::clone(&resumed),
+            stop.clone(),
+        )
     });
 }
 

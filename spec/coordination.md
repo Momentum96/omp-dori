@@ -7,7 +7,7 @@ time: the lead session (the only one that speaks with the owner), the supervisor
 quiet lanes and alerts the lead about stalls), the planner (an hourly pass that starts queued work and asks the
 owner's open questions through the lead), per-session mailboxes, named exclusive slots with a priority queue, work
 items, the owner notes file, the review verdict and merge check, event commands, wait tracking, text fitting, short
-session addresses, anonymous usage counts and safe writing of setup files. Users: the owner (through the lead or
+session addresses and safe writing of setup files. Users: the owner (through the lead or
 the CLI), the lead, lane sessions and the daemon itself.
 
 This is the "supervision area" the evidence and reporting spec refers to: it reads that spec's last-progress mark
@@ -69,7 +69,7 @@ client) plus the lead's OMP session, and every record has one writer.
 | COORD-47 | Target resolution order for messages | CLI | KEEP | Predictable addressing. |
 | COORD-48 | Lane key syntax and reserved role names | all | MERGE into LANE-01 | Lane opening owns key rules. |
 | COORD-49 | Lane verbs in the coordination CLI (open, report, finish, close, priority) | lead, lanes | MERGE into LANE-01 | Specified by lane lifecycle and evidence areas. |
-| COORD-50 | Anonymous opt-in usage counts over OTLP/HTTP | owner | SIMPLIFY | Keep opt-in counts; collector and key scheme need an owner decision. |
+| COORD-50 | Anonymous opt-in usage counts over OTLP/HTTP | owner | DROP | Owner decision (2026-11-26): Cataly sends no usage counts or telemetry of any kind. |
 | COORD-51 | Safe setup-file write: identity snapshot, preview, compare-and-swap, readback | setup | KEEP | Never clobbers a hand edit. |
 | COORD-52 | Report whether the saved setup is effective or shadowed by overrides | setup | SIMPLIFY | One "effective value and its source" listing. |
 | COORD-53 | CLI argument safety (value flags take the next word verbatim, empty text refused) | CLI | KEEP | Stops relayed text turning into flags. |
@@ -125,7 +125,7 @@ client) plus the lead's OMP session, and every record has one writer.
 12. Triggering: the daemon keeps one deadline per lane (next reminder or alert) and re-computes it on every report,
     agent state change, completion claim and switch change, plus a safety sweep every 5 minutes. A due notice is
     queued within 1 s of its deadline. The supervisor never starts, stops or closes sessions.
-13. Counters for usage reporting (COORD-50): passes, mailbox flushes, reminders, alerts, deaths.
+13. (Removed with COORD-50: the supervisor keeps no usage counters.)
 
 ### Mailboxes (COORD-10, COORD-12 to COORD-16, COORD-18)
 
@@ -320,18 +320,10 @@ client) plus the lead's OMP session, and every record has one writer.
     lanes oldest-progress first with wait target and since, closed lanes folded into one line per status, and one
     line per slot with holder, age and queue ("+N more" when it does not fit).
 
-### Usage counts (COORD-50)
+### Usage counts (COORD-50, dropped)
 
-69. Off unless the owner opts in; the common do-not-track environment convention always wins. A one-time notice
-    says it is on and how to turn it off.
-70. Only counts and fixed values leave the machine, never paths, repository names, PR numbers, lane keys or text.
-    Events: first install; first use each UTC day; lane opened (open lanes, capped 1000); lane finished (evidence
-    count capped 100, lane minutes capped 10080); merge check outcome; review verdict; an hourly supervisor summary
-    with the rule 13 counters.
-71. Transport: OTLP/HTTP JSON logs. Resource attributes: service name and version, a SHA-256 of a random
-    installation identifier, a CI flag, OS type and numeric version, CPU architecture. Each record has a random
-    unique id. Every send has a 2 s timeout; any failure is dropped silently and never slows or fails a command.
-    An authentication refusal drops the cached key; partial-success rejections are counted locally.
+69-71. (Removed.) Cataly sends no usage counts or telemetry of any kind: no install identifier, no collector, no
+    opt-in switch. Nothing leaves the machine except what a feature the owner turned on needs to do its job.
 
 ### Setup files and CLI (COORD-51 to COORD-53)
 
@@ -354,7 +346,6 @@ client) plus the lead's OMP session, and every record has one writer.
   approvals, background jobs. OMP CLI: print mode, no-session flag, model flag, appended system prompt.
 - GitHub through `gh`: PR head commit and state, issue state, issue list by label, PR checks with pass/skip buckets,
   check-run lookup through the REST API, squash merge pinned to a head commit.
-- OTLP/HTTP JSON logs (OpenTelemetry).
 - OS: load average and core count; available memory (on macOS the kernel's memory-status level); process groups and
   the terminal's foreground group (to avoid a double interrupt); file ownership and modes.
 
@@ -367,8 +358,6 @@ client) plus the lead's OMP session, and every record has one writer.
 - Work items with logs, questions, ask and reminder times, tries.
 - Owner notes, snapshots, backups, archive, claimed refresh dates, rendered procedures.
 - Review verdict records and diagnostics.
-- Usage counting: installation identifier, cached key, sent-install and last-active-day flags, notice shown,
-  partial hourly counters, rejected count.
 - Not kept: slot grants and queues (rule 46 handles the gap).
 
 ## Problems in the old approach, and better ideas
@@ -386,13 +375,13 @@ client) plus the lead's OMP session, and every record has one writer.
 - The hourly audit repeated what the supervisor already said (vanished sessions, stale lanes).
 - Event commands ran fire-and-forget from short CLI processes and were killed 2 s after the command ended.
 - Named locks shared directories with shell scripts that could clear a live lock.
-- Usage counts went to the upstream project's collector under the upstream product name.
+- Usage counts went to the upstream project's collector under the upstream product name. Better: none at all.
 - CI waits were bound once and then shown with a stale state forever. Idea: let the PR follow-up area update them.
 
 ## Questions for the owner
 
 1. May the always-on helper model session go (COORD-03), leaving stall alerts to the lead?
-2. Usage counts: keep them at all, and if so which collector and key scheme replace the upstream one?
+2. Usage counts: answered (2026-11-26): none at all; COORD-50 is dropped.
 3. Event commands (COORD-41): still needed now that Discord, Telegram and Slack relays are native, or drop them?
 4. Planner defaults (3 open lanes, 2 starts per run, hourly) and GitHub labels for import: keep or change?
 5. Keep the owner notes feature and its daily refresh, or drop it?
