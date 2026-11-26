@@ -255,8 +255,18 @@ pub(crate) fn resumed_text(language: Language, resumed: Option<Resumed>) -> Stri
     lead.into_iter().chain(lanes).collect::<Vec<_>>().join(" ")
 }
 
-/// The lead is not running: why, when the hub knows.
+/// The lead is not running: asleep (a normal state), or why, when the hub knows.
 fn not_running(korean: bool, resumed: &Resumed) -> String {
+    if let Some(since) = resumed.lead_asleep_ms {
+        let since = super::instant_text(since);
+        return if korean {
+            format!("lead는 쉬는 중입니다({since}부터). 필요할 때 같은 대화로 깨어납니다.")
+        } else {
+            format!(
+                "The lead is asleep (since {since}) and wakes on the same conversation when it is needed."
+            )
+        };
+    }
     match (&resumed.lead_reason, korean) {
         (Some(reason), true) => format!("lead는 실행 중이 아닙니다: {reason}."),
         (Some(reason), false) => format!("The lead is not running: {reason}."),
@@ -558,6 +568,21 @@ mod tests {
         assert_eq!(
             resumed_text(Language::English, other),
             "The lead is not running: memory admission holds the start: memory."
+        );
+        let asleep = Some(Resumed {
+            lead_start: Some(LeadStart::NotRunning),
+            lead_reason: Some("it is asleep and wakes when it is needed".into()),
+            lead_asleep_ms: Some(1_800_000_000_000),
+            ..Resumed::default()
+        });
+        assert_eq!(
+            resumed_text(Language::Korean, asleep.clone()),
+            "lead는 쉬는 중입니다(2027-01-15T08:00:00Z부터). 필요할 때 같은 대화로 깨어납니다."
+        );
+        assert_eq!(
+            resumed_text(Language::English, asleep),
+            "The lead is asleep (since 2027-01-15T08:00:00Z) and wakes on the same conversation \
+             when it is needed."
         );
     }
 

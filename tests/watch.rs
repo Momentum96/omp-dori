@@ -389,6 +389,54 @@ fn a_pick_after_the_hold_clean_up_keeps_both() {
     assert!(hub.stop().success());
 }
 
+/// A pick while the lead sleeps applies on the running intake without waking it: the panel
+/// interaction is not a message for the lead. The owner's first message in the channel picked then
+/// wakes it on the same session and is answered there.
+#[test]
+fn a_pick_while_the_lead_sleeps_leaves_it_asleep_until_a_message_in_the_new_channel() {
+    let fake = FakeDiscord::start();
+    let mut hub = hub(&fake, &[CH], "");
+    hub.env
+        .push(("CATALY_IDLE_SLEEP".into(), std::path::PathBuf::from("5s")));
+    hub.start();
+    let panel = ready(&hub, &fake);
+    let lead = |hub: &TestHub| hub.json(&["lead", "status", "--json"]);
+    let slept = hub.until(WAIT, || {
+        let v = lead(&hub);
+        (v["phase"] == "asleep").then_some(v)
+    });
+    let session = slept["asleep"]["session_id"].clone();
+    assert!(session.is_string(), "{slept}");
+    let pids = hub.root.join("bin/omp-data/pids");
+    let starts = std::fs::read_to_string(&pids).unwrap().lines().count();
+
+    let done = pick(&fake, GUILD, OWNER, &panel, &[CH, NEW]);
+    assert_eq!(
+        done["data"]["content"],
+        format!("📡 Watching: <#{CH}> <#{NEW}>"),
+        "{done}"
+    );
+    assert!(
+        config_text(&hub).contains(&format!("channels = [\"{CH}\", \"{NEW}\"]")),
+        "{}",
+        config_text(&hub)
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(lead(&hub)["phase"], "asleep", "the pick does not wake the lead");
+    assert_eq!(
+        std::fs::read_to_string(&pids).unwrap().lines().count(),
+        starts
+    );
+
+    let id = fresh(5);
+    fake.say(FakeDiscord::message(NEW, id, OWNER, "wake up in the new room"));
+    answered(&fake, NEW, id);
+    let woke = lead(&hub);
+    assert_eq!(woke["session"]["session_id"], session, "{woke}");
+    assert_eq!(fake.connections().len(), 1, "one Gateway connection");
+    assert!(hub.stop().success());
+}
+
 /// Idle resident memory of the hub with 1 and then 5 watched channels, Discord connected and the
 /// lead attached on the fake OMP: `VmRSS` 10 s after intake and the lead are ready, as in
 /// `docs/measurements.md`. `cargo test --release --test watch -- --ignored --nocapture idle_rss`.

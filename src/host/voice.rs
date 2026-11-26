@@ -241,9 +241,13 @@ impl<R: Runtime> HubVoice<R> {
         Ok(held)
     }
 
-    /// The lead's live session ID when it can take a voice request now (VOICE req. 73).
+    /// The lead's live session ID when it can take a voice request now (VOICE req. 73). A sleeping
+    /// lead can: the request waits in its inbox and wakes it on the same session.
     async fn lead_ready(&self) -> Result<Option<String>, String> {
         let view = self.lead.view().await;
+        if let Some(asleep) = view.asleep {
+            return Ok(Some(asleep.session_id));
+        }
         if view.phase != Phase::Live {
             return Err("the lead is not running".into());
         }

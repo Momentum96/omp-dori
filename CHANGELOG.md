@@ -40,6 +40,13 @@
 - A watched channel the bot cannot read no longer stops Discord intake for every channel: it
   leaves intake alone with one `relay.held` notice naming the missing permission, at start, on a
   channel change or when a catch-up read meets it.
+- The lead sleeps when it has been fully idle for `[lead] idle_sleep` (default `2h`; `0s` turns it
+  off): no turn, no message waiting or in doubt, no open card or owner question and no open lane
+  (quiet notes wait through the sleep and go with the first turn after it). The hub
+  stops its OMP the orderly way and keeps the session; an owner message (typed or spoken), an
+  urgent event, a lane report or `cataly lead send` resumes the same session, and the message is
+  delivered once it is accepted. `cataly status`, `cataly lead status`, `cataly health` and the
+  ops panel show `asleep`; an update keeps a sleeping lead asleep.
 
 ## 0.2.3 (2026-11-27)
 

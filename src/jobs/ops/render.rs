@@ -92,6 +92,8 @@ pub(crate) enum LeadState {
     Starting,
     Stopped,
     Held,
+    /// Its OMP stopped after a long idle; a normal state that wakes on the next message.
+    Asleep,
     Off,
 }
 
@@ -394,6 +396,7 @@ fn people_value(p: &People, lang: Language) -> String {
         LeadState::Starting => t(lang, "시작 중", "starting"),
         LeadState::Stopped => t(lang, "멈춤", "stopped"),
         LeadState::Held => t(lang, "보류", "held"),
+        LeadState::Asleep => t(lang, "쉬는 중", "asleep"),
         LeadState::Off => t(lang, "꺼짐", "off"),
     };
     let model = p
@@ -1036,6 +1039,21 @@ pub(crate) mod tests {
             panel(&calm, Language::Korean, "x")["embeds"][0]["color"],
             GREEN
         );
+        // A sleeping lead is a normal state: the panel stays green and says so.
+        let mut asleep = calm.clone();
+        asleep.people.lead = LeadState::Asleep;
+        asleep.people.model = None;
+        for (lang, want) in [
+            (Language::Korean, "리드: 쉬는 중\n"),
+            (Language::English, "Lead: asleep\n"),
+        ] {
+            let body = panel(&asleep, lang, "x");
+            assert_eq!(body["embeds"][0]["color"], GREEN);
+            assert!(
+                body.to_string().contains(&want.replace('\n', "\\n")),
+                "{want}"
+            );
+        }
         calm.host.state = HostState::Busy;
         assert_eq!(
             panel(&calm, Language::Korean, "x")["embeds"][0]["color"],
