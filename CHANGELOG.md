@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3 (Unreleased)
+## 0.1.3 (2026-11-26)
 
 - The ops panel tries again to pin itself when a pin fails: right after the hub starts, then at
   most once an hour until it works, so granting the bot Pin Messages later is enough. While the
