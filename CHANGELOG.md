@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.4 (Unreleased)
+## 0.2.4 (2026-11-27)
 
 - The ops panel has a **📡 Watched channels** button. It opens a private Discord channel picker
   with the watched channels already chosen. On submit the hub checks that the bot may view and
