@@ -226,8 +226,8 @@ pub(crate) struct Status {
     #[serde(default)]
     pub(crate) sessions_refused: Option<String>,
     /// Always [`legacy_gate`]: `cataly update` of 0.2.3 and older reads the new hub's status and
-    /// needs this field, which named a feature since removed. To be removed once no supported
-    /// version reads it (DESIGN, "Leftovers").
+    /// needs this field, which named a feature since removed. Removable once no 0.2.3 hub or CLI
+    /// can still be updating (DESIGN 9.2, leftovers).
     #[serde(default = "legacy_gate")]
     pub(crate) quota_gate: Value,
     /// The lead's model and phase; `None` when the config has no `[lead]`.

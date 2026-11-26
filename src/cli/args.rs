@@ -198,13 +198,21 @@ pub(crate) const COMMANDS: [Spec; 53] = [
             "--slack-owner",
             "--fallback-on",
             "--fallback-chain",
+            "--voice",
+            "--voice-channel",
+            "--voice-daily-minutes",
+            "--voice-cap-usd",
+            "--voice-key-file",
         ],
         summary: "the whole setup in one run: asks for the Discord bot token, then fills in defaults \
                   (owner, #cataly and #cataly-ops, lead model, remote approvals, bot avatar and banner, \
                   home backup, health and pressure jobs, user service), shows a short summary and asks \
                   once; again later it changes only what a flag names. --yes answers in scripts; \
                   --owner <id|app>, --guild <id>, --lead-model <provider/id>, --approvals/--backup/--service \
-                  on|off, --backup-repo owner/name, --profile re-applies the bot's avatar and banner",
+                  on|off, --backup-repo owner/name, --profile re-applies the bot's avatar and banner; \
+                  --voice on|off turns Discord voice calls on (paid, on your OpenAI key) or off, with \
+                  --voice-channel <id|name>, --voice-daily-minutes <n>, --voice-cap-usd <usd> and \
+                  --voice-key-file <path>",
     },
     Spec {
         path: &["health"],

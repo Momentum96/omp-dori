@@ -510,7 +510,8 @@ resets, buying credits and paid overage stay refused, in code:
 - Usage never holds a session start (OJ-08 dropped in 0.2.4): the `quota` job only warns once per level.
   Leftovers, to be removed later: a quota job's `hold` key is accepted and ignored (the hub deletes its line at
   start, keeping `config.toml.before-0.2.4`), and the status reply keeps an always-open `quota_gate` value
-  for `cataly update` of 0.2.3 and older, which requires it.
+  for `cataly update` of 0.2.3 and older, which requires it; the field is removable once no 0.2.3 hub or CLI
+  can still be updating.
 - Voice is the one paid feature: explicit opt-in, owner-entered prices, daily, total and spending caps checked
   before every call starts, hold after any failure, never a paid retry (VOICE-19, VOICE-20).
 

@@ -6,8 +6,9 @@ mod home;
 mod install;
 mod lead;
 pub(crate) mod out;
-pub(crate) mod setup;
+mod setup;
 mod setup_discord;
+mod setup_voice;
 mod slot;
 mod transcribe;
 
@@ -379,6 +380,9 @@ fn config_check(path: &Path, as_json: bool) -> Result<(), Failure> {
                 .collect();
             // Only reported: `config check` never writes the file.
             soon.extend(c.obsolete_hold().iter().map(|p| config::obsolete_notice(p)));
+            if let config::voice::VoiceConfig::Refused(errors) = &c.voice {
+                soon.push(format!("voice stays off: {}", config::describe(errors)));
+            }
             if as_json {
                 out::json(&json!({
                     "valid": true, "file": path.display().to_string(), "jobs": c.jobs.len(),

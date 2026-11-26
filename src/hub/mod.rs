@@ -117,6 +117,7 @@ impl Hub {
             panics: self.supervisor.panics(),
             omp,
             sessions_refused: sessions,
+            // For 0.2.3 updaters only; removable once no 0.2.3 hub or CLI can still be updating.
             quota_gate: crate::proto::legacy_gate(),
             lead,
             resumed: self.resumed(),

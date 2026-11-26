@@ -612,6 +612,46 @@ impl Rest {
         .await
     }
 
+    /// Creates one voice channel, under the same never-repeated rule as a text channel.
+    pub(crate) async fn create_voice_channel(
+        &self,
+        guild: Snowflake,
+        name: &str,
+    ) -> Result<Value, RestError> {
+        self.call(
+            "POST guilds/channels",
+            Method::POST,
+            &format!("/guilds/{guild}/channels"),
+            Some(json!({ "name": name, "type": 2 })),
+            Kind::Once,
+        )
+        .await
+    }
+
+    /// One server: its roles with their permissions, and its owner.
+    pub(crate) async fn guild(&self, guild: Snowflake) -> Result<Value, RestError> {
+        self.call(
+            "GET guilds",
+            Method::GET,
+            &format!("/guilds/{guild}"),
+            None,
+            Kind::Read,
+        )
+        .await
+    }
+
+    /// One member of a server: the roles it has.
+    pub(crate) async fn member(&self, guild: Snowflake, user: &str) -> Result<Value, RestError> {
+        self.call(
+            "GET guilds/members",
+            Method::GET,
+            &format!("/guilds/{guild}/members/{user}"),
+            None,
+            Kind::Read,
+        )
+        .await
+    }
+
     /// The Gateway URL Discord names.
     pub(crate) async fn gateway_url(&self) -> Result<String, RestError> {
         let v = self

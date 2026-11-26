@@ -384,7 +384,10 @@ fn a_pick_after_the_hold_clean_up_keeps_both() {
         "{text}"
     );
     assert!(!text.contains("hold = 85"), "{text}");
-    assert!(text.contains("[jobs.q]\nkind = \"quota\"\nenabled = false\n"), "{text}");
+    assert!(
+        text.contains("[jobs.q]\nkind = \"quota\"\nenabled = false\n"),
+        "{text}"
+    );
     assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
     assert!(hub.stop().success());
 }
@@ -422,14 +425,23 @@ fn a_pick_while_the_lead_sleeps_leaves_it_asleep_until_a_message_in_the_new_chan
         config_text(&hub)
     );
     std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(lead(&hub)["phase"], "asleep", "the pick does not wake the lead");
+    assert_eq!(
+        lead(&hub)["phase"],
+        "asleep",
+        "the pick does not wake the lead"
+    );
     assert_eq!(
         std::fs::read_to_string(&pids).unwrap().lines().count(),
         starts
     );
 
     let id = fresh(5);
-    fake.say(FakeDiscord::message(NEW, id, OWNER, "wake up in the new room"));
+    fake.say(FakeDiscord::message(
+        NEW,
+        id,
+        OWNER,
+        "wake up in the new room",
+    ));
     answered(&fake, NEW, id);
     let woke = lead(&hub);
     assert_eq!(woke["session"]["session_id"], session, "{woke}");

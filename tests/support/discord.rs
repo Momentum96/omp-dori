@@ -87,6 +87,9 @@ struct State {
     profile: HashMap<String, (String, String)>,
     /// Channel -> the Discord error code its reads get (50001 or 50013).
     denied: HashMap<String, u64>,
+    /// Setup's permission check: the server's `@everyone` permissions (View Channel, Send
+    /// Messages, Connect and Speak when unset).
+    everyone: Option<u64>,
 }
 
 pub struct FakeDiscord {
@@ -359,6 +362,19 @@ impl FakeDiscord {
         );
     }
 
+    /// The `@everyone` permissions of every server.
+    pub fn everyone_permissions(&self, bits: u64) {
+        self.state.lock().unwrap().everyone = Some(bits);
+    }
+
+    /// Sets a channel's permission overwrites.
+    pub fn overwrites(&self, channel: &str, list: Value) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(c) = s.channels.get_mut(channel) {
+            c["permission_overwrites"] = list;
+        }
+    }
+
     pub fn set_resume_url(&self, url: &str) {
         self.state.lock().unwrap().resume_url = Some(url.into());
     }
@@ -576,6 +592,20 @@ fn setup_route(
             )
         }
         ("GET", ["users", "@me", "guilds"]) => reply(200, &Value::Array(s.guilds.clone())),
+        ("GET", ["guilds", guild]) => {
+            let everyone = s
+                .everyone
+                .unwrap_or((1 << 10) | (1 << 11) | (1 << 20) | (1 << 21));
+            reply(
+                200,
+                &json!({ "id": guild, "owner_id": APP_OWNER, "roles": [
+                    { "id": guild, "name": "@everyone", "permissions": everyone.to_string() }
+                ]}),
+            )
+        }
+        ("GET", ["guilds", _, "members", user]) => {
+            reply(200, &json!({ "user": { "id": user }, "roles": [] }))
+        }
         ("GET", ["guilds", guild, "channels"]) => {
             let list: Vec<Value> = s
                 .channels
