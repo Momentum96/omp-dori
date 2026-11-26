@@ -94,10 +94,14 @@ impl Hub {
             .map(|l| l.model.clone());
         let lead = match model {
             Some(model) => {
-                let phase = serde_json::to_value(self.lead.view().await.phase)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
-                    .unwrap_or_default();
+                let view = self.lead.view().await;
+                let phase = match &view.asleep {
+                    Some(a) => format!("asleep since {}", crate::jobs::instant_text(a.since_ms)),
+                    None => serde_json::to_value(view.phase)
+                        .ok()
+                        .and_then(|v| v.as_str().map(|s| s.replace('_', " ")))
+                        .unwrap_or_default(),
+                };
                 Some(format!("{model}, {phase}"))
             }
             None => None,
@@ -137,9 +141,18 @@ impl Hub {
         let lane_names = self.lanes.resumed.get()?.clone();
         let not_running = lead_start == Some(crate::proto::LeadStart::NotRunning);
         let lead_held = self.lead.quota_held().filter(|_| not_running);
+        let lead_asleep_ms = self
+            .lead
+            .asleep()
+            .filter(|_| not_running)
+            .map(|a| a.since_ms);
+        // An older CLI reads only the reason.
         let lead_reason = self
             .lead
             .refusal()
+            .or_else(|| {
+                lead_asleep_ms.map(|_| "it is asleep and wakes when it is needed".to_string())
+            })
             .filter(|_| not_running && lead_held.is_none());
         Some(crate::proto::Resumed {
             lead: lead_start == Some(crate::proto::LeadStart::Resumed),
@@ -148,6 +161,7 @@ impl Hub {
             lane_names,
             lead_held,
             lead_reason,
+            lead_asleep_ms,
         })
     }
 
@@ -780,6 +794,7 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 (None, Phase::Starting) => LeadState::Starting,
                 (None, Phase::Stopped) => LeadState::Stopped,
                 (None, Phase::Held) => LeadState::Held,
+                (None, Phase::Asleep) => LeadState::Asleep,
                 (None, Phase::NotStarted) if view.quota.is_some() => LeadState::Held,
                 (None, Phase::NotStarted | Phase::Live) => LeadState::Off,
             };

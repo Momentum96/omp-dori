@@ -10,7 +10,8 @@
 //! fallback chain moves a usage-limited lead to the backup model (acceptance check 9). The bridge
 //! case: inert in an ordinary session (check 11), its start-up cost, and an accepted lead. The lead's
 //! tool and read-only commands run without asking, its tool named in `bash` is refused without a
-//! dialog, a write still asks, and the CLI and `eval` stay refused.
+//! dialog, a write still asks, and the CLI and `eval` stay refused. An idle lead sleeps and an owner
+//! message wakes it on the same session (debug builds, with the measurements of the lead's sleep).
 
 #![allow(
     clippy::unwrap_used,
@@ -867,6 +868,107 @@ fn bridge_accepted_lead_in_stock_omp() {
         text.contains("\"customType\":\"cataly\""),
         "no session marker"
     );
+    assert!(hub.stop().success());
+}
+
+/// Resident memory of one process in bytes (Linux `/proc`); `None` elsewhere or once it is gone.
+fn rss_of(pid: u64) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))?
+        .trim()
+        .trim_end_matches("kB")
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(kb * 1024)
+}
+
+/// The lead's sleep with stock OMP and its bridge: an idle lead sleeps (its OMP ends) and an owner
+/// message resumes the same session. Measures the lead OMP's RSS awake, the hub's RSS awake and
+/// asleep, and per wake the time from `lead send` to the lead live again, to the bridge of the same
+/// session accepted by the hub, and to the model request carrying the message.
+#[test]
+fn lead_sleeps_and_wakes_against_stock_omp() {
+    if !enabled() {
+        return;
+    }
+    let sandbox = Sandbox::new("sleep");
+    let mut hub = lead_hub(&sandbox, "fake/primary", "");
+    hub.env
+        .push(("CATALY_IDLE_SLEEP".into(), PathBuf::from("4s")));
+    hub.start();
+    let first = wait_lead(&hub, |v| {
+        v["phase"] == "live" && v["bridge"]["connected"] == true
+    });
+    let session = first["session"]["session_id"].clone();
+    for n in 0..5 {
+        let marker = format!("SLEEP-{n}");
+        let awake = wait_lead(&hub, |v| {
+            v["phase"] == "live" && v["sent"] == 0 && v["waiting"] == 0
+        });
+        assert!(
+            hub.cli(&["lead", "send", &format!("hello {marker}")])
+                .status
+                .success()
+        );
+        hub.until(Duration::from_secs(60), || {
+            body_with(&sandbox.model, &marker)
+        });
+        wait_lead(&hub, |v| {
+            v["sent"] == 0 && v["waiting"] == 0 && v["session"]["status"] == "idle"
+        });
+        let pid = awake["session"]["pid"].as_u64().unwrap();
+        let omp_awake = rss_of(pid).unwrap_or(0);
+        let hub_awake = hub.json(&["stats", "--json"])["rss_bytes"].clone();
+        let slept = wait_lead(&hub, |v| v["phase"] == "asleep");
+        assert_eq!(slept["asleep"]["session_id"], session, "{slept}");
+        hub.until(Duration::from_secs(30), || {
+            rss_of(pid).is_none().then_some(())
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        let hub_asleep = hub.json(&["stats", "--json"])["rss_bytes"].clone();
+        eprintln!(
+            "MEASURE cycle={n} omp_awake_rss={omp_awake} hub_awake_rss={hub_awake} hub_asleep_rss={hub_asleep}"
+        );
+
+        let wake_marker = format!("WAKE-{n}");
+        let sent = Instant::now();
+        assert!(
+            hub.cli(&["lead", "send", &format!("wake {wake_marker}")])
+                .status
+                .success()
+        );
+        let (mut live, mut bridge, mut model) = (None, None, None);
+        loop {
+            let v = hub.json(&["lead", "status", "--json"]);
+            if live.is_none() && v["phase"] == "live" {
+                assert_eq!(v["session"]["session_id"], session, "{v}");
+                live = Some(sent.elapsed());
+            }
+            if bridge.is_none()
+                && v["bridge"]["connected"] == true
+                && v["bridge"]["session"] == session
+            {
+                bridge = Some(sent.elapsed());
+            }
+            if model.is_none() && body_with(&sandbox.model, &wake_marker).is_some() {
+                model = Some(sent.elapsed());
+            }
+            if live.is_some() && bridge.is_some() && model.is_some() {
+                break;
+            }
+            assert!(sent.elapsed() < Duration::from_secs(60), "no wake: {v}");
+        }
+        let ms = |d: Option<Duration>| d.map_or(0.0, |d| d.as_secs_f64() * 1000.0);
+        eprintln!(
+            "MEASURE wake={n} send_to_live_ms={:.0} send_to_bridge_ms={:.0} send_to_model_ms={:.0}",
+            ms(live),
+            ms(bridge),
+            ms(model)
+        );
+    }
     assert!(hub.stop().success());
 }
 

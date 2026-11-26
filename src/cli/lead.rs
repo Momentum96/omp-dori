@@ -27,7 +27,16 @@ fn print_view(v: &Value) {
         .get("reason")
         .and_then(Value::as_str)
         .map_or_else(String::new, |r| format!(" ({r})"));
-    out::line(&format!("lead     {}{reason}", text(v, "phase")));
+    match v.get("asleep").filter(|a| a.is_object()) {
+        Some(a) => out::line(&format!(
+            "lead     asleep since {}, session {}; it wakes when a message needs it",
+            a.get("since_ms")
+                .and_then(Value::as_i64)
+                .map_or_else(|| "-".into(), crate::jobs::instant_text),
+            text(a, "session_id")
+        )),
+        None => out::line(&format!("lead     {}{reason}", text(v, "phase"))),
+    }
     if let Some(s) = v.get("session").filter(|s| s.is_object()) {
         out::line(&format!(
             "session  {} {} on {}, status {}",

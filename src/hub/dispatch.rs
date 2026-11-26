@@ -467,18 +467,7 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
             })?;
             ok(&proto::Reloaded { jobs })
         }
-        method::HEALTH => {
-            let checks = hub.jobs.health().await?;
-            let ignored = hub.config_tx.borrow().health.ignore.clone();
-            let warn = checks
-                .iter()
-                .any(|c| c.level == "warn" && !ignored.contains(&c.name));
-            ok(&proto::Health {
-                checks,
-                ignored,
-                warn,
-            })
-        }
+        method::HEALTH => health(hub).await,
         method::LIMITS => {
             let p: LimitsParams = params(raw)?;
             ok(&limits(hub, p.refresh).await?)
@@ -770,6 +759,24 @@ async fn slack_upload(hub: &Hub, p: proto::DiscordParams) -> Result<Value, Failu
         },
     })?;
     ok(&serde_json::json!({ "file": id }))
+}
+
+/// `health`: the hub's checks, then the configured lead's line.
+async fn health(hub: &Hub) -> Result<Value, Failure> {
+    let mut checks = hub.jobs.health().await?;
+    if hub.config().lead.is_some() {
+        let view = hub.lead.view().await;
+        checks.push(crate::jobs::owner::health::lead_check(&view));
+    }
+    let ignored = hub.config_tx.borrow().health.ignore.clone();
+    let warn = checks
+        .iter()
+        .any(|c| c.level == "warn" && !ignored.contains(&c.name));
+    ok(&proto::Health {
+        checks,
+        ignored,
+        warn,
+    })
 }
 
 /// The account-limits view (WS req. 37-39): off unless enabled; never retries or changes anything.

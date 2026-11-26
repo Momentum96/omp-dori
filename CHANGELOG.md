@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.4 (Unreleased)
+
+- The lead sleeps when it has been fully idle for `[lead] idle_sleep` (default `2h`; `0s` turns it
+  off): no turn, nothing in its inbox, no open card or owner question and no open lane. The hub
+  stops its OMP the orderly way and keeps the session; an owner message (typed or spoken), an
+  urgent event, a lane report or `cataly lead send` resumes the same session, and the message is
+  delivered once it is accepted. `cataly status`, `cataly lead status`, `cataly health` and the
+  ops panel show `asleep`; an update keeps a sleeping lead asleep.
+
 ## 0.2.3 (2026-11-27)
 
 - `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that

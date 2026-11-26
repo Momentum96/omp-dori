@@ -4,12 +4,17 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{ConfigError, Section};
 use crate::omp::transcript::model_selector;
 
 /// Live OMP children allowed by default (HOST req. 89).
 const DEFAULT_CAP: u32 = 8;
+/// `[lead] idle_sleep`: the default, and the range of a sleep that is on (`0s` turns it off).
+const IDLE_SLEEP: Duration = Duration::from_hours(2);
+const IDLE_SLEEP_MIN: Duration = Duration::from_mins(5);
+const IDLE_SLEEP_MAX: Duration = Duration::from_hours(720);
 /// Thinking levels OMP accepts on its command line.
 pub(crate) const THINKING: [&str; 8] = [
     "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
@@ -119,6 +124,9 @@ pub(crate) struct LeadSettings {
     pub(crate) instructions: Option<PathBuf>,
     /// Start the lead when the hub starts (default true).
     pub(crate) autostart: bool,
+    /// How long the lead must be fully idle before the hub stops its OMP and keeps its session;
+    /// `None` (`0s`) never.
+    pub(crate) idle_sleep: Option<Duration>,
 }
 
 /// `[fallback]`: carried into the overlay only when set (DESIGN 9.2).
@@ -195,6 +203,19 @@ fn runtime(errors: &mut Vec<ConfigError>, s: &mut Section<'_>, sessions: &mut Se
         .map(str::to_string);
 }
 
+/// `[lead] idle_sleep`: default 2 h, `0s` off, else 5 m to 720 h.
+fn idle_sleep(errors: &mut Vec<ConfigError>, l: &mut Section<'_>) -> Option<Duration> {
+    match l.duration(errors, "idle_sleep", Duration::ZERO, IDLE_SLEEP_MAX) {
+        None => Some(IDLE_SLEEP),
+        Some(Duration::ZERO) => None,
+        Some(d) if d < IDLE_SLEEP_MIN => {
+            errors.push(l.error("idle_sleep", "must be 0s (off) or between 5m and 720h"));
+            None
+        }
+        Some(d) => Some(d),
+    }
+}
+
 pub(super) fn parse(
     errors: &mut Vec<ConfigError>,
     root: &mut Section<'_>,
@@ -259,6 +280,7 @@ pub(super) fn parse(
             .filter(|v| !v.trim().is_empty())
             .map(str::to_string);
         let autostart = l.bool(errors, "autostart").unwrap_or(true);
+        let idle_sleep = idle_sleep(errors, &mut l);
         l.finish(errors);
         if let Some(model) = model.filter(|m| model_selector(m)) {
             *lead = Some(LeadSettings {
@@ -268,6 +290,7 @@ pub(super) fn parse(
                 session_id,
                 instructions,
                 autostart,
+                idle_sleep,
             });
         }
     }
@@ -351,6 +374,31 @@ mod tests {
             "fallback.chains.default",
         ] {
             assert!(paths.contains(&p), "{p}: {paths:?}");
+        }
+    }
+
+    #[test]
+    fn idle_sleep_is_two_hours_off_at_zero_and_bounded() {
+        let lead = |extra: &str| {
+            crate::config::parse(&format!("[lead]\nmodel = \"p/m\"\n{extra}"))
+                .map(|c| c.lead.unwrap().idle_sleep)
+        };
+        assert_eq!(lead("").unwrap(), Some(Duration::from_hours(2)));
+        assert_eq!(lead("idle_sleep = \"0s\"").unwrap(), None);
+        assert_eq!(
+            lead("idle_sleep = \"5m\"").unwrap(),
+            Some(Duration::from_mins(5))
+        );
+        assert_eq!(
+            lead("idle_sleep = \"720h\"").unwrap(),
+            Some(Duration::from_hours(720))
+        );
+        for bad in ["\"4m59s\"", "\"721h\"", "\"soon\"", "30"] {
+            let errors = lead(&format!("idle_sleep = {bad}")).unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.path == "lead.idle_sleep"),
+                "{bad}: {errors:?}"
+            );
         }
     }
 }

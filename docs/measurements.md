@@ -602,3 +602,32 @@ macOS runner was available; the release workflow builds and checks that target o
 
 Not measured: the musl static build (`x86_64-unknown-linux-musl`) size, which the release workflow
 produces; the darwin-arm64 size and install time.
+
+# Lead sleep (2026-11-27, Linux x64, debug hub, stock OMP 19.2.1, loopback fake model)
+
+Commands: `CATALY_CONTRACT_OMP=1 cargo test --test contract_session lead_sleeps_and_wakes -- --nocapture
+--test-threads=1` (debug build: the test shortens `idle_sleep` to 4 s with `CATALY_IDLE_SLEEP`, which only
+debug builds read). Five cycles per run of: an owner message, the turn, idle until the lead sleeps (its
+OMP gone from `/proc`), then `lead send` to wake it. OMP RSS is `VmRSS` of the lead's OMP process after a
+turn; hub RSS is `cataly stats`. Wake times are polled with `cataly lead status --json` (a few ms per
+poll) and the fake model's request log. Two runs; the first ran beside other agents' builds.
+
+| Measure | Run 1 (loaded host) | Run 2 |
+| --- | --- | --- |
+| Lead OMP RSS, awake after a turn | 286-310 MiB (299,712,512-325,480,448 bytes) | 295-314 MiB (309,579,776-329,199,616 bytes) |
+| Hub RSS with the lead awake (debug) | 33.7-34.6 MiB | 34.0-34.3 MiB |
+| Total with the lead asleep: hub only (debug), no OMP process | 33.8-34.6 MiB | 34.0-34.3 MiB |
+| Wake: `lead send` to the resumed session live and its bridge accepted, same session ID | 806, 2992, 3465, 3180, 3944 ms | 1071, 1302, 979, 1106, 917 ms (p50 1071) |
+| Wake: `lead send` to the model request carrying the message | 872, 3146, 3628, 3337, 4101 ms | 1144, 1384, 1045, 1188, 995 ms (p50 1144) |
+
+Sleeping frees the lead's OMP (about 300 MiB, 90 % of the awake total in this debug run; with the
+release hub's 15-21 MiB it is about 94 %) and the hub's RSS does not move with it. A wake costs one
+OMP start and resume (OMP's own start to `ready` is about 0.5-0.6 s, slice 2c); in run 2's hub log the
+lead is bound 0.17-0.19 s after its bridge is accepted, and the message is written after that. The
+run-1 spread (0.8-3.9 s) came with the host's load and was not broken down [inference: OMP's start
+under load]. Release-build
+and macOS figures are not measured: release builds ignore `CATALY_IDLE_SLEEP`, so a release run needs
+the 5-minute minimum per cycle.
+
+With the fake OMP (`tests/lead.rs`, debug, `idle_sleep` 2 s, after a hub restart with the lead asleep):
+`lead send` to the message in the resumed session's file 236 ms.

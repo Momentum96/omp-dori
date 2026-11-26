@@ -438,3 +438,236 @@ fn a_session_child_is_refused_owner_methods_and_a_plain_shell_is_the_owner() {
     assert!(read["ok"].is_object(), "{read}");
     assert!(hub.stop().success());
 }
+
+/// A lead hub on the fake OMP running turns, with fixtures `extra` and the idle sleep shortened to
+/// `sleep` (`CATALY_IDLE_SLEEP`, debug builds only); `lead` adds `[lead]` lines, `config` sections.
+fn sleepy_hub(fixtures: &[&str], sleep: &str, lead: &str, config: &str) -> TestHub {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    for f in ["rpc", "turns"].iter().chain(fixtures) {
+        hub.fixture("omp", f, Some(""));
+    }
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    hub.env
+        .push(("CATALY_IDLE_SLEEP".into(), std::path::PathBuf::from(sleep)));
+    hub.write_config(&format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n{lead}{config}",
+        omp.display(),
+        work.display()
+    ));
+    hub
+}
+
+fn lead_view(hub: &TestHub) -> Value {
+    hub.json(&["lead", "status", "--json"])
+}
+
+fn asleep(hub: &TestHub) -> Value {
+    hub.until(Duration::from_secs(20), || {
+        let v = lead_view(hub);
+        (v["phase"] == "asleep").then_some(v)
+    })
+}
+
+fn running(pid: &Value) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+fn omp_starts(hub: &TestHub) -> usize {
+    std::fs::read_to_string(hub.root.join("bin/omp-data/pids"))
+        .unwrap()
+        .lines()
+        .count()
+}
+
+/// The lead stays live and on the same process for `secs` seconds (several idle sleeps).
+fn stays_awake(hub: &TestHub, pid: &Value, secs: u64) {
+    let until = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < until {
+        let v = lead_view(hub);
+        assert_eq!(v["phase"], "live", "{v}");
+        assert_eq!(&v["session"]["pid"], pid, "{v}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The owner's lines carrying `marker` in a session file.
+fn user_entries(file: &Value, marker: &str) -> usize {
+    std::fs::read_to_string(file.as_str().unwrap())
+        .unwrap()
+        .lines()
+        .filter(|l| l.contains("\"role\":\"user\"") && l.contains(marker))
+        .count()
+}
+
+/// An idle lead sleeps: its OMP ends and the session is kept, shown in `lead status`, `status` and
+/// `health`. A hub restart (the update path) keeps it asleep without starting OMP; an owner message
+/// then wakes it on the same session and is delivered exactly once, and it sleeps again.
+#[test]
+fn an_idle_lead_sleeps_stays_asleep_over_a_restart_and_wakes_once_on_its_session() {
+    let mut hub = sleepy_hub(&[], "2s", "", "");
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    let (session, file) = (
+        first["session"]["session_id"].clone(),
+        first["session"]["session_file"].clone(),
+    );
+    let slept = asleep(&hub);
+    assert_eq!(slept["asleep"]["session_id"], session, "{slept}");
+    assert!(slept["session"].is_null(), "{slept}");
+    hub.until(Duration::from_secs(10), || {
+        (!running(&first["session"]["pid"])).then_some(())
+    });
+    let status = hub.json(&["status", "--json"]);
+    assert!(
+        status["lead"].as_str().unwrap().contains("asleep since"),
+        "{status}"
+    );
+    let health: Value = serde_json::from_slice(&hub.cli(&["health", "--json"]).stdout).unwrap();
+    let line = health["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "lead")
+        .cloned()
+        .unwrap();
+    assert_eq!(line["level"], "ok", "{line}");
+    assert!(line["detail"].as_str().unwrap().starts_with("asleep since"));
+    let starts = omp_starts(&hub);
+
+    // The orderly stop and start an update makes: the new hub keeps the lead asleep.
+    assert!(hub.stop().success());
+    hub.start();
+    let resumed = hub.until(Duration::from_secs(20), || {
+        let r = hub.json(&["status", "--json"])["resumed"].clone();
+        r.is_object().then_some(r)
+    });
+    assert_eq!(resumed["lead_start"], "not_running", "{resumed}");
+    assert!(resumed["lead_asleep_ms"].is_i64(), "{resumed}");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(lead_view(&hub)["phase"], "asleep");
+    // The new hub's OMP probe is the only start.
+    assert_eq!(
+        omp_starts(&hub),
+        starts + 1,
+        "no OMP started for a sleeping lead"
+    );
+
+    let sent = Instant::now();
+    let out = hub.cli(&["lead", "send", "WAKE-1", "--json"]);
+    assert!(out.status.success(), "{out:?}");
+    let receipt: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(receipt["state"], "waiting", "{receipt}");
+    let woke = live(&hub, &first["session"]["pid"]);
+    assert_eq!(woke["session"]["session_id"], session, "{woke}");
+    assert_eq!(woke["session"]["session_file"], file, "{woke}");
+    hub.until(Duration::from_secs(20), || {
+        (user_entries(&file, "WAKE-1") > 0).then_some(())
+    });
+    eprintln!(
+        "MEASURE fake_omp send_to_entry_ms={}",
+        sent.elapsed().as_millis()
+    );
+    let again = asleep(&hub);
+    assert_eq!(again["asleep"]["session_id"], session, "{again}");
+    assert_eq!(user_entries(&file, "WAKE-1"), 1, "delivered exactly once");
+    assert_eq!(
+        (again["waiting"].clone(), again["sent"].clone()),
+        (Value::from(0), Value::from(0))
+    );
+    assert!(
+        !hub.events().iter().any(|e| e["kind"] == "lead.refused"),
+        "the resume was never refused"
+    );
+    assert!(hub.stop().success());
+}
+
+/// An open question card keeps the lead awake; once it is answered the lead sleeps.
+#[test]
+fn an_open_card_keeps_the_lead_awake() {
+    let mut hub = sleepy_hub(&["ask"], "1s", "", "");
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    assert!(hub.cli(&["lead", "send", "ASK pick one"]).status.success());
+    hub.until(Duration::from_secs(10), || {
+        let v = lead_view(&hub);
+        v["session"]["dialogs"]
+            .as_array()
+            .is_some_and(|d| !d.is_empty())
+            .then_some(())
+    });
+    stays_awake(&hub, &first["session"]["pid"], 4);
+    let answered = hub.cli(&["lead", "answer", "d1", r#"{"data":{"color":"Blue"}}"#]);
+    assert!(answered.status.success(), "{answered:?}");
+    asleep(&hub);
+    assert!(hub.stop().success());
+}
+
+/// A delivery in doubt (written, never found in the session file) keeps the lead awake.
+#[test]
+fn a_delivery_in_doubt_keeps_the_lead_awake() {
+    let mut hub = sleepy_hub(&["noentry"], "1s", "", "");
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    assert!(hub.cli(&["lead", "send", "LOST-1"]).status.success());
+    hub.until(Duration::from_secs(90), || {
+        let v = lead_view(&hub);
+        (v["in_doubt"].as_u64() > Some(0)).then_some(())
+    });
+    stays_awake(&hub, &first["session"]["pid"], 4);
+    assert!(hub.stop().success());
+}
+
+/// An open lane keeps the lead awake, with the lead's inbox empty.
+#[test]
+fn an_open_lane_keeps_the_lead_awake() {
+    let work = "/tmp";
+    let mut hub = sleepy_hub(
+        &[],
+        "1s",
+        "",
+        &format!("[lanes]\nmodel = \"fake/primary\"\ncwd = \"{work}\"\n"),
+    );
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    let params = serde_json::json!({
+        "key": "awake-1",
+        "title": "Work",
+        "brief": "Do the work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+    })
+    .to_string();
+    let opened = hub.cli(&["lane", "open", "--json", "--params", &params]);
+    assert!(opened.status.success(), "{opened:?}");
+    // The lane's start note waits for the lead's next wake: an owner message carries it.
+    hub.until(Duration::from_secs(20), || {
+        (lead_view(&hub)["notes"].as_u64() > Some(0)).then_some(())
+    });
+    assert!(
+        hub.cli(&["lead", "send", "carry the notes"])
+            .status
+            .success()
+    );
+    hub.until(Duration::from_secs(20), || {
+        let v = lead_view(&hub);
+        (v["waiting"] == 0 && v["notes"] == 0 && v["sent"] == 0 && v["in_doubt"] == 0).then_some(())
+    });
+    stays_awake(&hub, &first["session"]["pid"], 4);
+    assert!(hub.stop().success());
+}
+
+/// `idle_sleep = "0s"` turns sleep off.
+#[test]
+fn zero_idle_sleep_never_sleeps() {
+    let mut hub = sleepy_hub(&[], "1s", "idle_sleep = \"0s\"\n", "");
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    stays_awake(&hub, &first["session"]["pid"], 5);
+    assert!(hub.stop().success());
+}

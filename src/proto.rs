@@ -255,6 +255,11 @@ pub(crate) struct Resumed {
     /// Why the hub did not start the lead, when another rule than the quota gate held it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lead_reason: Option<String>,
+    /// The lead sleeps, since this time (ms): it is not running and wakes when it is needed. A hub
+    /// before 0.2.4 never sends it; an older CLI reads the lead as not running with
+    /// `lead_reason`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lead_asleep_ms: Option<i64>,
 }
 
 /// How the lead came back when the hub started.
