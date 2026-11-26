@@ -240,11 +240,11 @@ pub(crate) async fn serve<R: AsyncBufRead + Unpin>(
         "bridge accepted",
         &[("session", &hello.session), ("handle", &handle)],
     );
-    if fresh && role == Role::Lead {
-        recap(hub, &handle, "start").await;
-    }
     let mut session = hello.session.clone();
     let writer_task = tokio::spawn(pump(writer, rx));
+    if fresh && role == Role::Lead {
+        recap(hub, &handle, "start".into());
+    }
     loop {
         let line = match tokio::time::timeout(SILENT, read_line(reader)).await {
             Ok(Line::Text(line)) => line,
@@ -443,7 +443,7 @@ async fn event(hub: &Arc<Hub>, handle: &str, role: Role, params: &Value) {
     };
     hub.links.observe(handle, seq, session, dropped);
     if role == Role::Lead && kind == "session_compact" {
-        recap(hub, handle, &format!("compact:{seq}")).await;
+        recap(hub, handle, format!("compact:{seq}"));
     }
 }
 
@@ -484,8 +484,15 @@ async fn tool(hub: &Arc<Hub>, caller: Option<crate::lanes::Caller>, params: &Val
 }
 
 /// Puts the recap in front of the lead as a note that goes out with the next wake (EVR req. 48,
-/// OPC req. 57); `reason` keeps each start and each compaction its own.
-async fn recap(hub: &Arc<Hub>, handle: &str, reason: &str) {
+/// OPC req. 57); `reason` keeps each start and each compaction its own. It runs on its own task:
+/// handing it over can wait on a delivery to a terminal session, whose reply only this bridge
+/// connection reads, so the connection never waits for it.
+fn recap(hub: &Arc<Hub>, handle: &str, reason: String) {
+    let (hub, handle) = (Arc::clone(hub), handle.to_string());
+    tokio::spawn(async move { hand_recap(&hub, &handle, &reason).await });
+}
+
+async fn hand_recap(hub: &Arc<Hub>, handle: &str, reason: &str) {
     let text = super::tool::recap(hub).await;
     let message = Message {
         sender: HUB_SENDER.into(),

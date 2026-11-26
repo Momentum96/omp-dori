@@ -11,6 +11,11 @@
 - Installing or updating with `install.sh` no longer fails when Linux briefly refuses to start
   the staged binary for its version report ("Text file busy"); the start is retried for up to
   1 s.
+- A lead in a Tern terminal no longer has a message put in doubt ("the bridge did not answer
+  deliver within 10 s") when its session starts or compacts while a message is on its way. The
+  hub handed the lead its recap on the bridge connection itself and read nothing more from it
+  until then, so the bridge's answer waited behind a recap that waited for that answer. Seen on
+  the first message after a start on slow Intel Macs.
 
 ## 0.2.2 (2026-11-26)
 

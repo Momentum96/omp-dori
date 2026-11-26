@@ -302,6 +302,51 @@ fn tern_lead_is_opened_in_a_block_and_controlled_through_the_bridge() {
         .status();
 }
 
+/// A compaction's recap waits for a delivery still in flight to the lead, whose reply only the
+/// bridge connection reads: 0.2.2 waited for the recap on that connection, read nothing more, and
+/// the delivery was in doubt after 10 s (CI, slow Intel macOS, on the first wake after a start).
+/// Here the recap is asked for while a wake awaits its reply; the reply is read and the wake
+/// confirmed.
+#[test]
+fn a_recap_never_holds_the_bridge_from_reading_replies() {
+    let (hub, work) = tern_hub(None);
+    let block = block_of(&hub);
+    let (token, pid) = (
+        block["token"].as_str().unwrap(),
+        block["pid"].as_u64().unwrap(),
+    );
+    let file = work.join("s1.jsonl");
+    std::fs::write(&file, "").unwrap();
+    let mut bridge = Bridge::connect(&hub.socket());
+    let welcome = bridge.request("bridge.hello", &hello(token, "s1", &file, pid));
+    assert_eq!(welcome["role"], "lead", "{welcome}");
+    hub.until(Duration::from_secs(20), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live" && v["sent"] == 0 && v["waiting"] == 0).then_some(())
+    });
+    let idle = json!({ "idle": true, "session": "s1", "file": file });
+    let mut sending = hub.command(&["lead", "send", "hello"]).spawn().unwrap();
+    let cmd = bridge.command(&idle);
+    assert_eq!(cmd["op"], "deliver", "{cmd}");
+    bridge.event("s1", "session_compact", &json!({ "seq": 1 }));
+    std::thread::sleep(Duration::from_millis(500));
+    let id = cmd["id"].as_str().unwrap().to_string();
+    write_entry(&file, cmd["text"].as_str().unwrap(), &id);
+    bridge.reply(&cmd, json!({ "sent": true }));
+    bridge.event("s1", "agent_start", &json!({}));
+    bridge.event("s1", "agent_end", &json!({ "will_continue": false }));
+    assert!(sending.wait().unwrap().success());
+    hub.until(Duration::from_secs(30), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["sent"] == 0).then_some(())
+    });
+    let log = std::fs::read_to_string(hub.state().join("logs/hub.log")).unwrap();
+    assert!(!log.contains("delivery in doubt"), "{log}");
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+}
+
 /// Check 6: with `tern` configured and its executable missing, starts are refused with a hint.
 #[test]
 fn a_missing_tern_executable_refuses_starts_with_an_install_hint() {

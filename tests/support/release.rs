@@ -275,3 +275,9 @@ pub fn stop_hub(hub: &TestHub) {
         (hub_version(hub).is_none() && !lock_held(&lock)).then_some(())
     });
 }
+
+/// Whether a process holds the hub lock at `path` (a missing file is not held).
+fn lock_held(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)))
+}
