@@ -17,8 +17,10 @@
 //! The test keeps its own ledger (backend and summary spending as recorded by voice, plus billed
 //! speech seconds at the speech price) and checks it against the limit before every paid call; a
 //! call over the limit is refused. For each transport it runs one spoken exchange from the
-//! recording with one pass-to-lead whose receipt is proven, then a call that stops at a
-//! deliberately low cap, and prints the cost it used.
+//! recording with one pass-to-lead whose receipt is proven; the call stays open while the backend
+//! is continued with the tool output (`response.create`) and the lead's reply, queued meanwhile,
+//! is offered as a reply piece (`session.commentary.append`) and proven spoken. Then a call that
+//! stops at a deliberately low cap (`session.instructions.append`), and it prints the cost it used.
 //!
 //! Run: `cargo test --release --features voice --test live_voice -- --ignored --nocapture`
 
@@ -54,6 +56,8 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 
 const TEXT: u64 = 1;
+/// The live test lead's reply to the request it receives.
+const LEAD_REPLY: &str = "The build on main passed all checks and the release branch is ready.";
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -95,6 +99,8 @@ struct Book {
     /// Realtime sessions started: WebSocket connections and WebRTC session POSTs.
     connects: usize,
     held: Option<String>,
+    /// Reply pieces proven spoken: reply ID and byte offset.
+    spoken: Vec<(i64, usize)>,
 }
 
 /// A host on the real network with an in-memory ledger checked before every paid call.
@@ -244,10 +250,25 @@ impl VoiceHost for LiveHost {
     }
 
     async fn replies(&self) -> Result<Vec<Reply>, LedgerError> {
-        Ok(Vec::new())
+        // The lead answers the first request once it is received.
+        let b = self.book.lock().unwrap();
+        let spoken = b.spoken.last().map_or(0, |s| s.1);
+        Ok(b.passes
+            .first()
+            .filter(|_| spoken < LEAD_REPLY.len())
+            .map(|(id, _)| Reply {
+                id: 1,
+                request_id: id.clone(),
+                subject: "build".into(),
+                text: LEAD_REPLY.into(),
+                spoken,
+            })
+            .into_iter()
+            .collect())
     }
 
-    async fn spoken(&self, _id: i64, _spoken: usize) -> Result<(), LedgerError> {
+    async fn spoken(&self, id: i64, spoken: usize) -> Result<(), LedgerError> {
+        self.book.lock().unwrap().spoken.push((id, spoken));
         Ok(())
     }
 
@@ -358,7 +379,7 @@ struct Run {
     owner: mpsc::Sender<Vec<i16>>,
     played: Arc<Mutex<usize>>,
     presence: watch::Sender<bool>,
-    _control: mpsc::Sender<cataly_voice::Control>,
+    control: mpsc::Sender<cataly_voice::Control>,
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<Result<(), String>>,
 }
@@ -392,7 +413,7 @@ fn run(host: &Arc<LiveHost>, s: Settings, key: &str) -> Run {
         owner,
         played,
         presence,
-        _control: control,
+        control,
         stop,
         task,
     }
@@ -401,6 +422,9 @@ fn run(host: &Arc<LiveHost>, s: Settings, key: &str) -> Run {
 impl Run {
     async fn feed(&self, frames: &[Vec<i16>]) {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
+        // An interval's first tick is immediate: taking it here keeps repeated short feeds at real
+        // time (else five frames go out in 80 ms, and a long quiet wait overflows input pacing).
+        tick.tick().await;
         for f in frames {
             tick.tick().await;
             self.owner.send(f.clone()).await.unwrap();
@@ -443,14 +467,31 @@ async fn transport(g: &Gate, t: Transport) -> f64 {
     })
     .await;
     let played = *r.played.lock().unwrap();
+    // The lead's reply arrives while the delegation is continued; it is spoken once the backend
+    // finished, so a rejected continuation or reply piece holds voice here.
+    r.control
+        .send(cataly_voice::Control::Replies)
+        .await
+        .unwrap();
+    r.quiet_until(Duration::from_secs(60), || {
+        let book = host.book.lock().unwrap();
+        book.held.is_some() || book.spoken.contains(&(1, LEAD_REPLY.len()))
+    })
+    .await;
+    let spoken = host
+        .book
+        .lock()
+        .unwrap()
+        .spoken
+        .contains(&(1, LEAD_REPLY.len()));
     r.finish().await;
     let (passes, holds) = {
         let book = host.book.lock().unwrap();
         (book.passes.len(), book.holds.clone())
     };
     println!(
-        "LIVE {t:?}: exchange: {passes} pass(es), {played} frames played, holds {holds:?}, \
-         cost so far {:.4} USD",
+        "LIVE {t:?}: exchange: {passes} pass(es), {played} frames played, reply spoken {spoken}, \
+         holds {holds:?}, cost so far {:.4} USD",
         host.spent()
     );
     assert!(
@@ -466,6 +507,10 @@ async fn transport(g: &Gate, t: Transport) -> f64 {
             book.holds
         );
     }
+    assert!(
+        spoken,
+        "{t:?}: the lead's reply was spoken after the delegation"
+    );
 
     // A deliberately low cap: the day is 8 s of speech short of it, so the greeting session winds
     // down at the cap and closes; the owner speaking again starts nothing and gets one notice.

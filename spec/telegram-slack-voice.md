@@ -257,8 +257,10 @@ Totals: KEEP 36, SIMPLIFY 12, MERGE 3, DROP 11 (62 capabilities).
 56. VOICE-06 While the link is ready and the owner present, exactly one receive stream exists, for
     the owner only. Undecodable Opus frames are skipped. A closed stream is resubscribed at once if
     it lived over 10 s, else after a delay doubling from 100 ms to 2 s.
-57. VOICE-06 Once a second, check whether Discord reports the owner as speaking while no audio has been decoded for 3 s; if so, restart
-    the stream (log at most once per 10 s).
+57. VOICE-06 Once a second, check whether owner frames are still arriving (one within the last
+    second) while no audio has been decoded from them for 3 s; if so, restart the stream (log at
+    most once per 10 s). Silence is not a stall: Discord sends no frames while the owner is quiet,
+    and its speaking event sets a speaking mode once rather than reporting each pause.
 58. VOICE-07 After each encryption-group change, unencrypted owner frames are accepted for 30 s;
     otherwise dropped. Decryption failures are logged as one count per burst (1 s quiet ends it).
 59. VOICE-08 Discord audio (48 kHz stereo 16-bit) is averaged down to 24 kHz mono; provider audio is
@@ -266,7 +268,9 @@ Totals: KEEP 36, SIMPLIFY 12, MERGE 3, DROP 11 (62 capabilities).
     overflow clears it and fails the session. Each clear starts a new playback generation.
 60. VOICE-08 Barge-in: owner above the wake level for 400 ms while over 400 ms is queued clears
     playback. Provider audio below -55 dBFS is dropped while over 200 ms is queued. After 1 s with
-    no output, a partial last frame is padded with silence.
+    no output, a partial last frame is padded with silence. The provider streams output audio
+    continuously, silence included, so audio below -55 dBFS is not output: it does not count for
+    the quiet and idle rules, the played frames of a reply piece, or drained playback.
 61. VOICE-09 With no session and the owner present, 200 ms above the wake level opens a session
     without greeting; the last 2.5 s of audio (120,000 bytes at 24 kHz mono) is sent first.
 62. VOICE-10 Input goes through a token bucket refilling at 1.15x real time, holding at most 3 s,
@@ -339,7 +343,9 @@ Totals: KEEP 36, SIMPLIFY 12, MERGE 3, DROP 11 (62 capabilities).
 84. VOICE-21 At session end, if anything was said or done, the summary model is asked for 3 to 5
     short lines in the owner's language (60 s, 600 output tokens, storage off); its usage is
     recorded; summary, every tool outcome and optional cost estimate are posted in pieces of at
-    most 1900 characters. After a cap or failure no model call is made and the post says so.
+    most 1900 characters. After a cap or failure no model call is made and the post says so; its
+    summary is then what the session recorded: what the owner and the assistant said, each cut to
+    its last 600 characters, with the tool outcomes.
     Transcripts are then discarded; no audio or transcript is written to disk.
 85. VOICE-22 Instructions require: one or two short sentences in the owner's language; mostly
     listen; stop when interrupted; delegate facts, status and work; claim the lead has a request

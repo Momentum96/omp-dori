@@ -27,6 +27,8 @@ const WAKE: Duration = Duration::from_millis(200);
 const SUMMARY: Duration = Duration::from_secs(60);
 /// Summary output tokens at most.
 const SUMMARY_TOKENS: u32 = 600;
+/// Transcript characters kept per speaker in a summary built without the model.
+const SAID_MAX: usize = 600;
 /// Posts are cut into pieces of at most this many characters.
 const POST_MAX: usize = 1900;
 /// Opening a session may take this long before it counts as a start timeout.
@@ -454,7 +456,7 @@ impl<H: VoiceHost> Core<H> {
 
     /// The session is over: accounting is done; the summary runs before the next session may start.
     fn ended(&mut self) {
-        let Some(session) = self.session.take() else {
+        let Some(mut session) = self.session.take() else {
             return;
         };
         self.playback.clear();
@@ -462,9 +464,9 @@ impl<H: VoiceHost> Core<H> {
             return;
         }
         let blocked = if let Some(f) = &self.failed {
-            Some(format!("no summary: the session failed ({f})"))
+            Some(format!("the session failed ({f})"))
         } else if self.capped {
-            Some("no summary: a voice cap was reached".to_string())
+            Some("a voice cap was reached".to_string())
         } else {
             None
         };
@@ -473,11 +475,11 @@ impl<H: VoiceHost> Core<H> {
             Arc::clone(&self.settings),
             self.key.clone(),
         );
-        let said = format!(
-            "Owner: {}\nAssistant: {}",
-            session.owner_said, session.model_said
+        let said = (
+            std::mem::take(&mut session.owner_said),
+            std::mem::take(&mut session.model_said),
         );
-        let outcomes = session.outcomes.clone();
+        let outcomes = std::mem::take(&mut session.outcomes);
         drop(session);
         self.finishing = Some(tokio::spawn(async move {
             summarize(&host, &settings, &key, &said, &outcomes, blocked).await;
@@ -505,18 +507,21 @@ impl<H: VoiceHost> Core<H> {
 }
 
 /// Asks the summary model for 3 to 5 lines, records its usage, and posts the summary, every tool
-/// outcome and the cost estimate (VOICE req. 84). Transcripts are dropped afterwards.
+/// outcome and the cost estimate (VOICE req. 84). After a failure or cap (`blocked`) no model call
+/// is made: the summary is what the session recorded. Transcripts are dropped afterwards.
 async fn summarize<H: VoiceHost>(
     host: &Arc<H>,
     settings: &Settings,
     key: &str,
-    said: &str,
+    (owner, model): &(String, String),
     outcomes: &[String],
     blocked: Option<String>,
 ) {
-    let summary = match blocked {
-        Some(why) => why,
-        None => match summary_call(host, settings, key, said).await {
+    let summary = if let Some(why) = blocked {
+        recorded(&why, owner, model)
+    } else {
+        let said = format!("Owner: {owner}\nAssistant: {model}");
+        match summary_call(host, settings, key, &said).await {
             Ok((text, spend)) => {
                 if let Err(e) = host.record(&settings.zone, 0.0, 0, spend).await {
                     let _ = host.hold(&format!("ledger write failed: {}", e.0)).await;
@@ -524,7 +529,7 @@ async fn summarize<H: VoiceHost>(
                 text
             }
             Err(e) => format!("no summary: {e}"),
-        },
+        }
     };
     let mut post = format!("Voice session summary:\n{summary}");
     if !outcomes.is_empty() {
@@ -544,6 +549,25 @@ async fn summarize<H: VoiceHost>(
     for piece in pieces(&post, POST_MAX) {
         let _ = host.post(settings.text_channel, &piece).await;
     }
+}
+
+/// The summary after a failure or cap, when no model call is made (VOICE req. 84): why, then what
+/// each side said as the session recorded it, each cut to its last 600 characters.
+fn recorded(why: &str, owner: &str, model: &str) -> String {
+    let mut out = format!("no model summary: {why}. What the session recorded:");
+    for (who, said) in [
+        ("Owner said", owner.trim()),
+        ("Assistant said", model.trim()),
+    ] {
+        if said.is_empty() {
+            continue;
+        }
+        let skip = said.chars().count().saturating_sub(SAID_MAX);
+        let tail: String = said.chars().skip(skip).collect();
+        let cut = if skip > 0 { "…" } else { "" };
+        let _ = write!(out, "\n{who}: {cut}{tail}");
+    }
+    out
 }
 
 async fn summary_call<H: VoiceHost>(
@@ -640,5 +664,20 @@ mod tests {
         let p = pieces(&text, POST_MAX);
         assert!(p.iter().all(|x| x.chars().count() <= POST_MAX));
         assert_eq!(p.concat().replace('\n', ""), text.replace('\n', ""));
+    }
+
+    #[test]
+    fn summary_without_the_model_is_what_was_recorded() {
+        let s = recorded("the session failed (provider error x)", " hello ", "");
+        assert_eq!(
+            s,
+            "no model summary: the session failed (provider error x). What the session recorded:\n\
+             Owner said: hello"
+        );
+        let long = format!("start {}end", "é".repeat(SAID_MAX));
+        let s = recorded("a voice cap was reached", "", &long);
+        let said = s.split_once("Assistant said: ").map_or("", |(_, t)| t);
+        assert!(said.starts_with('…') && said.ends_with("end"));
+        assert_eq!(said.chars().count(), SAID_MAX + 1);
     }
 }

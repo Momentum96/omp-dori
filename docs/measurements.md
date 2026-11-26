@@ -647,3 +647,26 @@ the 5-minute minimum per cycle.
 
 With the fake OMP (`tests/lead.rs`, debug, `idle_sleep` 2 s, after a hub restart with the lead asleep):
 `lead send` to the message in the resumed session's file 236 ms.
+
+# Live voice: delegation, commentary and reply path (0.2.4 fix, 2026-11-27)
+
+The owner-gated live test (`tests/live_voice.rs`) against the real API, Linux x64, release build,
+`gpt-live-1` with backend `gpt-5.6-luna`, voice `marin`. Approved budget for this fix: 1.00 USD, run
+with the test's own ledger and limit (`CATALY_LIVE_VOICE_MAX_USD`). Costs are the test ledger's
+estimate: backend spending at the test's default prices (0.25 / 0.025 / 0.30 / 2.00 USD per million
+input / cached / write / output tokens) plus billed speech seconds at 0.06 USD a minute, both above
+the published 0.20 / 0.02 / 0.25 / 1.20 USD and 0.05 USD a minute. The owner's request ("Please pass
+this to the lead: check the build.") was a 4.3 s, 24 kHz recording made once with OpenAI's speech
+endpoint (`gpt-4o-mini-tts`, about 0.002 USD, an estimate from its token prices).
+
+| Run | Transports | Result | Cost |
+| --- | --- | --- | --- |
+| 1 | WebSocket | held "over 3 s of input audio pending": the test fed its quiet audio at 1.25x real time (each short feed took the interval's immediate first tick), which only overflows once the call stays open past the pass; the test's feed fixed | 0.0550 USD |
+| 2 | WebSocket | no hold: `response.create` without `delegation_id` accepted, the delegation continued and finished; the lead's reply was never offered | 0.0721 USD |
+| 3, 4 | WebSocket | traced runs: the provider streams output audio every ~20-60 ms, silence included, so voice never saw output go quiet (no reply piece, no idle close) | 0.0705 + 0.0702 USD |
+| 5 | WebSocket, then WebRTC | passed: pass to the lead received, delegation continued, the lead's reply offered with `session.commentary.append`, acknowledged and proven spoken, no hold; then the low-cap call wound down with `session.instructions.append` and refused a new session | 0.0373 + 0.0360 USD |
+
+Total for this fix: 0.3411 USD in the test ledger, about 0.343 USD with the recording.
+
+Run (from the worktree, the key in `OPENAI_API_KEY`):
+`CATALY_LIVE_VOICE_MAX_USD=0.72 CATALY_LIVE_VOICE_RECORDING=request.pcm cargo test --release --features voice --test live_voice -- --ignored --nocapture`.

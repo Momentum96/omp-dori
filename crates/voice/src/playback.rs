@@ -3,6 +3,10 @@
 //! Provider audio is upsampled to 48 kHz stereo and played in 20 ms frames. At most 5 s is held;
 //! overflow clears the queue and fails the session. Every clear starts a new generation, which is
 //! how a lead reply proves its frames played uninterrupted (VOICE req. 78).
+//!
+//! The provider streams output audio continuously, silence included, so only audible audio (at or
+//! above -55 dBFS) counts as output: the played count, the last-played time and draining all refer
+//! to it, and quiet audio between replies never holds off a pause.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -21,6 +25,11 @@ const QUIET_QUEUED: Duration = Duration::from_millis(200);
 /// A partial last frame is padded after this long without new output.
 const PAD_AFTER: Duration = Duration::from_secs(1);
 
+/// Whether provider audio is audible output rather than the silence streamed between replies.
+pub(crate) fn audible(mono: &[i16]) -> bool {
+    dbfs(mono) >= QUIET_DBFS
+}
+
 /// The queue overflowed; the session fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Overflow;
@@ -33,10 +42,12 @@ pub(crate) struct Playback {
     last_input: Option<Instant>,
     /// When the owner's current run above the wake level began.
     speech_since: Option<Instant>,
-    /// When the last frame was played; output-quiet checks use it.
+    /// When the last audible frame was played; output-quiet checks use it.
     last_played: Option<Instant>,
-    /// Frames played in the current generation.
+    /// Audible frames played in the current generation.
     played: u64,
+    /// Queued samples up to the end of the last audible audio.
+    audible: usize,
 }
 
 fn queued(samples: usize) -> Duration {
@@ -53,6 +64,7 @@ impl Playback {
             speech_since: None,
             last_played: None,
             played: 0,
+            audible: 0,
         }
     }
 
@@ -69,22 +81,32 @@ impl Playback {
         queued(self.queue.len())
     }
 
-    pub(crate) fn drained(&self) -> bool {
-        self.queue.is_empty()
+    /// Queued audio up to the end of the last audible audio, as time.
+    pub(crate) fn audible_queued(&self) -> Duration {
+        queued(self.audible)
     }
 
-    /// When the last frame played.
+    /// No audible audio is left to play.
+    pub(crate) fn drained(&self) -> bool {
+        self.audible == 0
+    }
+
+    /// When the last audible frame played.
     pub(crate) fn last_played(&self) -> Option<Instant> {
         self.last_played
     }
 
     /// Adds provider audio (24 kHz mono). Quiet audio is dropped while over 200 ms is queued.
     pub(crate) fn push(&mut self, mono: &[i16], now: Instant) -> Result<(), Overflow> {
-        if self.queued() > QUIET_QUEUED && dbfs(mono) < QUIET_DBFS {
+        let audible = audible(mono);
+        if self.queued() > QUIET_QUEUED && !audible {
             return Ok(());
         }
         let stereo = self.up.push(mono);
         self.queue.extend(stereo);
+        if audible {
+            self.audible = self.queue.len();
+        }
         self.last_input = Some(now);
         if self.queue.len() > HOLD {
             self.clear();
@@ -96,6 +118,7 @@ impl Playback {
     /// Drops everything queued and starts a new generation.
     pub(crate) fn clear(&mut self) {
         self.queue.clear();
+        self.audible = 0;
         self.up.reset();
         self.generation += 1;
         self.played = 0;
@@ -122,8 +145,7 @@ impl Playback {
     /// output arrived for 1 s.
     pub(crate) fn next_frame(&mut self, now: Instant) -> Option<Vec<i16>> {
         if self.queue.len() >= FRAME_STEREO {
-            self.last_played = Some(now);
-            self.played += 1;
+            self.played_frame(FRAME_STEREO, now);
             return Some(self.queue.drain(..FRAME_STEREO).collect());
         }
         let stale = self
@@ -131,12 +153,20 @@ impl Playback {
             .is_some_and(|t| now.saturating_duration_since(t) >= PAD_AFTER);
         if !self.queue.is_empty() && stale {
             let mut frame: Vec<i16> = self.queue.drain(..).collect();
+            self.played_frame(frame.len(), now);
             frame.resize(FRAME_STEREO, 0);
-            self.last_played = Some(now);
-            self.played += 1;
             return Some(frame);
         }
         None
+    }
+
+    /// Bookkeeping for a frame of `samples` leaving the queue: it counts when it holds audible audio.
+    fn played_frame(&mut self, samples: usize, now: Instant) {
+        if self.audible > 0 {
+            self.audible = self.audible.saturating_sub(samples);
+            self.last_played = Some(now);
+            self.played += 1;
+        }
     }
 }
 

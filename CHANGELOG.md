@@ -72,6 +72,21 @@
 - An OMP that is slow to exit after end of input on a loaded host no longer fails the OMP probe
   when it ends at TERM; only a failed exit or one that needs KILL does. At hub shutdown each lane
   now gets the same 27 s as the lead, so a slow exit keeps its full TERM grace before any KILL.
+- Voice no longer fails and holds itself right after a pass to the lead with "provider error
+  unknown_parameter: Unknown parameter: 'delegation_id'". Continuing the backend after a tool
+  result sent `delegation_id` on `response.create`, which takes only `type` and `event_id`. The
+  fake realtime server in the tests now rejects every field the Live API does not document for an
+  event, with the API's error shape.
+- Lead replies are now spoken in a live call, and a quiet call closes after the idle time. The
+  provider streams output audio all the time, silence included, and every chunk counted as
+  output, so voice never saw a pause: no reply piece was offered and idle close never came. Only
+  audible audio (at or above -55 dBFS) now counts as output.
+- After a provider failure or a voice cap, the summary post says what the owner and the
+  assistant said and what the tools did, instead of only "no summary: the session failed". No
+  model call is made, and voice stays held until `cataly voice restart`.
+- A quiet owner no longer logs "voice receive stalled; stream restarted" every 10 to 15 s. Discord
+  sends no audio during silence and reports speaking once, so silence was taken for a stall; a
+  stall is now owner audio that keeps arriving but does not decode.
 
 ## 0.2.3 (2026-11-27)
 

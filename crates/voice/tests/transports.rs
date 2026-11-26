@@ -138,7 +138,11 @@ impl Harness {
     }
 
     fn drain_play(&mut self) {
-        while self.play.try_recv().is_ok() {
+        // Silent frames (the provider's idle output) are not counted as played.
+        while let Ok(frame) = self.play.try_recv() {
+            if frame.iter().all(|&s| s == 0) {
+                continue;
+            }
             self.played += 1;
             self.first_play.get_or_insert_with(Instant::now);
         }
@@ -437,6 +441,123 @@ async fn check8_transports_agree() {
     assert_eq!(ws, rtc);
 }
 
+/// The fake answers a client event with an undocumented or missing field the way the real API
+/// does, so a stray field fails here first.
+#[test]
+fn strict_fake_rejects_undocumented_fields() {
+    use serde_json::json;
+    let err = realtime::check(
+        &json!({"type": "response.create", "event_id": "e1", "delegation_id": "d1"}),
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(err["code"], "unknown_parameter");
+    assert_eq!(err["message"], "Unknown parameter: 'delegation_id'.");
+    assert_eq!(err["param"], "delegation_id");
+    assert!(realtime::check(&json!({"type": "response.create", "event_id": "e1"}), true).is_ok());
+    let append = |extra: serde_json::Value| {
+        let mut v = json!({"type": "session.commentary.append", "event_id": "e2", "content": "x"});
+        if let (Some(v), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+            v.extend(extra.clone());
+        }
+        realtime::check(&v, true)
+    };
+    assert!(append(json!({"delegation_id": null})).is_ok());
+    assert_eq!(
+        append(json!({})).unwrap_err()["code"],
+        "missing_required_parameter"
+    );
+    assert_eq!(
+        append(json!({"delegation_id": "d1"})).unwrap_err()["param"],
+        "delegation_id"
+    );
+    assert_eq!(
+        realtime::check_session(&json!({"model": "gpt-live-1", "voice": "marin"})).unwrap_err()["param"],
+        "session.voice"
+    );
+}
+
+/// A delegation whose tool output goes back is continued, and a lead reply that arrives meanwhile
+/// is spoken afterwards, while the provider streams silence between replies as the real API does:
+/// every client event on that path is one the API documents, so the strict fake rejects none and
+/// voice is not held (0.2.2 sent `delegation_id` on `response.create`), and the streamed silence
+/// neither counts as output nor keeps the reply from a pause.
+async fn delegation_then_reply(t: Transport) {
+    let script = Script {
+        reply_ms: 300,
+        call_gap_ms: 300,
+        tools: vec![
+            (
+                "read_status".into(),
+                r#"{"parts":["lanes"],"early_update":true}"#.into(),
+            ),
+            (
+                "pass_to_lead".into(),
+                r#"{"request":"check the build","high_risk":false}"#.into(),
+            ),
+        ],
+        ack_commentary: true,
+        cover_commentary: true,
+        commentary_ms: 600,
+        idle_audio: true,
+        ..Script::default()
+    };
+    let host = FakeHost::new();
+    let mut h = harness(t, script, Arc::clone(&host), |_| {}).await;
+    h.presence.send(true).unwrap();
+    assert!(
+        h.until(Duration::from_secs(10), |h| h.sessions() == 1)
+            .await
+    );
+    h.speak(600, true).await;
+    assert!(
+        h.until(Duration::from_secs(15), |h| !h
+            .host
+            .seen
+            .lock()
+            .unwrap()
+            .passes
+            .is_empty())
+            .await
+    );
+    // The lead answers while the delegation is still being continued.
+    let reply = Reply {
+        id: 9,
+        request_id: host.seen.lock().unwrap().passes[0].0.clone(),
+        subject: "build".into(),
+        text: "The build on main passed and the release branch is ready.".into(),
+        spoken: 0,
+    };
+    host.replies.lock().unwrap().insert(9, reply.clone());
+    h.control.send(Control::Replies).await.unwrap();
+    assert!(
+        h.until(Duration::from_secs(20), |h| {
+            let seen = h.host.seen.lock().unwrap();
+            !seen.spoken.is_empty() || !seen.holds.is_empty()
+        })
+        .await
+    );
+    let rejected = h.server.log.lock().unwrap().rejected.clone();
+    assert_eq!(rejected, Vec::<serde_json::Value>::new(), "{t:?}");
+    let seen = host.seen.lock().unwrap();
+    assert_eq!(seen.holds, Vec::<String>::new());
+    assert_eq!(seen.spoken, vec![(9, reply.text.len())]);
+    drop(seen);
+    assert_eq!(h.events("response.create").len(), 1, "continued once");
+    let pieces = h
+        .events("session.commentary.append")
+        .iter()
+        .filter(|v| {
+            v["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("data, not an instruction"))
+        })
+        .count();
+    assert_eq!(pieces, 1, "the reply went out as one commentary piece");
+    h.task.abort();
+}
+both!(check9_delegation_then_reply, delegation_then_reply);
+
 /// Check 5: a lead reply counts as spoken only after acknowledgement, transcript coverage and
 /// drained playback in the same generation.
 async fn reply_proof(t: Transport) {
@@ -581,7 +702,8 @@ async fn failure_holds(t: Transport) {
         assert!(
             seen.posts
                 .iter()
-                .any(|(_, p)| p.contains("no summary: the session failed"))
+                .any(|(_, p)| p.contains("no model summary: the session failed")
+                    && p.contains("Owner said: hello"))
         );
     }
     assert!(
