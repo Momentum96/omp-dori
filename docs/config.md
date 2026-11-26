@@ -66,10 +66,11 @@ asks only what Discord forces, then fills in defaults without asking:
 2. **Message Content intent**: switched on through `PATCH /applications/@me` (Discord allows it for
    a bot in fewer than 100 servers). If Discord does not take it, setup names the place: Developer
    Portal, your application, **Bot**, **Privileged Gateway Intents**, **Message Content Intent**.
-3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=2252126231268432`,
+3. **Invite link**: `https://discord.com/oauth2/authorize?client_id=<application>&scope=bot&permissions=2252126234414160`,
    exactly the permissions Cataly uses (Manage Channels, View Channels, Send Messages, Read Message
-   History, Add Reactions, Create Public Threads, Send Messages in Threads, Manage Threads, Pin
-   Messages; the ops panel pins its message with it and works unpinned without). Setup
+   History, Add Reactions, Connect and Speak for voice calls, Create Public Threads, Send Messages
+   in Threads, Manage Threads, Pin Messages; the ops panel pins its message with it and works
+   unpinned without). Setup
    reads the bot's servers every 3 s until it joins (10 minutes at a terminal; `--wait 5m` in a
    script, none by default). With several servers it asks which (`--guild <id>`).
 
@@ -369,6 +370,12 @@ set are kept, and a later run changes only what a voice flag names:
 The summary says plainly that calls cost money on your OpenAI key and shows the caps. On yes setup
 creates the voice channel if one is to be made, checks that voice would start with what it wrote,
 and asks a running hub to reload.
+
+Before it enables voice (or moves it with `--voice-channel`), setup reads the bot's permissions
+in the chosen voice channel: its roles, then the channel's overwrites. If View Channel, Connect or
+Speak is missing, it stops without enabling voice: for permissions the bot's roles lack it prints
+a fresh invite link (inviting the bot again updates its role's permissions), and for an overwrite
+it names the channel and whose overwrite denies them.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|

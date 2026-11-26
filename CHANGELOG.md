@@ -11,7 +11,12 @@
   `secrets/voice-key`; without one setup stops before enabling anything). Keys you set are kept.
   The summary says that calls cost money on your OpenAI key and shows the caps. `--voice off` turns
   voice off and keeps the other keys. `cataly config check` now warns when voice is enabled but
-  would stay off, and names why.
+  would stay off, and names why. Before enabling voice, setup checks that the bot may view, connect
+  and speak in the voice channel; if not, it stops and prints a fresh invite link or names the
+  channel overwrite to fix.
+- The bot's invite link now also asks for Connect and Speak, which voice calls need
+  (`permissions=2252126234414160`). A bot invited before keeps its old role until you open the new
+  link.
 
 ## 0.2.3 (2026-11-27)
 

@@ -117,7 +117,23 @@ fn turn_on(
     if fill && !enabled(&text) {
         text = set_rendered(&text, SECTION, "enabled", "true");
     }
-    let create = match channel(p, &text, d, fill)? {
+    let chosen = channel(p, &text, d, fill)?;
+    // The bot must be able to join before voice is turned on or moved to another channel.
+    if fill || p.value("--voice-channel").is_some() {
+        let (id, shown) = match &chosen {
+            Channel::Keep => {
+                let set = table(&text)
+                    .get("voice_channel")
+                    .and_then(toml::Value::as_str)
+                    .and_then(Snowflake::parse);
+                (set, set.map_or_else(String::new, |s| s.to_string()))
+            }
+            Channel::Found(id) => (Some(*id), id.to_string()),
+            Channel::Create(name) => (None, name.clone()),
+        };
+        block_on(d.voice_access(id, &shown)).map_err(Failure::Refused)?;
+    }
+    let create = match chosen {
         Channel::Keep => None,
         Channel::Found(id) => {
             text = set_rendered(

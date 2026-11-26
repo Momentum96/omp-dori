@@ -163,7 +163,7 @@ fn first_run_at_a_terminal_then_a_second_run_changes_nothing() {
     );
     assert_eq!(fake.app_flags(), (1 << 23) | (1 << 19));
     assert!(
-        shown.contains("permissions=2252126231268432"),
+        shown.contains("permissions=2252126234414160"),
         "the invite link:\n{shown}"
     );
     assert_eq!(creates(&fake), ["cataly", "cataly-ops"]);
@@ -572,4 +572,43 @@ fn voice_off_keeps_the_other_keys() {
     }
     assert!(!text.contains("enabled = true"), "{text}");
     assert_eq!(creates(&fake), ["cataly-ops"]);
+}
+
+#[cfg(feature = "voice")]
+#[test]
+fn voice_on_stops_when_the_bot_cannot_join() {
+    let (hub, fake) = sandbox(false);
+    let token = hub.private_file("discord-token", TOKEN);
+    fake.join(GUILD, "home");
+    fake.named(LEAD, "cataly", 0, GUILD);
+    let general = "500000000000000020";
+    fake.named(general, "General", 2, GUILD);
+    voice_key(&hub);
+    let base = script(&token);
+    let enabled = |hub: &TestHub| read(&hub.config_path()).contains("[voice]");
+
+    // The channel denies @everyone Connect: setup names the overwrite and enables nothing.
+    fake.overwrites(
+        general,
+        json!([{ "id": GUILD, "type": 0, "allow": "0", "deny": (1u64 << 20).to_string() }]),
+    );
+    let (ok, _, stderr) = run_with(&hub, &base, &["--voice", "on", "--yes"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("denies the bot Connect") && stderr.contains("overwrite for @everyone"),
+        "{stderr}"
+    );
+    assert!(!enabled(&hub));
+
+    // The bot's roles lack Speak server-wide: a fresh invite link with the voice permissions.
+    fake.overwrites(general, json!([]));
+    fake.everyone_permissions((1 << 10) | (1 << 11) | (1 << 20));
+    let (ok, _, stderr) = run_with(&hub, &base, &["--voice", "on", "--yes"]);
+    assert!(!ok);
+    assert!(
+        stderr.contains("lacks Speak") && stderr.contains("permissions=2252126234414160"),
+        "{stderr}"
+    );
+    assert!(!enabled(&hub));
+    assert_eq!(creates(&fake), Vec::<String>::new());
 }
