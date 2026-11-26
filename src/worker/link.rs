@@ -18,6 +18,7 @@ use super::mux::{Accepted, Mux, Timing};
 use super::{Hello, LINE_MAX, method};
 use crate::config::Config;
 use crate::config::workers::WorkerSettings;
+use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 use crate::proto::{Line, Request, Response};
 use crate::store::Store;
@@ -697,6 +698,8 @@ pub(crate) struct Workers {
     changed: watch::Sender<u64>,
     /// Set at hub stop: no connection is made any more.
     stopped: std::sync::atomic::AtomicBool,
+    /// Where `worker.offline` and `worker.online` go.
+    events: OnceLock<crate::host::lead::Events>,
 }
 
 impl Workers {
@@ -720,6 +723,7 @@ impl Workers {
             failed: Mutex::new(HashMap::new()),
             changed: watch::channel(0).0,
             stopped: std::sync::atomic::AtomicBool::new(false),
+            events: OnceLock::new(),
         });
         let _ = REGISTRY.set(Arc::clone(&workers));
         workers
@@ -753,6 +757,23 @@ impl Workers {
     /// Changes whenever a connection is made or lost.
     pub(crate) fn changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+
+    /// Where the workers' state changes are reported.
+    pub(crate) fn set_events(&self, events: crate::host::lead::Events) {
+        let _ = self.events.set(events);
+    }
+
+    /// How long until a worker that failed may be asked again, the soonest of them; lanes that wait
+    /// for a worker sweep again then.
+    pub(crate) fn next_retry(&self) -> Option<Duration> {
+        self.failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|at| at.elapsed() < RETRY)
+            .map(|at| RETRY.saturating_sub(at.elapsed()) + Duration::from_millis(100))
+            .min()
     }
 
     /// Where channels the workers open go.
@@ -820,22 +841,40 @@ impl Workers {
 
     async fn set(&self, name: &str, state: State, reason: Option<String>, hello: Option<Hello>) {
         let now = now_ms();
-        let record = {
+        let (record, before) = {
             let mut records = self.records();
             let record = records.entry(name.to_string()).or_default();
+            let before = record.state;
             if record.state != state || record.reason != reason {
                 record.changed_ms = now;
             }
             record.state = state;
-            record.reason = reason;
+            record.reason.clone_from(&reason);
             if let Some(h) = hello {
                 record.hello = Some(h);
             }
             if state == State::Online {
                 record.seen_ms = Some(now);
             }
-            record.clone()
+            (record.clone(), before)
         };
+        // One event per change, never repeated while the state holds (design 2.9).
+        let event = match (before, state) {
+            (State::Offline, State::Offline) | (State::Online, State::Online) => None,
+            (_, State::Offline) => Some(
+                Emit::new(EventKind::WorkerOffline, Severity::Warning, true, name)
+                    .with("worker", name)
+                    .with("detail", reason.as_deref().unwrap_or("unreachable")),
+            ),
+            (State::Offline, State::Online) => Some(
+                Emit::new(EventKind::WorkerOnline, Severity::Info, false, name)
+                    .with("worker", name),
+            ),
+            _ => None,
+        };
+        if let (Some(event), Some(events)) = (event, self.events.get()) {
+            events(event);
+        }
         let Ok(doc) = serde_json::to_string(&record) else {
             return;
         };

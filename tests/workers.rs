@@ -30,6 +30,7 @@ use support::{BIN, TestHub, path_without_omp};
 const WAIT: Duration = Duration::from_secs(60);
 const OWNER: &str = "400000000000000001";
 const CH: &str = "600000000000000001";
+const THREAD: &str = "600000000000000009";
 
 /// A worker: its own home, config, state and runtime folders, a host key, and a fake OMP.
 struct WorkerBox {
@@ -790,17 +791,26 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
 }
 
 /// The worker's `serve` dies mid-lane (as when the machine or its network drops): the lane is lost,
-/// then comes back by itself on the same session file once the worker answers, and takes messages.
+/// its thread hears it in the owner's language, `worker.offline` and `worker.online` come once each,
+/// and the lane comes back by itself on the same session file and takes messages. A delivery in
+/// flight at a drop ends in doubt and is never resent.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_dropped_worker_lane_resumes_on_its_session() {
+    let fake = FakeDiscord::start();
     let (mut hub, repo) = lane_hub("");
+    let token = hub.private_file("token", "fake-token");
+    fake.channel(CH, 0, None);
+    fake.thread(THREAD, CH);
+    let config = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!("{config}{}", fake.config(&token, OWNER, &[CH])));
     let w = WorkerBox::new(&hub, "box", 22);
     let hub_id = enrol(&hub, &w, "dev@box", &[]);
     start(&mut hub);
     let open = json!({
         "key": "drop", "title": "Survive a drop", "brief": "Work.",
         "checks": [{ "kind": "command", "argv": ["true"] }],
-        "cwd": repo, "worker": "box",
+        "cwd": repo, "worker": "box", "thread": format!("discord:{THREAD}"),
     });
     let opened = lane(&hub, "open", &open).unwrap();
     assert_eq!(opened["outcome"], "started", "{opened}");
@@ -823,6 +833,24 @@ fn a_dropped_worker_lane_resumes_on_its_session() {
         .into_iter()
         .any(|e| e["kind"] == "lane.lost" && e.to_string().contains("box"));
     assert!(lost, "{:?}", hub.event_kinds());
+    let count = |kind: &str| hub.event_kinds().iter().filter(|k| *k == kind).count();
+    assert_eq!(count("worker.offline"), 1);
+    assert_eq!(count("worker.online"), 1);
+    let notes = fake.wait(WAIT, |f| {
+        let texts: Vec<String> = f
+            .bot_messages(THREAD)
+            .iter()
+            .filter_map(|m| m["content"].as_str().map(str::to_string))
+            .collect();
+        texts
+            .iter()
+            .any(|t| t == "다시 연결돼서 이어서 해요")
+            .then_some(texts)
+    });
+    assert!(
+        notes.contains(&"작업 PC box 연결이 끊겼어요. 다시 연결되면 이어서 해요".to_string()),
+        "{notes:?}"
+    );
     lane(
         &hub,
         "send",
@@ -933,5 +961,54 @@ fn a_worker_bridge_reaches_only_its_own_lanes() {
     let mut reply = String::new();
     BufReader::new(raw).read_line(&mut reply).unwrap();
     assert!(reply.contains("carries only the bridge"), "{reply}");
+    hub.stop();
+}
+
+/// A worker that failed is asked again only after a minute, by itself: still down at the first
+/// retry, up at the next, and the queued lane starts then. Its state changes are told once each.
+#[test]
+fn an_offline_worker_is_tried_again_each_minute() {
+    let (mut hub, repo) = lane_hub("");
+    let w = WorkerBox::new(&hub, "box", 22);
+    enrol(&hub, &w, "dev@box", &[]);
+    start(&mut hub);
+    hub.fixture("ssh", "down", Some(""));
+    let open = json!({
+        "key": "retry", "title": "Retry box", "brief": "Work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+        "cwd": repo, "worker": "box",
+    });
+    let queued = lane(&hub, "open", &open).unwrap();
+    assert!(
+        queued["outcome"].as_str().unwrap().starts_with("queued: "),
+        "{queued}"
+    );
+    let log = hub.root.join("bin/ssh-data/log");
+    let tries = || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| *l == "dev@box:22")
+            .count()
+    };
+    let first = tries();
+    let failed_at = std::time::Instant::now();
+    hub.until(Duration::from_secs(120), || (tries() > first).then_some(()));
+    let waited = failed_at.elapsed();
+    assert!(
+        waited >= Duration::from_secs(55),
+        "the retry waited a minute: {waited:?}"
+    );
+    // Still down at the first retry; up for the next.
+    std::fs::remove_file(hub.root.join("bin/ssh-data/down")).unwrap();
+    let rec = hub.until(Duration::from_secs(120), || {
+        let r = record(&hub, "retry");
+        (r["live"] == true).then_some(r)
+    });
+    assert_eq!(rec["worker"], "box");
+    let kinds = hub.event_kinds();
+    let count = |kind: &str| kinds.iter().filter(|k| *k == kind).count();
+    assert_eq!(count("worker.offline"), 1, "{kinds:?}");
+    assert_eq!(count("worker.online"), 1, "{kinds:?}");
     hub.stop();
 }

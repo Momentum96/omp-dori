@@ -369,6 +369,12 @@ impl<R: Runtime> Lanes<R> {
                     Duration::from_millis(u64::try_from(at - now).unwrap_or(0))
                 })
                 .min(o.sweep)
+                // A lane waiting for a worker that failed is tried again when its minute is over.
+                .min(
+                    crate::worker::link::registry()
+                        .and_then(|w| w.next_retry())
+                        .unwrap_or(Duration::MAX),
+                )
                 .max(Duration::from_millis(200));
             tokio::select! {
                 () = self.nudge.notified() => {}

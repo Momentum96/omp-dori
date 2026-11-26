@@ -538,6 +538,7 @@ fn sessions(
 ) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
+    workers.set_events(Arc::clone(&events));
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),

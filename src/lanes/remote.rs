@@ -387,6 +387,41 @@ impl<R: Runtime> Lanes<R> {
                 .with("lane", &rec.key)
                 .with("detail", format!("{worker} is back: {line}")),
             );
+            if back {
+                self.worker_note(&rec, &worker, true).await;
+            }
+        }
+    }
+
+    /// One line in the lane's thread, in the owner's language, when its worker drops (`back` false)
+    /// or when the lane resumed after it (design 3, "실패할 때").
+    pub(super) async fn worker_note(&self, rec: &Record, worker: &str, back: bool) {
+        let Some(thread) = rec
+            .thread
+            .as_deref()
+            .and_then(|t| t.strip_prefix("discord:"))
+        else {
+            return;
+        };
+        let korean = self.cfg().hub.language == crate::config::Language::Korean;
+        let text = match (back, korean) {
+            (false, true) => format!("작업 PC {worker} 연결이 끊겼어요. 다시 연결되면 이어서 해요"),
+            (false, false) => {
+                format!("Work PC {worker} disconnected. The lane continues once it reconnects.")
+            }
+            (true, true) => "다시 연결돼서 이어서 해요".to_string(),
+            (true, false) => "Reconnected; the lane continues.".to_string(),
+        };
+        let seed = format!(
+            "worker-{}:{}:{}",
+            if back { "back" } else { "drop" },
+            rec.key,
+            crate::sys::now_ms()
+        );
+        if let super::Posted::Rejected(why) | super::Posted::Uncertain(why) =
+            self.env.threads.post(thread, &text, &seed).await
+        {
+            self.alert(&rec.key, "worker note not posted", &why, false);
         }
     }
 }

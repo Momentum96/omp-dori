@@ -894,7 +894,8 @@ impl<R: Runtime> Lanes<R> {
                 .with("detail", format!("{why}; last lines: {}", last.join(" | "))),
         );
         // A worker lane comes back by itself once its worker answers (docs/design/workers.md 2.4).
-        if rec.worker.is_some() {
+        if let Some(worker) = rec.worker.clone() {
+            self.worker_note(&rec, &worker, false).await;
             self.nudge.notify_one();
         }
     }
