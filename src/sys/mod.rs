@@ -10,6 +10,7 @@ pub(crate) mod install;
 pub(crate) mod latency;
 pub(crate) mod lock;
 pub(crate) mod notify;
+pub(crate) mod package;
 pub(crate) mod paths;
 pub(crate) mod peer;
 pub(crate) mod release;

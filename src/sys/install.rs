@@ -8,6 +8,10 @@
 //! <root>/records/<v>.json                    version, commit, target, hashes, source, time, role
 //! <root>/lock, <root>/staging/, <root>/silenced, <root>/service
 //! ```
+//!
+//! A Cataly installed by npm or Bun has no version folders; the package manager owns its files
+//! (`sys::package`). The root then holds only the lock, the silenced version and the service
+//! marker.
 
 use std::fs::{self, DirBuilder, Permissions};
 use std::io::{Read, Write};
@@ -17,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::fs::{sync_dir, write_atomic};
+use super::package::Package;
 use super::release::{
     self, BINARY_MAX, EXTENSION_MAX, SIGNATURE, SIGNATURE_MAX, SUMS, SUMS_MAX, Sums, TARGET,
 };
@@ -33,6 +38,8 @@ pub(crate) struct Layout {
     pub(crate) command: PathBuf,
     /// `<OMP agent dir>/extensions/cataly.ts`.
     pub(crate) extension: PathBuf,
+    /// The npm or Bun package the running binary came from, if it did.
+    pub(crate) package: Option<Package>,
 }
 
 impl Layout {
@@ -55,11 +62,13 @@ impl Layout {
             root,
             command: home.join(".local/bin").join(BINARY),
             extension: crate::omp::extension::link()?,
+            package: None,
         })
     }
 
     /// The layout of the running binary when it runs from a version folder (so an installed
-    /// binary acts on its own program folder whatever the environment says), else the default.
+    /// binary acts on its own program folder whatever the environment says), else the default,
+    /// with the package the binary runs from when an npm or Bun install put it there.
     /// The binary's folder is found through its real path; when that is the default folder under
     /// another spelling (on macOS `/tmp` and `/var/folders` sit behind a symlink into `/private`),
     /// the default spelling is kept, since the links were written with it.
@@ -77,8 +86,32 @@ impl Layout {
             Some(root) if fs::canonicalize(&default.root).ok().as_ref() != Some(&root) => {
                 Self::from_env(Some(&root))
             }
-            _ => Ok(default),
+            Some(_) => Ok(default),
+            None => Ok(Self {
+                package: Package::of_running(),
+                ..default
+            }),
         }
+    }
+
+    /// Whether there is an installed Cataly to run: a current version, or a package install.
+    pub(crate) fn installed(&self) -> bool {
+        self.package.is_some() || self.current_version().is_some()
+    }
+
+    /// What the user service runs: the command link, or the package's binary, whose path an
+    /// upgrade through the package manager keeps.
+    pub(crate) fn service_command(&self) -> PathBuf {
+        self.package
+            .as_ref()
+            .map_or_else(|| self.command.clone(), Package::binary)
+    }
+
+    /// The binary of `version` that starts the hub.
+    pub(crate) fn binary_of(&self, version: &str) -> PathBuf {
+        self.package
+            .as_ref()
+            .map_or_else(|| self.version_dir(version).join(BINARY), Package::binary)
     }
 
     pub(crate) fn versions(&self) -> PathBuf {
@@ -651,6 +684,7 @@ mod tests {
             root: dir.join("data/cataly"),
             command: dir.join("home/.local/bin/cataly"),
             extension: dir.join("home/.omp/agent/extensions/cataly.ts"),
+            package: None,
         }
     }
 

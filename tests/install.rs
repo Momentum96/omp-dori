@@ -559,12 +559,7 @@ fn update_notice_check_and_download() {
     let mut hub = sandbox(&config);
     let r2 = release(&hub.root.join("r2"), &variant(&v2, false), &v2);
     github.publish(&format!("v{v2}"), r2);
-    let latest = |g: &FakeGithub| {
-        g.seen()
-            .iter()
-            .filter(|p| p.ends_with("/releases/latest"))
-            .count()
-    };
+    let latest = |g: &FakeGithub| g.seen().iter().filter(|p| p.ends_with("/releases")).count();
 
     hub.start();
     let notices = |h: &TestHub| {
@@ -650,4 +645,109 @@ fn update_notice_check_and_download() {
     assert_eq!(github.seen().len(), seen, "no request while off");
     assert_eq!(notices(&off), 0);
     off.stop();
+}
+
+/// `install.sh` with no tag reads the release list, as GitHub prints it, through a fake `curl`, and
+/// installs the newest stable Cataly release: newer prereleases, drafts and releases of other
+/// software are skipped, text in a release body is never taken for a tag, and a newest release
+/// without this host's binary is refused by name.
+#[test]
+fn install_sh_picks_the_newest_stable_cataly_release() {
+    let hub = sandbox("");
+    // A debug build without debug info, so it stays under install.sh's 128 MiB bound.
+    let r1 = release(&hub.root.join("r1"), &variant(V1, false), V1);
+    let fake = hub.root.join("curl-bin");
+    let log = hub.root.join("curl.log");
+    std::fs::create_dir_all(&fake).unwrap();
+    let curl = format!(
+        "#!/bin/sh\nout=''\nprev=''\nurl=''\n\
+         for a in \"$@\"; do [ \"$prev\" = -o ] && out=$a; prev=$a; url=$a; done\n\
+         echo \"$url\" >> '{log}'\n\
+         case \"$url\" in\n\
+         'https://api.github.com/repos/vntrevx/Cataly/releases?per_page=30') cp '{list}' \"$out\" ;;\n\
+         https://github.com/vntrevx/Cataly/releases/download/v{V1}/*) cp '{r1}'/\"${{url##*/}}\" \"$out\" ;;\n\
+         *) exit 22 ;;\nesac\n",
+        log = log.display(),
+        list = hub.root.join("releases.json").display(),
+        r1 = r1.display(),
+    );
+    std::fs::write(fake.join("curl"), curl).unwrap();
+    std::fs::set_permissions(fake.join("curl"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let names = |v: &str, binary: bool| -> Value {
+        let mut names = vec![
+            "SHA256SUMS".to_string(),
+            "SHA256SUMS.sig".into(),
+            format!("cataly-{v}.ts"),
+            "install.sh".into(),
+        ];
+        if binary {
+            names.push(format!("cataly-{v}-{}", target()));
+        }
+        names
+            .into_iter()
+            .map(|n| serde_json::json!({ "name": n, "state": "uploaded", "uploader": { "login": "o" } }))
+            .collect()
+    };
+    let entry = |tag: &str, prerelease: bool, draft: bool, assets: Value| {
+        serde_json::json!({
+            "url": "https://api.github.com/x", "author": { "login": "o", "id": 1 },
+            "tag_name": tag, "name": tag, "draft": draft, "prerelease": prerelease,
+            "assets": assets,
+            "body": "notes, with {braces} and \"tag_name\": \"v100.0.0\", \"name\": \"SHA256SUMS\"",
+        })
+    };
+    let install = |list: Value| {
+        std::fs::write(
+            hub.root.join("releases.json"),
+            serde_json::to_string_pretty(&list).unwrap(),
+        )
+        .unwrap();
+        let mut path = std::ffi::OsString::from(&fake);
+        path.push(":");
+        path.push(support::path_without_omp());
+        with_env(&hub, Path::new("sh"))
+            .env("PATH", path)
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+            .output()
+            .unwrap()
+    };
+
+    let out = install(serde_json::json!([
+        entry("v99.0.0-rc.1", false, false, names("99.0.0-rc.1", true)),
+        entry("v98.0.0", true, false, names("98.0.0", true)),
+        entry("v97.0.0", false, true, names("97.0.0", true)),
+        entry(
+            "v96.0.0",
+            false,
+            false,
+            serde_json::json!([{ "name": "other-tool.tar.gz" }])
+        ),
+        entry(&format!("v{V1}"), false, false, names(V1, true)),
+        entry("v0.0.1", false, false, names("0.0.1", true)),
+    ]));
+    assert!(out.status.success(), "{}", text(&out));
+    let (_, s) = status_install(&hub);
+    assert_eq!(s["current"]["version"], V1, "{s}");
+    let fetched = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        fetched
+            .lines()
+            .skip(1)
+            .all(|u| u.contains(&format!("/download/v{V1}/"))),
+        "{fetched}"
+    );
+
+    let out = install(serde_json::json!([
+        entry("v50.0.0", false, false, names("50.0.0", false)),
+        entry(&format!("v{V1}"), false, false, names(V1, true)),
+    ]));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains(&format!(
+            "release v50.0.0 has no cataly-50.0.0-{}",
+            target()
+        )),
+        "{said}"
+    );
 }

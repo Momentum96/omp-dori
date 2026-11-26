@@ -1,6 +1,8 @@
-//! A fake GitHub release API on loopback only: `releases/latest` and `releases/tags/<tag>` for one
+//! A fake GitHub release API on loopback only: the release list and `releases/tags/<tag>` for one
 //! scripted release whose assets are served from a local folder (the first download of each asset
-//! answers with a redirect, as GitHub's asset links do). Every request path is counted.
+//! answers with a redirect, as GitHub's asset links do). The list also holds, newer and with higher
+//! tags, a prerelease and a release of other software, as the real repository does; neither may be
+//! chosen. Every request path is counted.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -91,7 +93,8 @@ fn answer(req: &Request<Incoming>, state: &Mutex<State>, port: u16) -> Response<
     let Some((tag, folder)) = release else {
         return reply(404, b"{\"message\":\"Not Found\"}".to_vec());
     };
-    if path.ends_with("/releases/latest") || path.ends_with(&format!("/releases/tags/{tag}")) {
+    let list = path.ends_with("/releases");
+    if list || path.ends_with(&format!("/releases/tags/{tag}")) {
         let mut names: Vec<String> = std::fs::read_dir(&folder)
             .unwrap()
             .filter_map(Result::ok)
@@ -109,6 +112,15 @@ fn answer(req: &Request<Incoming>, state: &Mutex<State>, port: u16) -> Response<
             .collect();
         let body =
             json!({ "tag_name": tag, "prerelease": false, "draft": false, "assets": assets });
+        if !list {
+            return reply(200, body.to_string().into_bytes());
+        }
+        let other = json!([{ "name": "other-tool.tar.gz", "browser_download_url": "http://127.0.0.1:9/x" }]);
+        let body = json!([
+            { "tag_name": "v98.0.0", "prerelease": true, "draft": false, "assets": assets },
+            { "tag_name": "v99.0.0", "prerelease": false, "draft": false, "assets": other },
+            body,
+        ]);
         return reply(200, body.to_string().into_bytes());
     }
     if let Some(name) = path.strip_prefix("/download/") {

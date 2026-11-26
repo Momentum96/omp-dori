@@ -1,0 +1,12 @@
+{
+	"name": "cataly-linux-x64",
+	"version": "0.0.0-source",
+	"description": "The Cataly binary and OMP extension for Linux x64; install the cataly package",
+	"license": "SEE LICENSE IN LICENSE",
+	"homepage": "https://github.com/vntrevx/Cataly",
+	"os": ["linux"],
+	"cpu": ["x64"],
+	"libc": ["glibc"],
+	"files": ["cataly", "cataly.ts", "LICENSE", "THIRD-PARTY-NOTICES.txt"],
+	"preferUnplugged": true
+}

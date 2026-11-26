@@ -4,14 +4,14 @@
 # key compiled into it, checks the executable format and the binary's version report, and only then
 # switches. Nothing is started, no configuration is written, no service is enabled.
 #
-#   sh install.sh             the latest stable release
+#   sh install.sh             the newest stable Cataly release
 #   sh install.sh v1.2.3      that release (prereleases included)
 #   sh install.sh <folder>    release assets already in a local folder
 #
 # Needs a POSIX shell, curl, uname, and sha256sum or shasum.
 set -eu
 
-REPO="vntrevx/cataly-core"
+REPO="vntrevx/Cataly"
 # The ed25519 public key releases are signed with (hex); the publish job fills it in.
 RELEASE_KEY="@RELEASE_KEY@"
 
@@ -71,10 +71,68 @@ else
 	if [ -z "$tag" ]; then
 		command -v curl >/dev/null 2>&1 || fail "curl is not installed"
 		curl --proto '=https' --proto-redir '=https' -fsSL --connect-timeout 10 --max-time 15 \
-			--max-filesize 1048576 -o "$tmp/latest.json" "https://api.github.com/repos/$REPO/releases/latest" ||
-			fail "no stable release is published yet (or GitHub is unreachable); pass an exact tag such as v0.1.0"
-		tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\(v[^"]*\)".*/\1/p' "$tmp/latest.json" | head -n 1)
-		[ -n "$tag" ] || fail "no stable release is published yet; pass an exact tag such as v0.1.0"
+			--max-filesize 1048576 -o "$tmp/releases.json" "https://api.github.com/repos/$REPO/releases?per_page=30" ||
+			fail "GitHub's release list is unreachable; try again, or pass an exact tag such as v0.2.0"
+		# The repository also holds prereleases and releases of other software. A Cataly release is
+		# tagged v<major>.<minor>.<patch> and carries SHA256SUMS and cataly-<version>.ts; the newest
+		# stable one that is neither a draft nor a prerelease is chosen. The list is read as JSON:
+		# records split at quotes alternate between structure and string text (an escaped quote
+		# continues its string), so field order and text inside strings do not matter. Each line
+		# printed: major minor patch tag, then 1 when it also carries this host's binary and the
+		# signature.
+		newest=$(awk -v target="$target" '
+			function reset() { tag = ""; draft = 0; pre = 0; assets = "\n" }
+			function has(name) { return index(assets, "\n" name "\n") > 0 }
+			function flush(  v, n) {
+				if (tag !~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ || draft || pre) return
+				v = substr(tag, 2)
+				if (!has("SHA256SUMS") || !has("cataly-" v ".ts")) return
+				split(v, n, ".")
+				print n[1], n[2], n[3], tag, (has("cataly-" v "-" target) && has("SHA256SUMS.sig")) ? 1 : 0
+			}
+			function value(v) {
+				expecting = 0
+				if (depth == 1 && key == "tag_name") tag = v
+				if (depth == 1 && key == "draft") draft = (v == "true")
+				if (depth == 1 && key == "prerelease") pre = (v == "true")
+				if (depth == 2 && key == "name") assets = assets v "\n"
+			}
+			function word_end() {
+				if (word != "") value(word)
+				word = ""
+			}
+			function structure(t,  i, c, n) {
+				n = length(t)
+				for (i = 1; i <= n; i++) {
+					c = substr(t, i, 1)
+					if (c ~ /[A-Za-z0-9.+-]/) {
+						if (expecting) word = word c
+						continue
+					}
+					word_end()
+					if (c == ":") { key = last; expecting = 1 }
+					else if (c == "[") expecting = 0
+					else if (c == "{") { expecting = 0; depth++; if (depth == 1) reset() }
+					else if (c == "}") { if (depth == 1) flush(); depth-- }
+				}
+				word_end()
+			}
+			BEGIN { RS = "\"" }
+			{
+				if (!inside) { structure($0); inside = 1; text = ""; next }
+				text = text $0
+				n = 0
+				while (n < length($0) && substr($0, length($0) - n, 1) == "\\") n++
+				if (n % 2 == 1) { text = text "\""; next }
+				inside = 0
+				if (expecting) value(text)
+				else last = text
+			}
+		' "$tmp/releases.json" | sort -k1,1n -k2,2n -k3,3n | tail -n 1)
+		[ -n "$newest" ] || fail "no stable Cataly release is published yet; pass an exact tag such as v0.2.0"
+		tag=$(echo "$newest" | cut -d' ' -f4)
+		[ "$(echo "$newest" | cut -d' ' -f5)" = 1 ] ||
+			fail "release $tag has no cataly-${tag#v}-$target or no SHA256SUMS.sig; it cannot be installed on this host"
 	fi
 	version=${tag#v}
 	base="https://github.com/$REPO/releases/download/$tag"
@@ -91,6 +149,10 @@ for asset in "cataly-$version-$target" "cataly-$version.ts"; do
 	[ "$(hash_of "$tmp/$asset")" = "$want" ] || fail "$asset does not match SHA256SUMS; nothing was installed"
 done
 
-echo "Cataly $version for $target; release key $RELEASE_KEY"
+# The copy in the repository is the template; the copy attached to a release carries the key.
+case "$RELEASE_KEY" in
+"@"*) echo "Cataly $version for $target" ;;
+*) echo "Cataly $version for $target; release key $RELEASE_KEY" ;;
+esac
 chmod 700 "$tmp/cataly-$version-$target"
 "$tmp/cataly-$version-$target" install --from "$tmp"

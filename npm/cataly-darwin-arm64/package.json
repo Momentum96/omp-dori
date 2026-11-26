@@ -1,0 +1,11 @@
+{
+	"name": "cataly-darwin-arm64",
+	"version": "0.0.0-source",
+	"description": "The Cataly binary and OMP extension for macOS arm64; install the cataly package",
+	"license": "SEE LICENSE IN LICENSE",
+	"homepage": "https://github.com/vntrevx/Cataly",
+	"os": ["darwin"],
+	"cpu": ["arm64"],
+	"files": ["cataly", "cataly.ts", "LICENSE", "THIRD-PARTY-NOTICES.txt"],
+	"preferUnplugged": true
+}

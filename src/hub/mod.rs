@@ -418,6 +418,13 @@ async fn serve(paths: &Paths, config: Config, store: Store) -> u8 {
             return exit::FAILED;
         }
     };
+    // An npm or Bun install has no installer of its own to link the bridge into OMP: the hub
+    // links its package's extension before any session starts.
+    if let Some(package) = crate::sys::package::Package::of_running()
+        && let Err(e) = package.link_extension()
+    {
+        log::warn("bridge link", &[("error", &e)]);
+    }
     let links = Arc::new(crate::host::bridge::Links::default());
     let lead_cwd = stream_cwd(&config_rx.borrow());
     let streams = streams::Streams::new(

@@ -27,7 +27,7 @@ pub(crate) const TARGET: &str = if cfg!(all(target_os = "linux", target_arch = "
     "unsupported"
 };
 /// The canonical repository releases come from.
-pub(crate) const REPOSITORY: &str = "vntrevx/cataly-core";
+pub(crate) const REPOSITORY: &str = "vntrevx/Cataly";
 /// GitHub's API, unless the config points the check at a loopback fake.
 pub(crate) const GITHUB_API: &str = "https://api.github.com";
 /// The checksum list and its signature, named the same in every release (DESIGN 11.1).
@@ -345,10 +345,46 @@ impl Release {
             .map(|(_, url)| url.as_str())
             .ok_or(format!("release {} has no asset {name}", self.tag))
     }
+
+    fn has(&self, name: &str) -> bool {
+        self.assets.iter().any(|(n, _)| n == name)
+    }
+
+    /// A Cataly release carries its checksum list and its extension, which every target shares;
+    /// the repository's releases of other software do not.
+    fn is_cataly(&self) -> bool {
+        self.has(SUMS) && self.has(&extension_asset(&self.version.to_string()))
+    }
+
+    /// Refuses a release that lacks one of the four assets this host installs.
+    pub(crate) fn complete(&self) -> Result<(), String> {
+        let v = self.version.to_string();
+        let missing: Vec<String> = [
+            SUMS.to_string(),
+            SIGNATURE.to_string(),
+            binary_asset(&v),
+            extension_asset(&v),
+        ]
+        .into_iter()
+        .filter(|n| !self.has(n))
+        .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "release {} is not a complete Cataly release for {TARGET}: it has no {}",
+            self.tag,
+            missing.join(", ")
+        ))
+    }
 }
 
-/// Reads the latest stable release, or the release of `tag` (IR req. 8, 32): one request, 15 s in
-/// all, at most 1 MiB. `Ok(None)` when no stable release exists yet.
+/// How many releases, newest first, the latest-release lookup reads.
+const LISTED: u32 = 30;
+
+/// Reads the newest stable Cataly release, or the release of `tag` (IR req. 8, 32): one request,
+/// 15 s in all, at most 1 MiB. `Ok(None)` when no stable release exists yet. Either must carry
+/// the four assets this host installs.
 pub(crate) async fn fetch_release(
     api: &Base,
     tag: Option<&str>,
@@ -358,7 +394,7 @@ pub(crate) async fn fetch_release(
             format!("/repos/{REPOSITORY}/releases/tags/{t}")
         }
         Some(t) => return Err(format!("'{t}' is not a release tag such as v1.2.3")),
-        None => format!("/repos/{REPOSITORY}/releases/latest"),
+        None => format!("/repos/{REPOSITORY}/releases?per_page={LISTED}"),
     };
     let req = Request {
         method: hyper::Method::GET,
@@ -390,40 +426,73 @@ pub(crate) async fn fetch_release(
     if body.len() > METADATA_MAX {
         return Err("the release metadata is larger than 1 MiB".into());
     }
-    parse_release(&body).map(Some)
+    if tag.is_some() {
+        let release = parse_release(&body)?;
+        release.complete()?;
+        return Ok(Some(release));
+    }
+    latest(&body)
+}
+
+#[derive(Deserialize)]
+struct RawAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Deserialize)]
+struct RawRelease {
+    tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<RawAsset>,
+}
+
+impl RawRelease {
+    fn release(self) -> Result<Release, String> {
+        let version = Version::parse(&self.tag_name)
+            .filter(|_| self.tag_name.starts_with('v'))
+            .ok_or(format!("release tag '{}' is not v<version>", self.tag_name))?;
+        if self.draft {
+            return Err(format!("release {} is a draft", self.tag_name));
+        }
+        Ok(Release {
+            tag: self.tag_name,
+            version,
+            assets: self
+                .assets
+                .into_iter()
+                .map(|a| (a.name, a.browser_download_url))
+                .collect(),
+        })
+    }
 }
 
 fn parse_release(body: &[u8]) -> Result<Release, String> {
-    #[derive(Deserialize)]
-    struct Asset {
-        name: String,
-        browser_download_url: String,
+    serde_json::from_slice::<RawRelease>(body)
+        .map_err(|_| "the release metadata is unreadable".to_string())?
+        .release()
+}
+
+/// The newest stable Cataly release in a release list. Drafts, prereleases, tags that are not
+/// `v<version>` and releases of other software are skipped; the one chosen must be complete for
+/// this host.
+fn latest(body: &[u8]) -> Result<Option<Release>, String> {
+    let list: Vec<RawRelease> =
+        serde_json::from_slice(body).map_err(|_| "the release list is unreadable".to_string())?;
+    let newest = list
+        .into_iter()
+        .filter(|r| !r.prerelease)
+        .filter_map(|r| r.release().ok())
+        .filter(|r| r.version.stable() && r.is_cataly())
+        .max_by(|a, b| a.version.cmp(&b.version));
+    match newest {
+        Some(r) => r.complete().map(|()| Some(r)),
+        None => Ok(None),
     }
-    #[derive(Deserialize)]
-    struct Raw {
-        tag_name: String,
-        #[serde(default)]
-        draft: bool,
-        #[serde(default)]
-        assets: Vec<Asset>,
-    }
-    let raw: Raw = serde_json::from_slice(body)
-        .map_err(|_| "the release metadata is unreadable".to_string())?;
-    let version = Version::parse(&raw.tag_name)
-        .filter(|_| raw.tag_name.starts_with('v'))
-        .ok_or(format!("release tag '{}' is not v<version>", raw.tag_name))?;
-    if raw.draft {
-        return Err(format!("release {} is a draft", raw.tag_name));
-    }
-    Ok(Release {
-        tag: raw.tag_name,
-        version,
-        assets: raw
-            .assets
-            .into_iter()
-            .map(|a| (a.name, a.browser_download_url))
-            .collect(),
-    })
 }
 
 /// Downloads one asset into `dest` (created new, owner-only), at most `cap` bytes, following
@@ -511,5 +580,71 @@ mod tests {
         assert!(r.asset("nope").is_err());
         assert!(parse_release(br#"{"tag_name":"1.4.0"}"#).is_err());
         assert!(parse_release(br#"{"tag_name":"v1.4.0","draft":true}"#).is_err());
+    }
+
+    /// A release list entry with these asset names.
+    fn entry(tag: &str, prerelease: bool, draft: bool, names: &[String]) -> serde_json::Value {
+        let assets: Vec<_> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "browser_download_url": format!("https://x/{tag}/{n}")}))
+            .collect();
+        serde_json::json!({"tag_name": tag, "prerelease": prerelease, "draft": draft, "assets": assets})
+    }
+
+    fn full(version: &str) -> Vec<String> {
+        vec![
+            SUMS.into(),
+            SIGNATURE.into(),
+            binary_asset(version),
+            extension_asset(version),
+        ]
+    }
+
+    #[test]
+    fn latest_skips_prereleases_drafts_and_other_software() {
+        let foreign = vec!["omp-dori-linux-x64.tar.gz".to_string()];
+        let list = serde_json::json!([
+            entry("v0.9.0-rc.1", false, false, &full("0.9.0-rc.1")),
+            entry("v0.8.0", true, false, &full("0.8.0")),
+            entry("v0.7.0", false, true, &full("0.7.0")),
+            entry("v5.0.0", false, false, &foreign),
+            entry("v0.1.3", true, false, &foreign),
+            entry("dori-v9.0.0", false, false, &full("9.0.0")),
+            entry("v0.2.0", false, false, &full("0.2.0")),
+            entry("v0.1.9", false, false, &full("0.1.9")),
+        ]);
+        let r = latest(list.to_string().as_bytes()).unwrap().unwrap();
+        assert_eq!(r.tag, "v0.2.0");
+        assert_eq!(
+            r.asset(SUMS).unwrap(),
+            "https://x/v0.2.0/SHA256SUMS",
+            "the chosen release's own assets"
+        );
+
+        let none = serde_json::json!([
+            entry("v0.1.2", true, false, &foreign),
+            entry("v0.1.3", false, false, &foreign)
+        ]);
+        assert!(latest(none.to_string().as_bytes()).unwrap().is_none());
+        assert!(latest(b"[]").unwrap().is_none());
+        assert!(latest(b"{}").is_err());
+    }
+
+    #[test]
+    fn a_release_without_this_hosts_assets_is_refused() {
+        let mut names = full("0.3.0");
+        names.retain(|n| *n != binary_asset("0.3.0"));
+        let list = serde_json::json!([entry("v0.3.0", false, false, &names)]);
+        let why = latest(list.to_string().as_bytes()).unwrap_err();
+        assert!(
+            why.contains("v0.3.0") && why.contains(&binary_asset("0.3.0")),
+            "{why}"
+        );
+        let one = entry("v0.3.0", false, false, &names[..2]).to_string();
+        let why = parse_release(one.as_bytes())
+            .unwrap()
+            .complete()
+            .unwrap_err();
+        assert!(why.contains("cataly-0.3.0.ts"), "{why}");
     }
 }

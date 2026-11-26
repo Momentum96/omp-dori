@@ -735,11 +735,27 @@ Installing never starts the hub, writes config, enables a service or touches OMP
 link (IR requirement 20). Activation is one atomic rename of `current`, which switches binary and extension
 together; running OMP sessions keep the extension they loaded and the hello catches skew.
 
+**npm and Bun installs.** The npm package `cataly` holds only a launcher (`bin/cataly.js`, Node 18+ or Bun)
+that runs the binary of the platform package `cataly-<target>` (an optional dependency with `os`/`cpu` set,
+so only the matching one installs; no install scripts). That package holds `cataly` and `cataly.ts` side by
+side. A binary whose real path is `…/node_modules/cataly-<target>/cataly` is a package install: the hub links
+OMP's extension to the package's `cataly.ts` when it starts, the user service runs the package's binary
+directly (the path a global upgrade through the same package manager keeps), and `cataly update` hands the
+install step to the manager found from the path: npm under `<prefix>/lib/node_modules` (`npm install
+--global --prefix <prefix> cataly@<v>`), Bun under `<BUN_INSTALL>/install/global/node_modules` (`bun add
+--global cataly@<v>` with that `BUN_INSTALL`). The stop, restart and 30 s wait are the switch's; a new
+version that does not come up is replaced by the earlier one the same way. The program folder holds only
+the lock, the silenced version and the service marker; there is no rollback and no record. Package installs
+rest on the registry's own integrity check, not on the release signature (11.4).
+
 ### 11.3 Update check and rollback
 
-- The hub checks GitHub's latest stable release once per 24 h (first check 10 min after start, 15 s, 1 MiB) and
-  posts one owner notice per new version, never for a version the owner rolled back from. It never downloads or
-  installs by itself (IR-21, IR-22).
+- The hub checks GitHub's newest stable Cataly release once per 24 h (first check 10 min after start, 15 s,
+  1 MiB) and posts one owner notice per new version, never for a version the owner rolled back from. The
+  release repository also holds prereleases and releases of other software: the check reads the list of the
+  30 newest releases and takes the highest `v<major>.<minor>.<patch>` that is neither draft nor prerelease and
+  carries `SHA256SUMS` and `cataly-<v>.ts`; one that lacks this host's binary or the signature is refused by
+  name. `install.sh` makes the same choice. It never downloads or installs by itself (IR-21, IR-22).
 - `cataly update [--restart]`, `cataly rollback [--expect V] [--restart]`, `cataly status --install`,
   `cataly check`, `cataly uninstall`. One exclusive lock; distinct exit statuses for done, held, switched back,
   needs attention (IR requirement 34).
@@ -762,6 +778,10 @@ together; running OMP sessions keep the extension they loaded and the hello catc
   the executable format and the candidate's `version --json`, and only then switches.
 - From then on every update is verified by the running, already-trusted binary, so only the very first download
   rests on HTTPS alone.
+- Until CI runs again, `scripts/release.sh <version>` builds and signs a Linux x64 release on the owner's
+  machine (clean tree, Cargo version, `--locked`, `SOURCE_DATE_EPOCH`, key from `~/.config/cataly-release`
+  handed to cargo through `env` only) and packs the npm packages with `scripts/npm-pack.sh`. Publishing stays
+  a separate, manual step.
 
 ## 12. Owner decisions, resolved conflicts and open assumptions
 

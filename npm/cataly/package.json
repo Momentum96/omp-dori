@@ -1,0 +1,18 @@
+{
+	"name": "cataly",
+	"version": "0.0.0-source",
+	"description": "Cataly: a hub over OMP that you drive from Discord, Telegram or Slack",
+	"license": "SEE LICENSE IN LICENSE",
+	"homepage": "https://github.com/vntrevx/Cataly",
+	"bin": {
+		"cataly": "bin/cataly.js"
+	},
+	"files": ["bin/cataly.js", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.txt"],
+	"engines": {
+		"node": ">=18"
+	},
+	"optionalDependencies": {
+		"cataly-linux-x64": "0.0.0-source",
+		"cataly-darwin-arm64": "0.0.0-source"
+	}
+}

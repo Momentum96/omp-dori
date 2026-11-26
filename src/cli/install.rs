@@ -17,6 +17,7 @@ use crate::proto::{Status, method};
 use crate::sys::command::{KILL_GRACE, Output, Spec};
 use crate::sys::install::{self as layout_ops, Layout, Staged};
 use crate::sys::lock::{self, HubLock, LockOutcome};
+use crate::sys::package::{Manager, Package};
 use crate::sys::paths::Paths;
 use crate::sys::release::{self, Version};
 
@@ -488,7 +489,7 @@ async fn start_and_wait(l: &Layout, paths: &Paths, version: &str) -> Result<(), 
         crate::sys::service::start().await?;
     } else {
         use std::os::unix::process::CommandExt;
-        std::process::Command::new(l.command_target())
+        std::process::Command::new(l.binary_of(version))
             .arg("hub")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -524,7 +525,7 @@ const REFRESH_ENV: [&str; 6] = [
 /// hub starts with the definition that version writes. A binary from before `service refresh`
 /// keeps the definition as it is.
 async fn rewrite_service(l: &Layout, version: &str) -> Result<(), String> {
-    let binary = l.version_dir(version).join(layout_ops::BINARY);
+    let binary = l.binary_of(version);
     if !release::candidate_report(&binary).await?.service_refresh {
         return Ok(());
     }
@@ -569,8 +570,13 @@ async fn update(p: &Parsed, paths: &Paths) -> Outcome {
         Ok(g) => g,
         Err(o) => return o,
     };
+    if let Some(package) = &l.package {
+        return package_update(&l, package, p, paths).await;
+    }
     let Some(current) = l.current_version() else {
-        return Outcome::Held("Cataly is not installed here; use install.sh first".into());
+        return Outcome::Held(
+            "Cataly is not installed here; use install.sh, npm or Bun first".into(),
+        );
     };
     let restart = !p.flag("--no-restart");
     if let Err(e) = layout_ops::clear_staging(&l) {
@@ -603,6 +609,181 @@ async fn update(p: &Parsed, paths: &Paths) -> Outcome {
     let outcome = from_folder(&l, paths, &dir, &source, restart).await;
     let _ = std::fs::remove_dir_all(&dir);
     outcome
+}
+
+/// `cataly update [--tag <tag>] [--no-restart]` of an npm or Bun install: the package manager
+/// that installed this binary installs the release's version over it, with the same ordered stop,
+/// restart and wait as a switch. When the new version cannot run here, the earlier one is
+/// installed again the same way.
+async fn package_update(l: &Layout, package: &Package, p: &Parsed, paths: &Paths) -> Outcome {
+    let Some(manager) = &package.manager else {
+        return Outcome::Held(format!(
+            "this Cataly runs from {}, which no global npm or Bun install made; update it with \
+             the package manager that put it there",
+            package.dir.display()
+        ));
+    };
+    if p.value("--from").is_some() {
+        return Outcome::Held(format!(
+            "this Cataly was installed with {}; --from is for install.sh installs, so run \
+             `cataly update` without it",
+            manager.name()
+        ));
+    }
+    let current = release::VERSION;
+    let release = match fetch(paths, p.value("--tag")).await {
+        Ok(r) => r,
+        Err(e) => return Outcome::Held(e),
+    };
+    if Version::parse(current).is_some_and(|c| release.version <= c) {
+        return Outcome::Done(format!(
+            "cataly {current} is up to date ({} is the release)",
+            release.tag
+        ));
+    }
+    let version = release.version.to_string();
+    let answering = hub_version(paths).is_some();
+    let running = answering && !p.flag("--no-restart");
+    let closed = if running {
+        if let Err(why) = stop_hub(paths).await {
+            return Outcome::Held(why);
+        }
+        Some(Instant::now())
+    } else {
+        None
+    };
+    out::line(&format!(
+        "installing cataly {version} with {}",
+        manager.name()
+    ));
+    let installed = match manager.install(&version).await {
+        Ok(()) => installed_report(package, &version).await,
+        Err(e) => Err(e),
+    };
+    let report = match installed {
+        Ok(r) => r,
+        Err(why) => return package_back(l, package, manager, paths, current, running, why).await,
+    };
+    if let Err(Outcome::Held(why)) = omp_gate(&report.omp_minimum, false).await {
+        return match reinstall(l, package, manager, paths, current, running).await {
+            Ok(()) => Outcome::Held(format!("{why}; {current} was installed again")),
+            Err(e) => {
+                Outcome::NeedsAttention(format!("{why}; installing {current} again failed: {e}"))
+            }
+        };
+    }
+    let Some(closed) = closed else {
+        return if answering {
+            Outcome::Done(format!(
+                "cataly {current} -> {version}; the running hub stays on {current} until it restarts"
+            ))
+        } else {
+            Outcome::Done(format!("cataly {current} -> {version}"))
+        };
+    };
+    match start_and_wait(l, paths, &version).await {
+        Ok(()) => {
+            let answered = closed.elapsed().as_millis();
+            let sessions =
+                crate::jobs::update::resumed_text(owner_language(paths), resumed(paths).await);
+            let sessions = if sessions.is_empty() {
+                String::new()
+            } else {
+                format!("\n{sessions}")
+            };
+            Outcome::Done(format!(
+                "cataly {current} -> {version}; the new hub answered {answered} ms after the old one closed{sessions}"
+            ))
+        }
+        Err(why) => {
+            let _ = stop_hub(paths).await;
+            let why = format!("{version} did not come up ({why})");
+            package_back(l, package, manager, paths, current, true, why).await
+        }
+    }
+}
+
+/// The version report of the package's binary, which must be `version`.
+async fn installed_report(package: &Package, version: &str) -> Result<release::Report, String> {
+    let report = release::candidate_report(&package.binary()).await?;
+    if report.version == version {
+        Ok(report)
+    } else {
+        Err(format!(
+            "the package manager installed cataly {}, not {version}",
+            report.version
+        ))
+    }
+}
+
+/// After a failed package update: `current` installed again (unless it is still in place) and,
+/// when the hub ran, started again.
+async fn package_back(
+    l: &Layout,
+    package: &Package,
+    manager: &Manager,
+    paths: &Paths,
+    current: &str,
+    running: bool,
+    why: String,
+) -> Outcome {
+    let in_place = installed_report(package, current).await.is_ok();
+    let back = if in_place {
+        if running {
+            start_and_wait(l, paths, current).await
+        } else {
+            Ok(())
+        }
+    } else {
+        reinstall(l, package, manager, paths, current, running).await
+    };
+    match back {
+        Ok(()) if in_place && running => Outcome::Held(format!("{why}; {current} runs again")),
+        Ok(()) if in_place => Outcome::Held(format!("{why}; nothing changed")),
+        Ok(()) if running => Outcome::SwitchedBack(format!("{why}; {current} runs again")),
+        Ok(()) => Outcome::SwitchedBack(format!("{why}; {current} was installed again")),
+        Err(e) => Outcome::NeedsAttention(format!(
+            "{why}; {current} did not come back ({e}); install it with `{}`",
+            manager.install_hint(current)
+        )),
+    }
+}
+
+/// Installs `version` again through the package manager and, when `start`, starts its hub.
+async fn reinstall(
+    l: &Layout,
+    package: &Package,
+    manager: &Manager,
+    paths: &Paths,
+    version: &str,
+    start: bool,
+) -> Result<(), String> {
+    manager.install(version).await?;
+    installed_report(package, version).await?;
+    if start {
+        start_and_wait(l, paths, version).await?;
+    }
+    Ok(())
+}
+
+/// `cataly uninstall` of an npm or Bun install, after the service went: the extension link goes;
+/// the package manager removes the files it installed.
+fn package_uninstall(package: &Package) -> Outcome {
+    if let Err(e) = package.unlink_extension() {
+        return Outcome::NeedsAttention(e);
+    }
+    let then = package.manager.as_ref().map_or_else(
+        || {
+            format!(
+                "remove {} with the package manager that installed it",
+                package.dir.display()
+            )
+        },
+        |m| format!("run `{}` to remove the program", m.remove_hint()),
+    );
+    Outcome::Done(format!(
+        "removed the extension link; config and state are kept; {then}"
+    ))
 }
 
 /// Release metadata through the config's API base (a loopback fake in tests).
@@ -640,6 +821,14 @@ async fn rollback(p: &Parsed, paths: &Paths) -> Outcome {
         Ok(g) => g,
         Err(o) => return o,
     };
+    if let Some(manager) = l.package.as_ref().and_then(|p| p.manager.as_ref()) {
+        return Outcome::Held(format!(
+            "this Cataly was installed with {}, which keeps no previous version; install the one \
+             you want with `{}`",
+            manager.name(),
+            manager.install_hint("<version>")
+        ));
+    }
     let (Some(current), Some(previous)) = (l.current_version(), layout_ops::role(&l, "previous"))
     else {
         return Outcome::Held("there is no previous version to roll back to".into());
@@ -711,6 +900,9 @@ async fn uninstall(p: &Parsed, paths: &Paths) -> Outcome {
     if let Err(e) = crate::sys::service::disable(&l).await {
         return Outcome::Held(e);
     }
+    if let Some(package) = &l.package {
+        return package_uninstall(package);
+    }
     drop(lock);
     match layout_ops::remove_all(&l) {
         Ok(()) => Outcome::Done(format!(
@@ -736,7 +928,7 @@ async fn service(enable: bool, paths: &Paths) -> Outcome {
             Err(e) => Outcome::Held(e),
         };
     }
-    if l.current_version().is_none() {
+    if !l.installed() {
         return Outcome::Held(
             "install Cataly first; the service runs the installed command".into(),
         );
@@ -798,7 +990,7 @@ async fn refresh_service(paths: &Paths) -> Outcome {
     let done = match service_inputs(paths, &config) {
         Ok((path_line, env_path, _)) => {
             let unit = crate::sys::service::Unit {
-                command: &l.command,
+                command: &l.service_command(),
                 path: &path_line,
                 env_file: &env_path,
             };
@@ -854,7 +1046,7 @@ pub(super) async fn enable_service(
 ) -> Result<(PathBuf, Vec<String>), String> {
     let (path_line, env_path, keys) = service_inputs(paths, config)?;
     let unit = crate::sys::service::Unit {
-        command: &l.command,
+        command: &l.service_command(),
         path: &path_line,
         env_file: &env_path,
     };

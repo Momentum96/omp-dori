@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 (2026-11-26)
+
+The first public release. Releases now come from `github.com/vntrevx/Cataly`, for Linux x64
+(macOS arm64 follows once its build is published).
+
+- Install with npm or Bun as well as `install.sh`: `npm install --global cataly` or
+  `bun add --global cataly`. The package runs the same binary; the hub links its OMP extension
+  when it starts, and `cataly setup` makes the user service as before.
+- `cataly update` on an npm or Bun install updates through that package manager, with the same
+  ordered stop, restart, wait and lead resume as an `install.sh` install; if the new version does
+  not come up, the earlier one is installed again. The service it runs keeps working across
+  upgrades. `cataly rollback` and `cataly uninstall` say which package-manager command to use.
+- `install.sh`, `cataly update`, `cataly check` and the daily release notice take the newest
+  stable Cataly release: prereleases, drafts and other software's releases in the repository are
+  skipped, and a release without this host's files is refused with its name and what it lacks.
+- Everything from 0.1.x carries over: one-command `cataly setup`, the lead and lanes resuming
+  across updates and restarts, the `#cataly-ops` status panel and alerts, watch jobs, Discord,
+  Telegram and Slack rooms, and Discord voice.
+
 ## 0.1.5 (2026-11-26)
 
 - A held provider that no live session uses no longer turns the ops panel amber, and its spent

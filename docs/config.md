@@ -126,7 +126,10 @@ A new file also gets `[hub] log_level = "info"` and `[omp] path = "omp"`.
 
 ### `cataly service enable`
 
-Writes and starts the user service (systemd user unit on Linux, launchd agent on macOS). A service
+Writes and starts the user service (systemd user unit on Linux, launchd agent on macOS). It runs
+`~/.local/bin/cataly hub` for an `install.sh` install, and the binary inside the platform package
+(`…/node_modules/cataly-<platform>/cataly hub`) for an npm or Bun install: both paths stay the same
+across updates, and `cataly service refresh`, which update runs, writes the same one. A service
 does not see your shell's environment, so it:
 
 - sets `[omp] path` to the absolute path of OMP when the config names it bare;

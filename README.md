@@ -8,14 +8,24 @@ alive across restarts.
 
 ## Install
 
-Linux x86_64 or macOS arm64, with OMP 19.1.1 or newer installed:
+Linux x86_64 (macOS arm64 once its build is published), with OMP 19.1.1 or newer installed; an npm
+or Bun install also needs Node.js 18 or newer on PATH (the `cataly` launcher runs under `node`);
+`install.sh` does not need it. Releases in `vntrevx/Cataly` tagged before v0.2.0 (the OMP-Dori
+pre-releases) belong to an earlier, separate product and are not Cataly. One of:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vntrevx/cataly-core/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vntrevx/Cataly/main/install.sh | sh
+npm install --global cataly
+bun add --global cataly
 ```
 
-`install.sh` downloads the latest release, checks its hashes and signature, and installs `cataly`.
-It starts nothing and writes no configuration.
+`install.sh` picks the newest stable Cataly release on GitHub (`vntrevx/Cataly`; prereleases and
+releases of other software there are skipped), checks its hashes and signature, and installs
+`cataly` into the program folder with the command link `~/.local/bin/cataly`. npm and Bun install
+the `cataly` package, whose launcher runs the binary from the platform package
+`cataly-linux-x64` (or `cataly-darwin-arm64`) beside it; that package also holds the OMP
+extension, and the hub links it into OMP when it starts. None of them starts anything or writes
+configuration.
 
 ## Set up
 
@@ -68,6 +78,22 @@ is done. OMP sessions you started yourself are not the hub's and are never touch
 
 `cataly update --no-restart` installs without touching a running hub; the new version runs from
 the hub's next start. `cataly rollback` goes back to the previous version the same way.
+
+An npm or Bun install updates the same way, but the package manager that installed it does the
+install step: `cataly update` sees that it runs from `node_modules/cataly-<platform>`, stops the
+hub in order, runs `npm install --global cataly@<version>` (into the same npm prefix) or
+`bun add --global cataly@<version>` (with the same `BUN_INSTALL`), and starts the new hub from the
+same path; if the new version does not come up, the earlier one is installed again. The user
+service runs the binary inside the package folder, a path the next npm or Bun upgrade keeps.
+Such an install keeps no previous version: `cataly rollback` names the install command to use
+instead.
+
+## Uninstall
+
+Stop the hub (`cataly service disable` stops and removes the service setup made), then run
+`cataly uninstall`. It removes the extension link and, for an `install.sh` install, the program
+folder and the command link; for an npm or Bun install it names `npm uninstall --global cataly`
+or `bun remove --global cataly`. Config and state are kept.
 
 ## Where things live
 

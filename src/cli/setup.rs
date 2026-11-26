@@ -877,7 +877,7 @@ fn service(
     let flag = switch(p, "--service")?;
     let layout = Layout::of_running().map_err(Failure::Refused)?;
     let exists = layout.service_marker().exists();
-    let installed = layout.current_version().is_some();
+    let installed = layout.installed();
     let manager = if cfg!(target_os = "macos") {
         "launchd agent"
     } else {
@@ -921,7 +921,8 @@ fn service(
         (None, false, false) => {
             items.push(Item::new(
                 "service",
-                "off: this cataly is not an installed release; install.sh, then `cataly setup`",
+                "off: this cataly is not an installed release; install it with install.sh, npm or \
+                 Bun, then `cataly setup`",
                 false,
             ));
             ServiceStep::Keep
