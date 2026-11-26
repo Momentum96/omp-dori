@@ -23,6 +23,23 @@
 - An OMP that is slow to exit after end of input on a loaded host no longer fails the OMP probe
   when it ends at TERM; only a failed exit or one that needs KILL does. At hub shutdown each lane
   now gets the same 27 s as the lead, so a slow exit keeps its full TERM grace before any KILL.
+- The ops panel has a **📡 Watched channels** button. It opens a private Discord channel picker
+  with the watched channels already chosen. On submit the hub checks that the bot may view and
+  read the history of each newly picked channel (one call each) and refuses the whole pick,
+  naming the channel and the missing permission, if not. Then it writes `[discord] channels`
+  into the config file as it is at that moment (keeping your other lines, moving `home` to a
+  watched channel when needed, dropping unwatched channels from `others`), checks it as
+  `cataly config check` does and applies it as `cataly config reload` does. Only
+  `[discord] owner` may use it, from `[discord] guild`; an invalid result or a failed write
+  changes nothing. Channels past the picker's 25 are kept.
+- A change of `[discord] channels`, `home` or `others` alone, from the panel or
+  `cataly config reload`, now applies on the running Gateway connection: a new channel is read
+  from the moment the change was applied and catch-up after a reconnect covers it; a dropped one
+  stops being read at once. Before, any `[discord]` change restarted intake and opened a new
+  connection.
+- A watched channel the bot cannot read no longer stops Discord intake for every channel: it
+  leaves intake alone with one `relay.held` notice naming the missing permission, at start, on a
+  channel change or when a catch-up read meets it.
 
 ## 0.2.3 (2026-11-27)
 

@@ -208,13 +208,16 @@ pub(crate) fn normalise(raw: &Value, parent: Option<Snowflake>) -> Result<Inboun
     })
 }
 
-/// A component interaction (button press or select) or a modal submit, checked for shape.
+/// A component interaction (button press, string or channel select) or a modal submit, checked
+/// for shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Press {
     pub(crate) id: String,
     pub(crate) token: String,
     pub(crate) application: Snowflake,
     pub(crate) channel: Snowflake,
+    /// The server it came from; `None` in a direct message.
+    pub(crate) guild: Option<Snowflake>,
     pub(crate) message: Snowflake,
     pub(crate) custom_id: String,
     pub(crate) user: Option<Snowflake>,
@@ -233,7 +236,7 @@ impl Press {
             Some(3)
                 if matches!(
                     data.get("component_type").and_then(Value::as_u64),
-                    Some(2 | 3)
+                    Some(2 | 3 | 8)
                 ) =>
             {
                 false
@@ -295,6 +298,7 @@ impl Press {
             token: token.to_string(),
             application: id_of(raw.get("application_id"))?,
             channel: id_of(raw.get("channel_id"))?,
+            guild: id_of(raw.get("guild_id")),
             message: id_of(raw.get("message").and_then(|m| m.get("id")))?,
             custom_id: text_of(data, "custom_id")?.chars().take(100).collect(),
             user: id_of(user.and_then(|u| u.get("id"))),

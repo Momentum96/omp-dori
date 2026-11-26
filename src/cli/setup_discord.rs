@@ -19,7 +19,8 @@ use serde_json::{Value, json};
 
 use super::args::Parsed;
 use super::out;
-use super::setup::{self, Terminal};
+use super::setup::Terminal;
+use crate::config::file;
 use crate::config::{self, Config, Destination, sha256_hex};
 use crate::relay::discord::{API, ChannelRef, Rest, Snowflake};
 use crate::relay::http::Base;
@@ -824,26 +825,17 @@ pub(super) fn config_text(
 ) -> String {
     let c = &config.discord;
     if c.guild != Some(d.guild) {
-        text = setup::set_key(&text, "discord", "guild", &d.guild.to_string());
+        text = file::set_key(&text, "discord", "guild", &d.guild.to_string());
     }
     if c.owner != Some(d.owner) {
-        text = setup::set_key(&text, "discord", "owner", &d.owner.to_string());
+        text = file::set_key(&text, "discord", "owner", &d.owner.to_string());
     }
     if !c.channels.contains(&lead) {
         let mut channels = c.channels.clone();
         channels.push(lead);
-        let quoted: Vec<String> = channels
-            .iter()
-            .map(|c| setup::toml_string(&c.to_string()))
-            .collect();
-        text = setup::set_rendered(
-            &text,
-            "discord",
-            "channels",
-            &format!("[{}]", quoted.join(", ")),
-        );
+        text = file::set_rendered(&text, "discord", "channels", &file::string_list(&channels));
         if channels.len() > 1 && c.home.is_none() {
-            text = setup::set_key(&text, "discord", "home", &lead.to_string());
+            text = file::set_key(&text, "discord", "home", &lead.to_string());
         }
     }
     let dest = Destination::Discord {
@@ -851,8 +843,8 @@ pub(super) fn config_text(
     };
     if config.destinations.get(OPS) != Some(&dest) {
         let section = format!("destinations.{OPS}");
-        text = setup::set_key(&text, &section, "kind", "discord");
-        text = setup::set_key(&text, &section, "channel", &ops.to_string());
+        text = file::set_key(&text, &section, "kind", "discord");
+        text = file::set_key(&text, &section, "channel", &ops.to_string());
     }
     text
 }

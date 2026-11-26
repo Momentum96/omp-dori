@@ -17,14 +17,14 @@ pub(crate) mod voice;
 
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, watch};
 
 use crate::cli::exit;
-use crate::cli::setup::{Cleanup, remove_obsolete_hold};
+use crate::config::file::{Cleanup, remove_obsolete_hold};
 use crate::config::session::RuntimeKind;
 use crate::config::{self, Config};
 use crate::host::headless::Headless;
@@ -59,9 +59,6 @@ pub(crate) struct Hub {
     started_ms: i64,
     store: Store,
     jobs: Jobs,
-    config_tx: watch::Sender<Arc<Config>>,
-    /// SHA-256 of the config file as last applied, so `setup` can tell whether a saved file is live.
-    config_digest: Mutex<Option<String>>,
     control_latency: Latency,
     dedupe: Dedupe,
     shutdown: watch::Receiver<bool>,
@@ -87,12 +84,7 @@ impl Hub {
             Some(r) => r.sessions().err(),
             None => Some("OMP has not been probed yet".into()),
         };
-        let model = self
-            .config_tx
-            .borrow()
-            .lead
-            .as_ref()
-            .map(|l| l.model.clone());
+        let model = self.config().lead.as_ref().map(|l| l.model.clone());
         let lead = match model {
             Some(model) => {
                 let phase = serde_json::to_value(self.lead.view().await.phase)
@@ -113,12 +105,8 @@ impl Hub {
             state_dir: self.paths.state_dir.display().to_string(),
             config_file: self.paths.config_file.display().to_string(),
             config_error: self.jobs.ctx().config_error(),
-            config_digest: self
-                .config_digest
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-            jobs: self.config_tx.borrow().jobs.len(),
+            config_digest: self.jobs.ctx().config_digest(),
+            jobs: self.config().jobs.len(),
             jobs_running: self.jobs.running_count(),
             last_event_id,
             task_restarts: self.supervisor.restarts(),
@@ -134,7 +122,7 @@ impl Hub {
     /// The sessions brought back at start, once the lead and the lanes settled.
     fn resumed(&self) -> Option<crate::proto::Resumed> {
         let how = self.lead.settled()?;
-        let lead_start = self.config_tx.borrow().lead.is_some().then_some(how);
+        let lead_start = self.config().lead.is_some().then_some(how);
         let lane_names = self.lanes.resumed.get()?.clone();
         let not_running = lead_start == Some(crate::proto::LeadStart::NotRunning);
         let lead_reason = self.lead.refusal().filter(|_| not_running);
@@ -180,44 +168,8 @@ impl Hub {
         }
     }
 
-    /// Reloads the config file. An invalid file is refused and the running config stays in force.
-    async fn reload(&self) -> Result<usize, String> {
-        let digest = config::file_digest(&self.paths.config_file);
-        match config::load(&self.paths.config_file) {
-            Ok(config) => {
-                let jobs = config.jobs.len();
-                log::set_level(config.hub.log_level);
-                self.config_tx.send_replace(Arc::new(config));
-                self.jobs.ctx().set_config_error(None);
-                *self
-                    .config_digest
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = digest;
-                if let Err(e) = self.jobs.config_outcome(None).await {
-                    log::warn("config event not recorded", &[("error", &e)]);
-                }
-                log::info("config reloaded", &[("jobs", &jobs)]);
-                Ok(jobs)
-            }
-            Err(errors) => {
-                let text = config::describe(&errors);
-                self.jobs.ctx().set_config_error(Some(text.clone()));
-                if let Err(e) = self.jobs.config_outcome(Some(&text)).await {
-                    log::warn("config event not recorded", &[("error", &e)]);
-                }
-                log::warn(
-                    "config refused; the previous one stays in force",
-                    &[("error", &text)],
-                );
-                Err(format!(
-                    "config not applied, the previous one stays in force: {text}"
-                ))
-            }
-        }
-    }
-
     fn config(&self) -> Arc<Config> {
-        Arc::clone(&self.config_tx.borrow())
+        Arc::clone(&self.jobs.ctx().config.borrow())
     }
 
     /// Refuses the orderly stop while a session works or waits on a dialog (IR req. 33); busy
@@ -407,7 +359,6 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let (supervisor, mut exit_rx) = Supervisor::new(Policy::HUB, shutdown_rx.clone());
     let job_count = config.jobs.len();
-    let config_digest = config::file_digest(&paths.config_file);
     let (config_tx, config_rx) = watch::channel(Arc::new(config));
     let omp = Omp::new();
     let files = Files {
@@ -417,7 +368,7 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     };
     let ctx = Ctx::new(
         store.clone(),
-        config_rx.clone(),
+        config_tx,
         files,
         Arc::clone(&omp),
         shutdown_rx.clone(),
@@ -460,8 +411,6 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         started_ms: now_ms(),
         store: store.clone(),
         jobs: jobs.clone(),
-        config_tx,
-        config_digest: Mutex::new(config_digest),
         control_latency: Latency::default(),
         dedupe: Dedupe::new(),
         shutdown: shutdown_rx.clone(),
@@ -1061,7 +1010,7 @@ async fn wait_for_stop(
             _ = term.recv() => return exit::OK,
             _ = int.recv() => return exit::OK,
             _ = hup.recv() => {
-                let _ = hub.reload().await;
+                let _ = hub.jobs.reload().await;
             }
             changed = exit_rx.changed() => {
                 if changed.is_err() {

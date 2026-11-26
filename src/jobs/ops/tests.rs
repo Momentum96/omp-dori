@@ -501,3 +501,46 @@ fn the_live_omp_usage_renders_named_providers_and_green() {
         assert!(!text.contains("unknown"), "{text}");
     }
 }
+
+#[test]
+fn picked_keeps_hidden_channels_a_watched_home_and_watched_others() {
+    let id = |n: u64| Snowflake::parse(&(600 + n).to_string()).unwrap();
+    let settings = |channels: &[u64], home: Option<u64>| DiscordSettings {
+        channels: channels.iter().map(|n| id(*n)).collect(),
+        home: home.map(id),
+        ..DiscordSettings::default()
+    };
+    let pick = |channels: &[u64], home: Option<u64>, kept: usize| Picked {
+        channels: channels.iter().map(|n| id(*n)).collect(),
+        home: home.map(id),
+        others: None,
+        kept,
+    };
+    // One channel, home unset: two chosen make the current home explicit.
+    assert_eq!(
+        picked(&settings(&[1], None), &[id(1), id(2)]),
+        pick(&[1, 2], Some(1), 0)
+    );
+    // The current home dropped: the first chosen channel; duplicates are dropped.
+    assert_eq!(
+        picked(&settings(&[1, 2], Some(1)), &[id(3), id(2), id(3)]),
+        pick(&[3, 2], Some(3), 0)
+    );
+    // A home still watched stays; one channel left needs no home.
+    assert_eq!(
+        picked(&settings(&[1, 2], Some(2)), &[id(2)]),
+        pick(&[2], None, 0)
+    );
+    assert_eq!(picked(&settings(&[1], None), &[id(2)]), pick(&[2], None, 0));
+    // Channels past the picker's 25 are kept after the chosen ones.
+    let many: Vec<u64> = (0..27).collect();
+    assert_eq!(
+        picked(&settings(&many, Some(0)), &[id(5)]),
+        pick(&[5, 25, 26], Some(5), 2)
+    );
+    // A dropped channel leaves `others`; a watched one stays; untouched `others` is not written.
+    let mut now = settings(&[1, 2, 3], Some(1));
+    now.others = vec![id(2), id(3)];
+    assert_eq!(picked(&now, &[id(1), id(3)]).others, Some(vec![id(3)]));
+    assert_eq!(picked(&now, &[id(1), id(2), id(3)]).others, None);
+}

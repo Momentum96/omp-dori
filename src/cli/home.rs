@@ -170,7 +170,7 @@ impl Home {
     /// The config with the backup job set; other keys are kept.
     pub(super) fn config(&self, text: &str) -> String {
         let section = format!("jobs.{JOB}");
-        let mut text = super::setup::set_key(text, &section, "kind", "backup");
+        let mut text = crate::config::file::set_key(text, &section, "kind", "backup");
         for (key, value) in [
             ("dir", self.dir.display().to_string()),
             ("remote", "origin".to_string()),
@@ -178,9 +178,9 @@ impl Home {
             ("name", self.name.clone()),
             ("email", self.email.clone()),
         ] {
-            text = super::setup::set_key(&text, &section, key, &value);
+            text = crate::config::file::set_key(&text, &section, key, &value);
         }
-        super::setup::set_rendered(&text, &section, "include_cataly", "true")
+        crate::config::file::set_rendered(&text, &section, "include_cataly", "true")
     }
 
     pub(super) fn report(&self) -> Value {

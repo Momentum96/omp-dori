@@ -19,6 +19,11 @@ pub(crate) static THUMB_BYTES: &[u8] = include_bytes!("../../../assets/panel-thu
 pub(crate) const REFRESH: &str = "ops:refresh";
 pub(crate) const USAGE: &str = "ops:usage";
 pub(crate) const MUTE: &str = "ops:mute";
+pub(crate) const WATCH: &str = "ops:watch";
+/// The channel select the watch button opens.
+pub(crate) const WATCHED: &str = "ops:watched";
+/// Discord's most values in one select; the config allows more watched channels.
+pub(crate) const PICKER_MAX: usize = 25;
 
 /// Discord's embed limits (characters).
 const TITLE_MAX: usize = 256;
@@ -525,6 +530,7 @@ pub(crate) fn panel(p: &Panel, lang: Language, version: &str) -> Value {
             button(t(lang, "새로고침", "Refresh"), "🔄", REFRESH),
             button(t(lang, "사용량 자세히", "Usage details"), "📊", USAGE),
             mute,
+            button(t(lang, "감시 채널", "Watched channels"), "📡", WATCH),
         ]}],
     })
 }
@@ -637,6 +643,98 @@ pub(crate) fn usage_table(
 /// An ephemeral answer to a button press.
 pub(crate) fn private(text: &str) -> Value {
     json!({ "type": 4, "data": { "content": cut(text, 2000), "flags": 64, "allowed_mentions": { "parse": [] } } })
+}
+
+/// The owner's picker of watched channels: Discord's channel select (text and forum channels)
+/// with the first 25 watched channels chosen, ephemeral.
+pub(crate) fn watch_picker(watched: &[crate::relay::discord::Snowflake], lang: Language) -> Value {
+    let defaults: Vec<Value> = watched
+        .iter()
+        .take(PICKER_MAX)
+        .map(|c| json!({ "id": c.to_string(), "type": "channel" }))
+        .collect();
+    let rest = watched.len().saturating_sub(PICKER_MAX);
+    let mut text = t(
+        lang,
+        "📡 Cataly가 지켜볼 채널을 고르세요.",
+        "📡 Choose the channels Cataly watches.",
+    )
+    .to_string();
+    if rest > 0 {
+        let _ = match lang {
+            Language::Korean => write!(
+                text,
+                " 목록에 다 담기지 않는 {rest}개 채널은 그대로 지켜봐요."
+            ),
+            Language::English => write!(
+                text,
+                " The other {rest} watched channels do not fit in the list and stay watched."
+            ),
+        };
+    }
+    json!({ "type": 4, "data": {
+        "content": text,
+        "flags": 64,
+        "allowed_mentions": { "parse": [] },
+        "components": [{ "type": 1, "components": [{
+            "type": 8,
+            "custom_id": WATCHED,
+            "channel_types": [0, 15],
+            "min_values": 1,
+            "max_values": PICKER_MAX,
+            "default_values": defaults,
+        }]}],
+    }})
+}
+
+/// The picker's answer once the list is applied: the watched channels as mentions, in place of
+/// the picker. `kept` channels the picker could not show stay watched.
+pub(crate) fn watching(
+    channels: &[crate::relay::discord::Snowflake],
+    kept: usize,
+    lang: Language,
+) -> Value {
+    let mentions: Vec<String> = channels
+        .iter()
+        .take(PICKER_MAX)
+        .map(|c| format!("<#{c}>"))
+        .collect();
+    let mut text = format!(
+        "{} {}",
+        t(lang, "📡 지켜보는 채널:", "📡 Watching:"),
+        mentions.join(" ")
+    );
+    let more = channels.len().saturating_sub(PICKER_MAX);
+    if more > 0 {
+        let _ = match lang {
+            Language::Korean => write!(text, " 외 {more}개"),
+            Language::English => write!(text, " and {more} more"),
+        };
+    }
+    if kept > 0 {
+        let _ = match lang {
+            Language::Korean => write!(text, " (목록에 없던 {kept}개 채널은 그대로 둬요)"),
+            Language::English => {
+                write!(text, " ({kept} channels the list could not show are kept)")
+            }
+        };
+    }
+    replace(&text)
+}
+
+/// The picker's answer when nothing changed.
+pub(crate) fn watch_failed(why: &str, lang: Language) -> Value {
+    let head = t(
+        lang,
+        "⚠️ 감시 채널을 바꾸지 못했어요. 지금 설정을 그대로 써요:",
+        "⚠️ The watched channels were not changed; the running config stays:",
+    );
+    replace(&format!("{head} {why}"))
+}
+
+/// Replaces the ephemeral message a component sits on with one line and no components.
+fn replace(text: &str) -> Value {
+    json!({ "type": 7, "data": { "content": cut(text, 2000), "components": [], "allowed_mentions": { "parse": [] } } })
 }
 
 /// An open alert: a small embed with the thumbnail.
@@ -911,7 +1009,10 @@ pub(crate) mod tests {
             .iter()
             .map(|b| b["label"].as_str().unwrap())
             .collect();
-        assert_eq!(labels, ["새로고침", "사용량 자세히", "1시간 조용히"]);
+        assert_eq!(
+            labels,
+            ["새로고침", "사용량 자세히", "1시간 조용히", "감시 채널"]
+        );
         assert!(
             embed.get("timestamp").is_none(),
             "the time is added when sent"

@@ -85,6 +85,17 @@ impl fmt::Display for RestError {
 }
 
 impl RestError {
+    /// The channel permission a refused read lacks: View Channel when the channel cannot be seen
+    /// (50001, or 404), Read Message History when Discord says permissions are missing (50013).
+    /// `None` for any other failure.
+    pub(crate) fn missing_permission(&self) -> Option<&'static str> {
+        match (self.status, self.code) {
+            (_, Some(50001)) | (Some(404), _) => Some("View Channel"),
+            (_, Some(50013)) => Some("Read Message History"),
+            _ => None,
+        }
+    }
+
     fn from_outcome(outcome: Outcome) -> Self {
         match outcome {
             Outcome::Done(_) => Self {
@@ -649,6 +660,21 @@ impl Rest {
             )
             .await?;
         list(v, "Discord sent no message list")
+    }
+
+    /// Whether the bot may view the channel and read its history: one listing of its public
+    /// archived threads, which needs both, for text and forum channels alike. `Err` carries the
+    /// permission that is missing when Discord names it ([`RestError::missing_permission`]).
+    pub(crate) async fn readable(&self, channel: Snowflake) -> Result<(), RestError> {
+        self.call(
+            "GET channels/threads/archived",
+            Method::GET,
+            &format!("/channels/{channel}/threads/archived/public?limit=1"),
+            None,
+            Kind::Read,
+        )
+        .await
+        .map(drop)
     }
 
     pub(crate) async fn message(
