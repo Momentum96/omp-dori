@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (Unreleased)
+## 0.2.1 (2026-11-26)
 
 - Cataly is now open source under AGPL-3.0-only, with commercial licences available from vntrevx;
   the source is public at https://github.com/vntrevx/cataly-core.
