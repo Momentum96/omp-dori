@@ -424,6 +424,16 @@ async fn handle(
             .map_err(|e| e.to_string())?
         }
         method::FORGET => forget(&worker.hub),
+        method::FIND | method::VERIFY => {
+            let (worker, name) = (Arc::clone(worker), name.to_string());
+            tokio::time::timeout(
+                FILE_TIMEOUT,
+                tokio::task::spawn_blocking(move || transcript(&worker, &name, &params)),
+            )
+            .await
+            .map_err(|_| "the session file check took longer than 10 s".to_string())?
+            .map_err(|e| e.to_string())?
+        }
         other => Err(format!("unknown worker method {other}")),
     }
 }
@@ -664,4 +674,30 @@ fn forget(hub: &str) -> Result<Value, String> {
         crate::sys::fs::write_atomic(&path, kept.as_bytes()).map_err(|e| e.to_string())?;
     }
     Ok(json!({ "removed": removed }))
+}
+
+/// `find` and `verify`: the hub's own session-file parsers, run on the worker where the file is.
+fn transcript(worker: &Worker, name: &str, params: &Value) -> Result<Value, String> {
+    use crate::omp::transcript::{Folder, Found, exact, find_marker};
+    let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default();
+    let path = worker.confine(text("path"))?;
+    if name == method::FIND {
+        let found = match find_marker(&path, text("marker")).map_err(|e| e.to_string())? {
+            Found::Yes => "yes",
+            Found::No => "no",
+            Found::Missing => "missing",
+            Found::OutOfTime => "out_of_time",
+        };
+        return Ok(json!({ "found": found }));
+    }
+    let root = worker.confine(text("root"))?;
+    let folder = match (params.get("exactly"), params.get("recorded")) {
+        (Some(Value::String(dir)), _) => Folder::Exactly(PathBuf::from(dir)),
+        (_, Some(Value::String(dir))) => Folder::Recorded(PathBuf::from(dir)),
+        _ => return Err("verify needs exactly or recorded".into()),
+    };
+    let verified = exact(&path, &root, text("session"), &folder).map_err(|e| e.to_string())?;
+    Ok(verified.map_or(Value::Null, |t| {
+        json!({ "model": t.model, "cwd": t.cwd.display().to_string() })
+    }))
 }

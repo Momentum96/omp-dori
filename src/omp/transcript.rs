@@ -700,20 +700,60 @@ pub(crate) async fn read_replies(
         .map_err(|e| TranscriptError::Io(format!("reply task: {e}")))?
 }
 
-/// [`find_marker`] on the blocking pool.
+/// [`find_marker`] on the blocking pool; a worker's session file is searched on the worker.
 pub(crate) async fn search(path: PathBuf, marker: String) -> Result<Found> {
+    if let Some((worker, file)) = crate::worker::split_remote(&path) {
+        let link = crate::worker::link::connect(worker)
+            .await
+            .map_err(TranscriptError::Io)?;
+        let answer = link.find(file, &marker).await.map_err(TranscriptError::Io)?;
+        return match answer.get("found").and_then(Value::as_str) {
+            Some("yes") => Ok(Found::Yes),
+            Some("no") => Ok(Found::No),
+            Some("missing") => Ok(Found::Missing),
+            Some("out_of_time") => Ok(Found::OutOfTime),
+            _ => Err(TranscriptError::Io("the worker's search answer is unknown".into())),
+        };
+    }
     tokio::task::spawn_blocking(move || find_marker(&path, &marker))
         .await
         .map_err(|e| TranscriptError::Io(format!("search task: {e}")))?
 }
 
-/// [`exact`] on the blocking pool.
+/// [`exact`] on the blocking pool; a worker's session file is verified on the worker, its paths
+/// given as the hub records them (`worker:<name>:/path`).
 pub(crate) async fn verify(
     path: PathBuf,
     root: PathBuf,
     session: String,
     folder: Folder,
 ) -> Result<Option<Transcript>> {
+    if let Some((worker, file)) = crate::worker::split_remote(&path) {
+        let local = |p: &Path| {
+            crate::worker::split_remote(p).map_or_else(|| p.display().to_string(), |(_, f)| f.into())
+        };
+        let mut params = serde_json::json!({
+            "path": file,
+            "root": local(&root),
+            "session": session,
+        });
+        match &folder {
+            Folder::Exactly(d) => params["exactly"] = Value::String(local(d)),
+            Folder::Recorded(d) => params["recorded"] = Value::String(local(d)),
+        }
+        let link = crate::worker::link::connect(worker)
+            .await
+            .map_err(TranscriptError::Io)?;
+        let answer = link.verify(params).await.map_err(TranscriptError::Io)?;
+        if answer.is_null() {
+            return Ok(None);
+        }
+        let cwd = answer.get("cwd").and_then(Value::as_str).unwrap_or_default();
+        return Ok(Some(Transcript {
+            model: answer.get("model").and_then(Value::as_str).map(str::to_string),
+            cwd: PathBuf::from(cwd),
+        }));
+    }
     tokio::task::spawn_blocking(move || exact(&path, &root, &session, &folder))
         .await
         .map_err(|e| TranscriptError::Io(format!("verify task: {e}")))?

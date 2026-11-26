@@ -88,6 +88,9 @@ impl Runtime for Headless {
     async fn start(&self, spec: StartSpec) -> Result<(Arc<Session>, Started), StartError> {
         let token = super::random_hex(16);
         self.links.issue(&token, &spec.handle, spec.role);
+        if let Some(worker) = spec.worker.clone() {
+            return self.start_remote(spec, &worker, &token).await;
+        }
         let overlay = crate::omp::launch::overlay_path(&self.state, spec.role == super::Role::Lane);
         let argv = Launch {
             exe: &self.exe,
@@ -128,7 +131,94 @@ impl Runtime for Headless {
             spend_phrases: self.spend_phrases.clone(),
             agent_start: self.agent_start.clone(),
         };
-        Session::bind(rpc, rx, Some(child), spec, settings).await
+        Session::bind(rpc, rx, Proc::Child(Box::new(child)), spec, settings).await
+    }
+}
+
+impl Headless {
+    /// The same start on a worker (design 2.1): its own OMP, spawned over the worker stream, with
+    /// the overlay and instructions copied to its root, its session under `<root>/sessions`, no hub
+    /// credentials, and its bridge on the worker's socket. No PID is adopted: nothing of a remote
+    /// session acts on this machine.
+    async fn start_remote(
+        &self,
+        spec: StartSpec,
+        worker: &str,
+        token: &str,
+    ) -> Result<(Arc<Session>, Started), StartError> {
+        let refused = |e: String| StartError::Refused(format!("{worker}: {e}"));
+        let link = crate::worker::link::connect(worker).await.map_err(refused)?;
+        let root = PathBuf::from(&link.hello.root);
+        let copy = |local: &Path, dir: &str| {
+            let remote = root
+                .join(dir)
+                .join(local.file_name().unwrap_or_default());
+            (local.to_path_buf(), remote)
+        };
+        let lane = spec.role == super::Role::Lane;
+        let mut files = vec![copy(
+            &crate::omp::launch::overlay_path(&self.state, lane),
+            "settings",
+        )];
+        if let Some(file) = &spec.instructions {
+            files.push(copy(file, "settings"));
+        }
+        for (local, remote) in &files {
+            let bytes = std::fs::read(local).map_err(|e| refused(format!("{}: {e}", local.display())))?;
+            link.write(&remote.display().to_string(), &bytes)
+                .await
+                .map_err(refused)?;
+        }
+        let target = match &spec.target {
+            Target::Fresh(dir) => {
+                let remote = root
+                    .join("sessions")
+                    .join(dir.file_name().unwrap_or_default());
+                let mkdir = ["mkdir".to_string(), "-p".into(), remote.display().to_string()];
+                link.exec(&mkdir, None, &[], Duration::from_secs(10))
+                    .await
+                    .map_err(refused)?;
+                Target::Fresh(remote)
+            }
+            Target::Resume(file) => match crate::worker::split_remote(file) {
+                Some((w, path)) if w == worker => Target::Resume(PathBuf::from(path)),
+                _ => return Err(refused("the session file is not on this worker".into())),
+            },
+        };
+        let argv = Launch {
+            exe: Path::new("omp"),
+            model: &spec.model,
+            thinking: spec.thinking.as_deref(),
+            target: &target,
+            overlay: &files[0].1,
+            instructions: files.get(1).map(|(_, r)| r.as_path()),
+            extra: &self.extra_flags,
+            max_cost: spec.max_cost,
+            tools: spec.tools.as_deref(),
+        }
+        .argv();
+        let mut env: Vec<(String, String)> = crate::omp::child_env()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        env.push(("CATALY_LAUNCH".into(), token.to_string()));
+        let cwd = spec.cwd.display().to_string();
+        let (channel, stream, hold) = link.spawn(&argv, &cwd, &env).await.map_err(refused)?;
+        let (read, write) = tokio::io::split(stream);
+        let (tx, rx) = mpsc::channel(EVENT_QUEUE);
+        let rpc = Rpc::connect(read, write, READY_WITHIN, Some(tx))
+            .await
+            .map_err(|e| StartError::Failed(format!("no rpc-ui ready frame from {worker}: {e}")))?;
+        let settings = Settings {
+            spend_phrases: self.spend_phrases.clone(),
+            agent_start: self.agent_start.clone(),
+        };
+        let remote = Remote {
+            worker: worker.to_string(),
+            channel,
+            hold,
+        };
+        Session::bind(rpc, rx, Proc::Remote(Box::new(remote)), spec, settings).await
     }
 }
 
@@ -179,10 +269,20 @@ struct FallbackReport {
 }
 
 /// Who ended the child.
-enum Proc {
+pub(crate) enum Proc {
     Child(Box<Attached>),
+    /// OMP on a worker: the end of its channel's input closes it there by the same rule.
+    Remote(Box<Remote>),
     /// Tests: the transport is in-process and ends with the fake.
     Fake,
+}
+
+/// A session's OMP on a worker.
+pub(crate) struct Remote {
+    worker: String,
+    channel: u32,
+    /// Keeps the worker connection in use while the session lives.
+    hold: crate::worker::link::LaneHold,
 }
 
 /// The view token: changes with every child start (HOST req. 78).
@@ -196,6 +296,10 @@ struct Inner {
     requested_model: String,
     view: u64,
     pid: Option<u32>,
+    /// The worker the OMP runs on: its session file is recorded as `worker:<name>:<path>`.
+    worker: Option<String>,
+    /// Set when OMP's output has ended.
+    output_closed: watch::Sender<bool>,
     rpc: Rpc,
     proc: AsyncMutex<Option<Proc>>,
     state: Mutex<State>,
@@ -264,11 +368,15 @@ impl Session {
     pub(crate) async fn bind(
         rpc: Rpc,
         events: mpsc::Receiver<Value>,
-        child: Option<Attached>,
+        proc: Proc,
         spec: StartSpec,
         settings: Settings,
     ) -> Result<(Arc<Self>, Started), StartError> {
-        let pid = child.as_ref().and_then(Attached::pid);
+        let (pid, worker) = match &proc {
+            Proc::Child(c) => (c.pid(), None),
+            Proc::Remote(r) => (None, Some(r.worker.clone())),
+            Proc::Fake => (None, None),
+        };
         let now = now_ms();
         let inner = Arc::new(Inner {
             handle: spec.handle.clone(),
@@ -278,8 +386,10 @@ impl Session {
             requested_model: spec.model.clone(),
             view: VIEWS.fetch_add(1, Ordering::Relaxed) + 1,
             pid,
+            worker,
+            output_closed: watch::channel(false).0,
             rpc,
-            proc: AsyncMutex::new(Some(child.map_or(Proc::Fake, |c| Proc::Child(Box::new(c))))),
+            proc: AsyncMutex::new(Some(proc)),
             state: Mutex::new(State {
                 updated_ms: now,
                 ..State::default()
@@ -325,15 +435,21 @@ impl Session {
         if !Path::new(&first.session_file).is_absolute() {
             return Err("OMP reported a transcript path that is not absolute".into());
         }
+        // A worker's session file is recorded with its worker; the worker resolved its paths.
+        let reported_file = inner.recorded(&first.session_file);
         if let (Some(expected), Target::Resume(file)) = (&spec.expected_id, &spec.target) {
-            let reported = std::fs::canonicalize(&first.session_file).ok();
-            let requested = std::fs::canonicalize(file).ok();
-            if &first.session_id != expected || reported.is_none() || reported != requested {
+            let same = if inner.worker.is_some() {
+                Path::new(&reported_file) == file.as_path()
+            } else {
+                let reported = std::fs::canonicalize(&first.session_file).ok();
+                reported.is_some() && reported == std::fs::canonicalize(file).ok()
+            };
+            if &first.session_id != expected || !same {
                 return Err(format!(
                     "OMP resumed a different session: expected {expected} at {}, got {} at {}",
                     file.display(),
                     first.session_id,
-                    first.session_file
+                    reported_file
                 ));
             }
         }
@@ -360,7 +476,7 @@ impl Session {
         };
         {
             let mut st = inner.lock();
-            st.bound = Some((first.session_id.clone(), first.session_file.clone()));
+            st.bound = Some((first.session_id.clone(), reported_file.clone()));
             st.held.clone_from(&held);
             st.latest = Some(first.clone());
             st.fresh = true;
@@ -368,7 +484,7 @@ impl Session {
         }
         Ok(Started {
             session_id: first.session_id,
-            file: first.session_file,
+            file: reported_file,
             model: first.model,
             pid: inner.pid,
             held,
@@ -615,7 +731,7 @@ impl Inner {
             let mut st = self.lock();
             let mut fault = None;
             if let Some((id, file)) = &st.bound
-                && (id != &state.session_id || file != &state.session_file)
+                && (id != &state.session_id || *file != self.recorded(&state.session_file))
             {
                 fault = Some(format!(
                     "OMP switched transcripts: bound {id}, now {} at {}",
@@ -628,6 +744,7 @@ impl Inner {
                 );
             } else if state.idle()
                 && std::mem::take(&mut st.turn_done)
+                && self.worker.is_none()
                 && !Path::new(&state.session_file).exists()
             {
                 fault = Some("the transcript is missing after a completed turn".into());
@@ -741,6 +858,19 @@ impl Inner {
                     (Step::Input, exit) => ("exited".into(), Some(format!("{exit:?}"))),
                     (Step::Term, exit) => ("term".into(), Some(format!("needed TERM ({exit:?})"))),
                     (Step::Kill, exit) => ("kill".into(), Some(format!("needed KILL ({exit:?})"))),
+                }
+            }
+            Some(Proc::Remote(remote)) => {
+                // The worker closes its OMP by the same rule once its input ended; the output
+                // ends with it.
+                let mut closed = self.output_closed.subscribe();
+                let wait = CLOSE_WAIT + KILL_GRACE + Duration::from_secs(5);
+                let ended = timeout(wait, closed.wait_for(|c| *c)).await.is_ok();
+                if ended {
+                    (how.to_string(), detail)
+                } else {
+                    let _ = remote.hold.link().signal(remote.channel, "KILL").await;
+                    ("kill".into(), Some(format!("needed KILL on {}", remote.worker)))
                 }
             }
             Some(Proc::Fake) | None => (how.to_string(), detail),
@@ -1047,6 +1177,7 @@ async fn event_loop(inner: Arc<Inner>, mut events: mpsc::Receiver<Value>) {
     while let Some(frame) = events.recv().await {
         inner.on_frame(&frame).await;
     }
+    let _ = inner.output_closed.send(true);
     let asked = inner.lock().stopping;
     if asked {
         return;
@@ -1057,6 +1188,7 @@ async fn event_loop(inner: Arc<Inner>, mut events: mpsc::Receiver<Value>) {
             let (exit, _) = child.close(Duration::from_secs(1), KILL_GRACE).await;
             format!("{exit:?}")
         }
+        Some(Proc::Remote(remote)) => format!("output closed on {}", remote.worker),
         Some(Proc::Fake) | None => "output closed".into(),
     };
     log::warn(

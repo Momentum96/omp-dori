@@ -352,8 +352,27 @@ pub(crate) struct Link {
     used: Mutex<Instant>,
     /// Operations in flight.
     pending: AtomicUsize,
-    /// Remote lanes running on it.
+    /// Remote lanes running on it; a [`LaneHold`] counts one.
     pub(crate) lanes: AtomicUsize,
+    /// Channels of spawned OMP children the worker opened, until their `spawn` answer takes them.
+    spawned: Mutex<HashMap<u32, DuplexStream>>,
+    spawned_ready: tokio::sync::Notify,
+}
+
+/// One remote lane's hold on its connection: it is not idle while a lane runs on it.
+pub(crate) struct LaneHold(Arc<Link>);
+
+impl LaneHold {
+    pub(crate) fn link(&self) -> &Arc<Link> {
+        &self.0
+    }
+}
+
+impl Drop for LaneHold {
+    fn drop(&mut self) {
+        self.0.lanes.fetch_sub(1, Ordering::AcqRel);
+        self.0.touch();
+    }
 }
 
 impl Link {
@@ -413,6 +432,8 @@ impl Link {
             used: Mutex::new(Instant::now()),
             pending: AtomicUsize::new(0),
             lanes: AtomicUsize::new(0),
+            spawned: Mutex::new(HashMap::new()),
+            spawned_ready: tokio::sync::Notify::new(),
         });
         Ok((link, accepted))
     }
@@ -468,6 +489,99 @@ impl Link {
         finished_of(&reply)
     }
 
+    /// A file under the worker root, at most `max` bytes.
+    pub(crate) async fn read(&self, path: &str, max: u64) -> Result<Vec<u8>, String> {
+        let reply = self
+            .call(
+                method::READ,
+                json!({ "path": path, "max": max }),
+                Duration::from_secs(30),
+            )
+            .await?;
+        reply
+            .get("data")
+            .and_then(Value::as_str)
+            .and_then(crate::sys::base64::decode)
+            .ok_or_else(|| "read answer without data".into())
+    }
+
+    /// Writes a file under the worker root.
+    pub(crate) async fn write(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.call(
+            method::WRITE,
+            json!({ "path": path, "data": crate::sys::base64::encode(bytes) }),
+            Duration::from_secs(30),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Starts the worker's OMP with `argv` (the first word `omp`); returns its channel and stream:
+    /// the child's stdout to read, its stdin to write. Ending the stream's input closes the child.
+    pub(crate) async fn spawn(
+        self: &Arc<Self>,
+        argv: &[String],
+        cwd: &str,
+        env: &[(String, String)],
+    ) -> Result<(u32, DuplexStream, LaneHold), String> {
+        let env: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let reply = self
+            .call(
+                method::SPAWN,
+                json!({ "argv": argv, "cwd": cwd, "env": env }),
+                Duration::from_secs(30),
+            )
+            .await?;
+        let channel = reply
+            .get("channel")
+            .and_then(Value::as_u64)
+            .and_then(|c| u32::try_from(c).ok())
+            .ok_or("spawn answer without a channel")?;
+        // The open frame came first on the stream; its hand-over may still be on its way.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ready = self.spawned_ready.notified();
+            if let Some(stream) = self
+                .spawned
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&channel)
+            {
+                self.lanes.fetch_add(1, Ordering::AcqRel);
+                return Ok((channel, stream, LaneHold(Arc::clone(self))));
+            }
+            if tokio::time::timeout_at(deadline, ready).await.is_err() {
+                return Err("the spawned OMP's channel did not arrive".into());
+            }
+        }
+    }
+
+    /// TERM or KILL to a spawned child.
+    pub(crate) async fn signal(&self, channel: u32, signal: &str) -> Result<(), String> {
+        self.call(
+            method::SIGNAL,
+            json!({ "channel": channel, "signal": signal }),
+            Duration::from_secs(5),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// A delivery marker in a session file on the worker.
+    pub(crate) async fn find(&self, path: &str, marker: &str) -> Result<Value, String> {
+        self.call(
+            method::FIND,
+            json!({ "path": path, "marker": marker }),
+            Duration::from_secs(10),
+        )
+        .await
+    }
+
+    /// The resume check of a session file on the worker.
+    pub(crate) async fn verify(&self, params: Value) -> Result<Value, String> {
+        self.call(method::VERIFY, params, Duration::from_secs(20))
+            .await
+    }
     /// Ends the connection: the stream, then `ssh`.
     pub(crate) async fn close(&self) {
         self.mux.close();
@@ -545,8 +659,27 @@ pub(crate) struct View {
     pub(crate) tailscale: bool,
 }
 
-/// What a channel the worker opens is handed to: the hub's bridge (phase 2).
+/// What a bridge channel a worker opens is handed to: the hub's bridge.
 pub(crate) type ChannelHook = Arc<dyn Fn(String, Accepted) + Send + Sync>;
+
+/// The hub's one worker table, for the per-machine work of remote lanes (design 2.1 `Place`).
+static REGISTRY: OnceLock<Arc<Workers>> = OnceLock::new();
+
+/// The live connection to worker `name`, connecting when there is none.
+pub(crate) async fn connect(name: &str) -> Result<Arc<Link>, String> {
+    let workers = REGISTRY
+        .get()
+        .ok_or("no worker table: workers run only under the hub")?;
+    workers.connect(name).await
+}
+
+/// The hub's worker table.
+pub(crate) fn registry() -> Option<&'static Arc<Workers>> {
+    REGISTRY.get()
+}
+
+/// How long a failed connection is not tried again for a reachability question.
+const RETRY: Duration = Duration::from_mins(1);
 
 /// Every configured worker: its connection, if any, and its state.
 pub(crate) struct Workers {
@@ -558,6 +691,8 @@ pub(crate) struct Workers {
     records: Mutex<HashMap<String, Record>>,
     gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     hook: OnceLock<ChannelHook>,
+    /// When a connection last failed, per worker: reachability is asked again only after [`RETRY`].
+    failed: Mutex<HashMap<String, Instant>>,
 }
 
 impl Workers {
@@ -567,7 +702,7 @@ impl Workers {
         logs: PathBuf,
         store: Store,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let workers = Arc::new(Self {
             config,
             config_dir: config_file
                 .parent()
@@ -578,7 +713,35 @@ impl Workers {
             records: Mutex::new(HashMap::new()),
             gates: Mutex::new(HashMap::new()),
             hook: OnceLock::new(),
-        })
+            failed: Mutex::new(HashMap::new()),
+        });
+        let _ = REGISTRY.set(Arc::clone(&workers));
+        workers
+    }
+
+    /// Whether `name` answers now: a live connection, or a new one. A failure is not tried again
+    /// within a minute, so a queue sweep never waits on an offline worker each time.
+    pub(crate) async fn reachable(self: &Arc<Self>, name: &str) -> bool {
+        if self.live(name).is_some() {
+            return true;
+        }
+        let recent = self
+            .failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .is_some_and(|at| at.elapsed() < RETRY);
+        if recent {
+            return false;
+        }
+        let ok = self.connect(name).await.is_ok();
+        let mut failed = self.failed.lock().unwrap_or_else(PoisonError::into_inner);
+        if ok {
+            failed.remove(name);
+        } else {
+            failed.insert(name.to_string(), Instant::now());
+        }
+        ok
     }
 
     /// Where channels the workers open go.
@@ -726,9 +889,18 @@ impl Workers {
         loop {
             tokio::select! {
                 got = accepted.recv() => match got {
-                    Some(channel) => match self.hook.get() {
-                        Some(hook) => hook(link.name.clone(), channel),
-                        None => drop(channel),
+                    Some(channel) => match channel.header.get("kind").and_then(Value::as_str) {
+                        Some("spawn") => {
+                            link.spawned
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .insert(channel.channel, channel.stream);
+                            link.spawned_ready.notify_waiters();
+                        }
+                        _ => match self.hook.get() {
+                            Some(hook) => hook(link.name.clone(), channel),
+                            None => drop(channel),
+                        },
                     },
                     None => break,
                 },
