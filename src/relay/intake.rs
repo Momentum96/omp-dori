@@ -332,7 +332,10 @@ impl<R: Relay, T: Runtime> Round<R, T> {
     }
 
     async fn handle(&self, row: &QueueRow) -> Result<Step, String> {
-        let read_at = self.pipeline.read_at(&row.room, &row.message);
+        // A live arrival still committing: the next round hands it off with its read time.
+        let Ok(read_at) = self.pipeline.read_at(&row.room, &row.message) else {
+            return Ok(Step::Deferred);
+        };
         let inbound = match self.pipeline.relay.normalise(row) {
             Ok(i) => i,
             Err(fault) => {

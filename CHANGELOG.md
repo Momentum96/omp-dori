@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.5 (Unreleased)
+
+- A Telegram, Slack or Discord message read live is no longer handed to the lead by a round that
+  finds it queued before its arrival finished. Such a hand-off lost the message's wake from
+  `cataly stats` (`*_wake_latency`) and left its read time in the hub's memory for good. The
+  round now waits for the arrival, and no read time outlives its message, also when the message
+  leaves the queue without a hand-off (a reset, a channel leaving scope).
+
 ## 0.2.4 (2026-11-27)
 
 - The ops panel has a **📡 Watched channels** button. It opens a private Discord channel picker
