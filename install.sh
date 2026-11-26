@@ -23,8 +23,10 @@ fail() {
 
 case "$(uname -s) $(uname -m)" in
 "Linux x86_64") target=linux-x64 ;;
+"Linux aarch64" | "Linux arm64") target=linux-arm64 ;;
 "Darwin arm64") target=darwin-arm64 ;;
-*) fail "this host is $(uname -s) $(uname -m); Cataly runs on Linux x86_64 and macOS arm64" ;;
+"Darwin x86_64") target=darwin-x64 ;;
+*) fail "this host is $(uname -s) $(uname -m); Cataly runs on Linux and macOS, on x86_64 and arm64" ;;
 esac
 
 if command -v sha256sum >/dev/null 2>&1; then

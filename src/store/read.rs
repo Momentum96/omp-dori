@@ -72,7 +72,11 @@ impl Reads {
     /// A consistent copy of the whole store at `path` through SQLite's online backup, for the home
     /// backup (owner decision 16): never the live file, its WAL or its journal.
     pub(crate) fn snapshot_into(&self, path: &std::path::Path) -> rusqlite::Result<()> {
-        self.0.backup(rusqlite::MAIN_DB, path, None)
+        self.0.backup(
+            rusqlite::MAIN_DB,
+            path,
+            None::<fn(rusqlite::backup::Progress)>,
+        )
     }
 
     /// Events with an ID above `after`, oldest first.

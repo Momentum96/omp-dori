@@ -202,7 +202,7 @@ fn install_reinstall_and_refusals() {
     sign_folder(&d, [3; 32]);
     assert!(refused(&d, "bad signature").contains("does not match"));
     let d = copy("wrong-target");
-    let foreign: &[u8] = if target() == "linux-x64" {
+    let foreign: &[u8] = if target().starts_with("linux-") {
         &[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1, 0, 0, 0, 0]
     } else {
         &[

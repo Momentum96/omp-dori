@@ -94,7 +94,7 @@
 
 ### 必要なもの
 
-- Linux x86_64（macOS arm64 は対応予定）。
+- Linux または macOS、x86_64 または arm64（Apple Silicon と Intel Mac）。Windows には対応していません。
 - [OMP](https://omp.sh) 19.1.1 以降。
 - Discord ボット（作り方はセットアップが案内します）、または Telegram か Slack のボット。
 - npm と Bun でインストールする場合：`PATH` 上の Node.js 18 以降。
@@ -123,7 +123,7 @@ bun add --global cataly
 cataly setup
 ```
 
-セットアップはボットトークンを尋ねて招待リンクを表示し、残りを整えます。ホームルーム `#cataly`、ステータスルーム `#cataly-ops`、リードのモデル、承認ボタン、既定のジョブ、そしてハブを起動するユーザーサービス（systemd）です。あとは `#cataly` に書き込むだけです。
+セットアップはボットトークンを尋ねて招待リンクを表示し、残りを整えます。ホームルーム `#cataly`、ステータスルーム `#cataly-ops`、リードのモデル、承認ボタン、既定のジョブ、そしてハブを起動するユーザーサービス（Linux では systemd、macOS では launchd エージェント）です。あとは `#cataly` に書き込むだけです。
 
 ## 日常の使い方
 
@@ -141,7 +141,7 @@ cataly setup
 
 **初期リリース**
 
-現時点では Linux x86_64 のみです。Cataly は音声を含め Discord で日常的に使われています。Telegram と Slack はテストに合格していますが、実際の利用はまだ多くありません。
+最も使われているのは Linux x86_64 で、macOS と arm64 も同じテストに合格しています。Cataly は音声を含め Discord で日常的に使われています。Telegram と Slack はテストに合格していますが、実際の利用はまだ多くありません。
 
 </td></tr></table>
 
@@ -153,4 +153,4 @@ cataly setup
 
 ## ライセンス
 
-Cataly は [GNU AGPL 3.0](LICENSE) のオープンソースです。ソースはこのリポジトリにあります。AGPL の義務なしで使いたい場合は、[vntrevx](https://github.com/vntrevx) に商用ライセンスをお問い合わせください。Cataly は別途インストールする [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi) 上で動作します。サードパーティのライセンスは、各リリースの `THIRD-PARTY-NOTICES.txt` に同梱されています。
+Cataly は [GNU AGPL 3.0](LICENSE) のオープンソースです。ソースはこのリポジトリにあります。AGPL の義務なしで使いたい場合は、[vntrevx](https://github.com/vntrevx) に商用ライセンスをお問い合わせください。Cataly は別途インストールする [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi) 上で動作します。サードパーティのライセンスは、各リリースの `THIRD-PARTY-NOTICES-<target>.txt` に同梱されています。

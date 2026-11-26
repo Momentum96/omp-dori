@@ -118,7 +118,7 @@
 
 ### 요구 사항
 
-- Linux x86_64 (macOS arm64는 곧 지원)
+- Linux 또는 macOS, x86_64 또는 arm64 (Apple Silicon과 Intel Mac). Windows는 지원하지 않습니다.
 - [OMP](https://omp.sh) 19.1.1 이상
 - Discord 봇(설정 과정에서 만드는 법을 안내합니다), 또는 Telegram이나 Slack 봇
 - npm, Bun으로 설치할 때: `PATH`에 Node.js 18 이상
@@ -150,7 +150,7 @@ cataly setup
 
 봇 토큰을 묻고 초대 링크를 보여준 다음 나머지를 준비합니다. 홈 방 `#cataly`,
 상태 방 `#cataly-ops`, 리드 모델, 승인 버튼, 기본 작업, 그리고 허브를 띄우는 사용자
-서비스(systemd)입니다. 끝나면 `#cataly`에 글을 쓰세요.
+서비스(Linux는 systemd, macOS는 launchd 에이전트)입니다. 끝나면 `#cataly`에 글을 쓰세요.
 
 ## 평소 사용
 
@@ -169,7 +169,7 @@ cataly setup
 
 **초기 버전**
 
-지금은 Linux x86_64만 지원합니다. Discord(음성 포함)로는 매일 쓰고 있고,
+가장 많이 쓰인 환경은 Linux x86_64이고, macOS와 arm64도 같은 테스트를 통과합니다. Discord(음성 포함)로는 매일 쓰고 있고,
 Telegram과 Slack은 테스트는 통과했지만 실제 사용은 아직 적습니다.
 
 </td></tr></table>
@@ -186,4 +186,4 @@ Telegram과 Slack은 테스트는 통과했지만 실제 사용은 아직 적습
 Cataly는 [GNU AGPL 3.0](LICENSE) 오픈소스이며, 소스는 이 저장소에 있습니다. AGPL 의무 없이
 쓰고 싶다면 [vntrevx](https://github.com/vntrevx)에게 상용 라이선스를 문의해주세요.
 Cataly는 별도로 설치하는 [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi) 위에서
-돌아갑니다. 서드파티 라이선스는 모든 릴리스의 `THIRD-PARTY-NOTICES.txt`에 들어 있습니다.
+돌아갑니다. 서드파티 라이선스는 모든 릴리스의 `THIRD-PARTY-NOTICES-<target>.txt`에 들어 있습니다.

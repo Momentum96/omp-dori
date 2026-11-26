@@ -1,0 +1,12 @@
+{
+	"name": "cataly-linux-arm64",
+	"version": "0.0.0-source",
+	"description": "The Cataly binary and OMP extension for Linux arm64; install the cataly package",
+	"license": "AGPL-3.0-only",
+	"homepage": "https://github.com/vntrevx/Cataly",
+	"os": ["linux"],
+	"cpu": ["arm64"],
+	"libc": ["glibc"],
+	"files": ["cataly", "cataly.ts", "LICENSE", "THIRD-PARTY-NOTICES.txt"],
+	"preferUnplugged": true
+}

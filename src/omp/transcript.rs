@@ -1035,7 +1035,9 @@ mod tests {
     fn a_session_resumes_in_its_recorded_folder_beside_omps_session_folder() {
         use std::os::unix::fs::PermissionsExt;
         let base = crate::sys::fs::tests::scratch("owner-layout");
-        let home = base.join("home");
+        // The hub works below its canonical state folder (`sys::paths`); macOS's temporary folder
+        // lies below the `/var` symlink.
+        let home = fs::canonicalize(&*base).unwrap().join("home");
         let work = home.join("tmp");
         let state = home.join("state/cataly");
         let root = state.join("sessions/lead");

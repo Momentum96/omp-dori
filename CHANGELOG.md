@@ -3,6 +3,12 @@
 ## 0.2.2 (Unreleased)
 
 - The source and the releases now live together in vntrevx/Cataly.
+- Releases for macOS and Linux on arm64 and x64: `linux-x64`, `linux-arm64`, `darwin-arm64`
+  (Apple Silicon) and `darwin-x64` (Intel Macs). `install.sh`, `cataly update` and the npm and
+  Bun packages (`cataly-<target>`) pick the binary for the host. Windows is not supported.
+- On macOS, `cataly setup` makes a launchd agent (`~/Library/LaunchAgents/dev.cataly.hub.plist`)
+  where Linux gets a systemd user unit.
+- The store's bundled SQLite is 3.54 (rusqlite 0.41), past RUSTSEC-2026-0459.
 - Cataly sends no telemetry. The opt-in usage counts and the `[usage]` config table are gone; a
   config that still has a `[usage]` table is refused, so delete it.
 

@@ -26,6 +26,18 @@ pub mod telegram;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_cataly");
 
+/// `limit` stretched by `CATALY_TEST_PATIENCE` (a whole factor, default 1), which CI sets on the
+/// slower macOS runners. Only the time a test waits for something to happen grows: what it waits
+/// for, and every measured bound a test asserts, stay as they are.
+pub fn patience(limit: Duration) -> Duration {
+    let factor = std::env::var("CATALY_TEST_PATIENCE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|f| *f >= 1)
+        .unwrap_or(1);
+    limit * factor
+}
+
 /// The test admission floors `TestHub::write_config` adds.
 pub const ADMISSION: &str = "\n[jobs.test-admission]\nkind = \"pressure\"\nenabled = false\n\
     min_free_memory = 0\nmin_free_disk_gb = 0\nmax_sessions = 0\n";
@@ -161,7 +173,8 @@ impl TestHub {
     }
 
     pub fn wait_ready(&self) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let limit = patience(Duration::from_secs(10));
+        let deadline = Instant::now() + limit;
         while Instant::now() < deadline {
             if self
                 .try_request(r#"{"v":1,"id":1,"method":"status"}"#)
@@ -171,7 +184,7 @@ impl TestHub {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("hub did not answer within 10 s");
+        panic!("hub did not answer within {limit:?}");
     }
 
     pub fn pid(&self) -> u32 {
@@ -230,7 +243,7 @@ impl TestHub {
 
     pub fn wait_exit(&mut self, limit: Duration) -> std::process::ExitStatus {
         let child = self.child.as_mut().unwrap();
-        let deadline = Instant::now() + limit;
+        let deadline = Instant::now() + patience(limit);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 self.child = None;
@@ -244,6 +257,7 @@ impl TestHub {
     /// Polls `f` every 20 ms until it returns `Some`, for at most `limit`.
     #[allow(clippy::unused_self)]
     pub fn until<T>(&self, limit: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+        let limit = patience(limit);
         let deadline = Instant::now() + limit;
         loop {
             if let Some(v) = f() {
@@ -388,7 +402,7 @@ impl TestHub {
         let mut next = steps.next();
         let mut shown = String::new();
         let mut from = 0;
-        let deadline = Instant::now() + limit;
+        let deadline = Instant::now() + patience(limit);
         loop {
             let done = child.try_wait().unwrap();
             while let Ok(chunk) = rx.recv_timeout(Duration::from_millis(30)) {
