@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use support::TestHub;
+use support::{TestHub, output_of};
 
 /// The OMP side of one bridge connection.
 struct Bridge {
@@ -302,6 +302,51 @@ fn tern_lead_is_opened_in_a_block_and_controlled_through_the_bridge() {
         .status();
 }
 
+/// A compaction's recap waits for a delivery still in flight to the lead, whose reply only the
+/// bridge connection reads: 0.2.2 waited for the recap on that connection, read nothing more, and
+/// the delivery was in doubt after 10 s (CI, slow Intel macOS, on the first wake after a start).
+/// Here the recap is asked for while a wake awaits its reply; the reply is read and the wake
+/// confirmed.
+#[test]
+fn a_recap_never_holds_the_bridge_from_reading_replies() {
+    let (hub, work) = tern_hub(None);
+    let block = block_of(&hub);
+    let (token, pid) = (
+        block["token"].as_str().unwrap(),
+        block["pid"].as_u64().unwrap(),
+    );
+    let file = work.join("s1.jsonl");
+    std::fs::write(&file, "").unwrap();
+    let mut bridge = Bridge::connect(&hub.socket());
+    let welcome = bridge.request("bridge.hello", &hello(token, "s1", &file, pid));
+    assert_eq!(welcome["role"], "lead", "{welcome}");
+    hub.until(Duration::from_secs(20), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["phase"] == "live" && v["sent"] == 0 && v["waiting"] == 0).then_some(())
+    });
+    let idle = json!({ "idle": true, "session": "s1", "file": file });
+    let mut sending = hub.command(&["lead", "send", "hello"]).spawn().unwrap();
+    let cmd = bridge.command(&idle);
+    assert_eq!(cmd["op"], "deliver", "{cmd}");
+    bridge.event("s1", "session_compact", &json!({ "seq": 1 }));
+    std::thread::sleep(Duration::from_millis(500));
+    let id = cmd["id"].as_str().unwrap().to_string();
+    write_entry(&file, cmd["text"].as_str().unwrap(), &id);
+    bridge.reply(&cmd, json!({ "sent": true }));
+    bridge.event("s1", "agent_start", &json!({}));
+    bridge.event("s1", "agent_end", &json!({ "will_continue": false }));
+    assert!(sending.wait().unwrap().success());
+    hub.until(Duration::from_secs(30), || {
+        let v = hub.json(&["lead", "status", "--json"]);
+        (v["sent"] == 0).then_some(())
+    });
+    let log = std::fs::read_to_string(hub.state().join("logs/hub.log")).unwrap();
+    assert!(!log.contains("delivery in doubt"), "{log}");
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+}
+
 /// Check 6: with `tern` configured and its executable missing, starts are refused with a hint.
 #[test]
 fn a_missing_tern_executable_refuses_starts_with_an_install_hint() {
@@ -539,10 +584,9 @@ fn a_block_ends_when_its_owner_is_gone() {
         .spawn()
         .unwrap();
     hub.fixture("tern", "owner", Some(&owner.id().to_string()));
-    let out = std::process::Command::new(&tern)
-        .args(["new", "tab", "--json", "--", "sleep", "60"])
-        .output()
-        .unwrap();
+    let out = output_of(
+        std::process::Command::new(&tern).args(["new", "tab", "--json", "--", "sleep", "60"]),
+    );
     let id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["id"]
         .as_str()
         .unwrap()
@@ -559,6 +603,36 @@ fn a_block_ends_when_its_owner_is_gone() {
     hub.until(Duration::from_secs(10), || {
         (!running(wrapper.trim()) && !running(&program)).then_some(())
     });
+}
+
+/// An installed fake can be refused for a moment ("Text file busy") while a child another test
+/// thread is starting still holds a copy of the descriptor that wrote it; that broke the test above
+/// on CI. Here the test holds the fake open for writing for 200 ms, and `output_of` waits it out.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fake_held_open_for_writing_runs_once_released() {
+    let hub = TestHub::new("");
+    let tern = hub.install_fake("tern");
+    let writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&tern)
+        .unwrap();
+    let refused = std::process::Command::new(&tern)
+        .arg("--version")
+        .output()
+        .unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(writer);
+    });
+    let out = output_of(std::process::Command::new(&tern).arg("--version"));
+    release.join().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "tern 0.0.0 (test stand-in)\n"
+    );
 }
 
 /// A process still running with the sandbox on its command line when the hub is dropped fails the

@@ -38,6 +38,25 @@ pub fn patience(limit: Duration) -> Duration {
     limit * factor
 }
 
+/// Runs `cmd` to its end. Linux refuses to start a program while any process holds it open for
+/// writing ("Text file busy"), and a program this test process wrote a moment ago (an installed
+/// fake) can be held so by a child another test thread is starting, until that child's exec closes
+/// its copy of the descriptor. Such a start is retried for up to 2 s.
+pub fn output_of(cmd: &mut Command) -> Output {
+    let deadline = Instant::now() + patience(Duration::from_secs(2));
+    loop {
+        match cmd.output() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            out => return out.unwrap(),
+        }
+    }
+}
+
 /// The test admission floors `TestHub::write_config` adds.
 pub const ADMISSION: &str = "\n[jobs.test-admission]\nkind = \"pressure\"\nenabled = false\n\
     min_free_memory = 0\nmin_free_disk_gb = 0\nmax_sessions = 0\n";

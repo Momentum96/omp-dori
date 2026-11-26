@@ -20,6 +20,8 @@ pub(crate) enum ClientError {
     /// Nothing answers on the socket.
     NoHub,
     Io(std::io::Error),
+    /// The hub ended the connection without answering the request it was sent.
+    Closed,
     Protocol(String),
     Remote(ErrorBody),
     /// The socket's directory is not the owner's private one; nothing was sent.
@@ -31,6 +33,7 @@ impl fmt::Display for ClientError {
         match self {
             Self::NoHub => f.write_str("the hub is not running"),
             Self::Io(e) => write!(f, "control socket: {e}"),
+            Self::Closed => f.write_str("control socket: the hub closed the connection"),
             Self::Protocol(e) => write!(f, "control socket: {e}"),
             Self::Remote(body) => f.write_str(&body.message),
             Self::Unsafe(e) => write!(f, "control socket not used: {e}"),
@@ -145,9 +148,7 @@ impl Client {
     ) -> Result<Value, ClientError> {
         let id = self.send(method, params)?;
         loop {
-            let response = self
-                .receive(Some(timeout))?
-                .ok_or_else(|| ClientError::Protocol("the hub closed the connection".into()))?;
+            let response = self.receive(Some(timeout))?.ok_or(ClientError::Closed)?;
             if response.id != id && response.id != 0 {
                 continue;
             }

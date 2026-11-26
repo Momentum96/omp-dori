@@ -423,19 +423,33 @@ async fn restart_switch(
     }
 }
 
-/// Asks the hub to stop until it accepts, then waits for its socket to close. A busy session (the
-/// lead or a lane working or waiting on a dialog) refuses; it is never stopped, and after 60 s the
-/// owner is told, in his language, which session the switch waits for. Sessions the owner started
-/// with OMP himself are not the hub's and are never asked.
+/// Asks the hub to stop until it accepts, then waits for it to end. A busy session (the lead or a
+/// lane working or waiting on a dialog) refuses; it is never stopped, and after 60 s the owner is
+/// told, in his language, which session the switch waits for. Sessions the owner started with OMP
+/// himself are not the hub's and are never asked.
 async fn stop_hub(paths: &Paths) -> Result<(), String> {
+    stop_hub_within(paths, STOP_WAIT).await
+}
+
+/// [`stop_hub`], given up after `wait`.
+async fn stop_hub_within(paths: &Paths, wait: Duration) -> Result<(), String> {
     let language = owner_language(paths);
-    let deadline = Instant::now() + STOP_WAIT;
+    let deadline = Instant::now() + wait;
     let mut said = String::new();
     loop {
         let answer = Client::connect(&paths.socket)
             .and_then(|mut c| c.call(method::HUB_STOP, json!({}), Duration::from_secs(5)));
         match answer {
-            Ok(_) | Err(ClientError::NoHub | ClientError::Io(_)) => break,
+            Ok(_) | Err(ClientError::NoHub) => break,
+            // No answer: the hub may have accepted and ended before its answer was read. Only its
+            // end, seen in time, shows that it stopped.
+            Err(e @ (ClientError::Closed | ClientError::Io(_))) => {
+                return if ended_by(paths, deadline).await {
+                    Ok(())
+                } else {
+                    Err(format!("the hub did not stop: {e}; nothing changed"))
+                };
+            }
             Err(ClientError::Remote(body)) => {
                 let busy = body.message.trim_start_matches("busy: ").to_string();
                 if Instant::now() >= deadline {
@@ -450,13 +464,38 @@ async fn stop_hub(paths: &Paths) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
-    while hub_version(paths).is_some() {
+    if ended_by(paths, deadline).await {
+        Ok(())
+    } else {
+        Err("the hub accepted the stop but did not end in time; nothing changed".into())
+    }
+}
+
+/// Waits until the hub has ended or `deadline` has passed; whether it ended.
+async fn ended_by(paths: &Paths, deadline: Instant) -> bool {
+    loop {
+        if hub_gone(paths) {
+            return true;
+        }
         if Instant::now() >= deadline {
-            return Err("the hub's socket stayed open; nothing changed".into());
+            return false;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    Ok(())
+}
+
+/// Whether the hub has ended: no process holds its lock (DESIGN 2.1), which goes only as the hub
+/// exits, so a new hub can take it. Without a lock file in this command's state directory, the
+/// hub's socket being gone shows it.
+fn hub_gone(paths: &Paths) -> bool {
+    match lock::is_held(&paths.lock_file()) {
+        Ok(held) => !held,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::symlink_metadata(&paths.socket)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+        }
+        Err(_) => false,
+    }
 }
 
 /// The owner's language from the config file; the default when it is absent or invalid.
@@ -1171,5 +1210,90 @@ fn status(p: &Parsed) -> Result<(), Failure> {
             exit::NEEDS_ATTENTION,
             format!("{} problem(s) found", problems.len()),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::BufRead as _;
+    use std::os::unix::net::UnixListener;
+
+    use super::*;
+    use crate::sys::fs::tests::scratch;
+
+    /// A layout under `dir`, its state folder made and its socket in `dir`.
+    fn paths_in(dir: &Path) -> Paths {
+        let dir = dir.to_path_buf();
+        let paths = Paths::resolve(
+            |key| match key {
+                "HOME" => Some(dir.clone().into_os_string()),
+                "CATALY_SOCKET" => Some(dir.join("hub.sock").into_os_string()),
+                _ => None,
+            },
+            crate::sys::own_uid(),
+        )
+        .unwrap();
+        crate::sys::fs::ensure_private_dir(&paths.state_dir).unwrap();
+        paths
+    }
+
+    /// Binds the socket and takes the lock, as a hub does.
+    fn fake_hub(paths: &Paths) -> (UnixListener, HubLock) {
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        match lock::acquire(&paths.lock_file()).unwrap() {
+            LockOutcome::Acquired(held) => (listener, held),
+            LockOutcome::Held { .. } => panic!("the lock is taken"),
+        }
+    }
+
+    /// Reads one request and closes its connection unanswered, as a hub that ended before its
+    /// answer was written; returns the request.
+    fn close_unanswered(listener: &UnixListener) -> String {
+        let (stream, _) = listener.accept().unwrap();
+        let mut request = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut request)
+            .unwrap();
+        request
+    }
+
+    /// 0.2.2's race: the hub accepted the stop and ended before its answer was written. Here the
+    /// connection closes unanswered and the hub goes away 200 ms later: the stop counts.
+    #[tokio::test]
+    async fn a_stop_closed_unanswered_counts_once_the_hub_has_ended() {
+        let dir = scratch("stop");
+        let paths = paths_in(&dir);
+        let (listener, held) = fake_hub(&paths);
+        let socket = paths.socket.clone();
+        let hub = std::thread::spawn(move || {
+            let request = close_unanswered(&listener);
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::remove_file(&socket).unwrap();
+            drop(held);
+            request
+        });
+        stop_hub_within(&paths, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(hub.join().unwrap().contains(method::HUB_STOP));
+    }
+
+    /// A connection closed unanswered by a hub that stays is never taken for a stop.
+    #[tokio::test]
+    async fn a_stop_closed_unanswered_is_held_while_the_hub_stays() {
+        let dir = scratch("stop");
+        let paths = paths_in(&dir);
+        let (listener, _held) = fake_hub(&paths);
+        let hub = std::thread::spawn(move || close_unanswered(&listener));
+        let started = Instant::now();
+        let held = stop_hub_within(&paths, Duration::from_millis(500))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert_eq!(
+            held,
+            "the hub did not stop: control socket: the hub closed the connection; nothing changed"
+        );
+        assert!(hub.join().unwrap().contains(method::HUB_STOP));
     }
 }

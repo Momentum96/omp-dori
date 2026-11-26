@@ -509,7 +509,8 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         {
             relay_method(hub, relay, raw).await
         }
-        method::HUB_STOP => hub.request_stop().map(|()| Value::Null).map_err(refused),
+        // The stop begins once this acceptance is written (`socket::connection`).
+        method::HUB_STOP => hub.may_stop().map(|()| Value::Null).map_err(refused),
         voice if voice.starts_with("voice.") => voice_method(hub, voice, raw).await,
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,

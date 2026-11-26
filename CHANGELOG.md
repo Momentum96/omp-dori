@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.3 (Unreleased)
+
+- `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that
+  accepts the orderly stop now writes its acceptance before it begins to stop; before, a hub
+  that stopped quickly could close the connection first, and the update said "held: the hub did
+  not stop ... nothing changed" while the hub ended and was not started again. A connection
+  closed without an answer now counts as a stop only once the hub has ended within the minute,
+  and the new hub is started only once the old one has released its lock.
+- Installing or updating with `install.sh` no longer fails when Linux briefly refuses to start
+  the staged binary for its version report ("Text file busy"); the start is retried for up to
+  1 s.
+- A lead in a Tern terminal no longer has a message put in doubt ("the bridge did not answer
+  deliver within 10 s") when its session starts or compacts while a message is on its way. The
+  hub handed the lead its recap on the bridge connection itself and read nothing more from it
+  until then, so the bridge's answer waited behind a recap that waited for that answer. Seen on
+  the first message after a start on slow Intel Macs.
+
 ## 0.2.2 (2026-11-26)
 
 - The source and the releases now live together in vntrevx/Cataly.

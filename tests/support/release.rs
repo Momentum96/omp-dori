@@ -248,8 +248,10 @@ pub fn hub_version(hub: &TestHub) -> Option<String> {
     v["ok"]["version"].as_str().map(str::to_string)
 }
 
-/// Asks the hub to stop until it accepts, then waits for its socket to close. A session still
-/// finishing a turn refuses the stop, as it holds `cataly update`, so a refusal is asked again.
+/// Asks the hub to stop until it accepts, then waits for it to end: its socket closes, then it
+/// releases its lock as it exits, and a hub started before that refuses as already running. A
+/// session still finishing a turn refuses the stop, as it holds `cataly update`, so a refusal is
+/// asked again.
 pub fn stop_hub(hub: &TestHub) {
     let deadline = Instant::now() + super::patience(Duration::from_secs(90));
     let mut refused = false;
@@ -268,7 +270,14 @@ pub fn stop_hub(hub: &TestHub) {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
+    let lock = hub.root.join("state/cataly/hub.lock");
     hub.until(Duration::from_secs(30), || {
-        hub_version(hub).is_none().then_some(())
+        (hub_version(hub).is_none() && !lock_held(&lock)).then_some(())
     });
+}
+
+/// Whether a process holds the hub lock at `path` (a missing file is not held).
+fn lock_held(path: &Path) -> bool {
+    std::fs::File::open(path)
+        .is_ok_and(|f| matches!(f.try_lock_shared(), Err(std::fs::TryLockError::WouldBlock)))
 }
