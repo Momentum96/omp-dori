@@ -152,6 +152,9 @@ cataly setup
 상태 방 `#cataly-ops`, 리드 모델, 승인 버튼, 기본 작업, 그리고 허브를 띄우는 사용자
 서비스(Linux는 systemd, macOS는 launchd 에이전트)입니다. 끝나면 `#cataly`에 글을 쓰세요.
 
+`cataly setup --voice on`은 알맞은 기본값으로 Discord 음성 통화를 켭니다. 통화 요금은 사용자의
+OpenAI 키로 청구되며, 하루 30분, 3 USD로 제한됩니다.
+
 ## 평소 사용
 
 | 명령 | 하는 일 |

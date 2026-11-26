@@ -601,6 +601,22 @@ impl Rest {
         .await
     }
 
+    /// Creates one voice channel, under the same never-repeated rule as a text channel.
+    pub(crate) async fn create_voice_channel(
+        &self,
+        guild: Snowflake,
+        name: &str,
+    ) -> Result<Value, RestError> {
+        self.call(
+            "POST guilds/channels",
+            Method::POST,
+            &format!("/guilds/{guild}/channels"),
+            Some(json!({ "name": name, "type": 2 })),
+            Kind::Once,
+        )
+        .await
+    }
+
     /// The Gateway URL Discord names.
     pub(crate) async fn gateway_url(&self) -> Result<String, RestError> {
         let v = self

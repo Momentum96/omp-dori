@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.4 (Unreleased)
+
+- `cataly setup --voice on` turns on Discord voice calls in one command. It fills in every
+  `[voice]` key the config does not set yet: a voice channel (`--voice-channel <id|name>`, else
+  the server's only one, else `General`/`일반`, else a `Cataly` voice channel found or created),
+  the lead's home channel for the text, the models, voice and prices the live voice test uses, the
+  system time zone, the caps (30 minutes and 3 USD a day unless `--voice-daily-minutes` or
+  `--voice-cap-usd` say otherwise) and the key file (`--voice-key-file`, else
+  `secrets/voice-key`; without one setup stops before enabling anything). Keys you set are kept.
+  The summary says that calls cost money on your OpenAI key and shows the caps. `--voice off` turns
+  voice off and keeps the other keys. `cataly config check` now warns when voice is enabled but
+  would stay off, and names why.
+
 ## 0.2.3 (2026-11-27)
 
 - `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that

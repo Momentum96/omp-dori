@@ -8,6 +8,7 @@ mod lead;
 pub(crate) mod out;
 mod setup;
 mod setup_discord;
+mod setup_voice;
 mod slot;
 mod transcribe;
 
@@ -366,7 +367,7 @@ fn since_ms(text: &str) -> Option<i64> {
 fn config_check(path: &Path, as_json: bool) -> Result<(), Failure> {
     match config::load(path) {
         Ok(c) => {
-            let soon: Vec<String> = c
+            let mut soon: Vec<String> = c
                 .jobs
                 .values()
                 .filter_map(|j| match &j.trigger {
@@ -378,6 +379,9 @@ fn config_check(path: &Path, as_json: bool) -> Result<(), Failure> {
                     _ => None,
                 })
                 .collect();
+            if let config::voice::VoiceConfig::Refused(errors) = &c.voice {
+                soon.push(format!("voice stays off: {}", config::describe(errors)));
+            }
             if as_json {
                 out::json(&json!({
                     "valid": true, "file": path.display().to_string(), "jobs": c.jobs.len(),

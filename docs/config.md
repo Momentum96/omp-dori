@@ -85,6 +85,7 @@ Then the defaults, each applied only where the config says nothing yet:
 | Home backup | to `<gh login>/cataly-home`, private, created if absent, when `gh` is logged in (see [Home backup](#home-backup)) | `--backup on\|off`, `--backup-repo owner/name` |
 | Jobs | `[jobs.health]` and `[jobs.pressure]` with their defaults, notices to `#cataly-ops`, unless a job of that kind exists | |
 | Service | the user service, enabled and started (see [`cataly service enable`](#cataly-service-enable)); only for an installed release | `--service on\|off` |
+| Voice | off. `--voice on` turns on the [Discord voice assistant](#voice-and-transcribe) and fills in every `[voice]` key the file does not set (see below); `--voice off` sets `enabled = false` and keeps the rest | `--voice on\|off`, `--voice-channel <id\|name>`, `--voice-daily-minutes <n>`, `--voice-cap-usd <usd>`, `--voice-key-file <path>` |
 
 Setup then shows one short summary (a `+` marks what this run changes) and asks once; nothing
 changes before you say yes. `--yes` says yes in a script; without it and without a terminal setup
@@ -342,6 +343,32 @@ keys are not read, but a key that is not in the table below is an error at load 
 When enabled, a missing or invalid voice key turns voice off and names the
 field, but the rest of the configuration still applies. A build without the `voice` feature refuses
 `enabled = true` the same way. Voice also needs `[discord] guild` and `[discord] owner`.
+
+`cataly setup --voice on` writes `enabled = true` and fills in what the file does not set; keys you
+set are kept, and a later run changes only what a voice flag names:
+
+- `voice_channel`: the voice channel `--voice-channel <id|name>` names (a name that does not exist
+  is created), else the server's only voice channel, else the one named `General` or `일반`, else a
+  voice channel `Cataly`, found or created.
+- `text_channel`: the lead's home channel.
+- `speech_model = "gpt-live-1"`, `backend_model = "gpt-5.6-luna"`, `summary_model = "gpt-6-luna"`,
+  `voice = "marin"`; `backend_prices` and `summary_prices` 0.25 / 0.025 / 0.3 / 2.0 USD per million
+  tokens (input, cached input, cache write, output), `search_price = 0.01`,
+  `speech_price_per_minute = 0.06`. These are the starting values the live voice test also uses.
+  The prices only feed the spending cap's estimate, and they are yours to check: compare them with
+  [OpenAI's price list](https://openai.com/api/pricing/) and correct them in the file.
+- `zone`: the system's time zone.
+- `daily_minutes = 30` and `spending_cap_usd = 3.0`, or what `--voice-daily-minutes` and
+  `--voice-cap-usd` say.
+- `key_file`: the file `--voice-key-file` names, else `secrets/voice-key` when it exists. Cataly
+  does not look for a key OMP stores: OMP keeps provider keys in its own credential store and has
+  no public command that names a key file without reading the key. Without a key file setup stops
+  before it enables anything and asks you to save your OpenAI API key in `secrets/voice-key`
+  (`chmod 600`).
+
+The summary says plainly that calls cost money on your OpenAI key and shows the caps. On yes setup
+creates the voice channel if one is to be made, checks that voice would start with what it wrote,
+and asks a running hub to reload.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|

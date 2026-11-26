@@ -402,3 +402,174 @@ fn steps_that_need_the_owner_stop_a_script() {
     assert!(stderr.contains("--guild"), "{stderr}");
     assert_eq!(creates(&fake), Vec::<String>::new());
 }
+
+/// The flags of a scripted run that settles Discord and leaves the backup and service alone.
+fn script(token: &Path) -> Vec<String> {
+    [
+        "--discord-token-file",
+        token.to_str().unwrap(),
+        "--owner",
+        "100000000000000001",
+        "--backup",
+        "off",
+        "--service",
+        "off",
+    ]
+    .map(str::to_string)
+    .to_vec()
+}
+
+fn run_with(hub: &TestHub, base: &[String], more: &[&str]) -> (bool, Value, String) {
+    let mut args: Vec<&str> = base.iter().map(String::as_str).collect();
+    args.extend_from_slice(more);
+    json_run(hub, &args)
+}
+
+#[cfg(feature = "voice")]
+/// Saves the voice key where setup looks for it, owner-only.
+fn voice_key(hub: &TestHub) -> PathBuf {
+    let secrets = config_dir(hub).join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    let key = secrets.join("voice-key");
+    std::fs::write(&key, "voice-key-not-real").unwrap();
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    key
+}
+
+#[cfg(feature = "voice")]
+fn config_warnings(hub: &TestHub) -> Value {
+    let check = hub.cli(&["config", "check", "--json"]);
+    assert!(check.status.success(), "{check:?}");
+    let report: Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(report["valid"], true);
+    report["warnings"].clone()
+}
+
+#[cfg(feature = "voice")]
+#[test]
+fn voice_on_needs_a_key_then_fills_every_missing_key() {
+    let (hub, fake) = sandbox(false);
+    let token = hub.private_file("discord-token", TOKEN);
+    fake.join(GUILD, "home");
+    fake.named(LEAD, "cataly", 0, GUILD);
+    let base = script(&token);
+
+    // No key file: the run stops before it enables anything or creates a channel.
+    let (ok, _, stderr) = run_with(&hub, &base, &["--voice", "on", "--yes"]);
+    assert!(!ok);
+    assert!(stderr.contains("secrets/voice-key"), "{stderr}");
+    assert!(stderr.contains("chmod 600"), "{stderr}");
+    assert!(!read(&hub.config_path()).contains("[voice]"));
+    assert_eq!(creates(&fake), Vec::<String>::new());
+
+    // With the key and no voice channel, a `Cataly` voice channel is created.
+    let key = voice_key(&hub);
+    let (ok, done, stderr) = run_with(&hub, &base, &["--voice", "on", "--yes"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(done["applied"], true);
+    let cost = item(&done, "voice cost")["value"].as_str().unwrap();
+    assert!(cost.contains("cost money on your OpenAI key"), "{cost}");
+    assert!(cost.contains("30 minutes and 3.0 USD a day"), "{cost}");
+    assert_eq!(creates(&fake), ["cataly-ops", "Cataly"]);
+    let made = fake.calls("POST", "/guilds/");
+    assert_eq!(made[1].body["type"], 2);
+    let text = read(&hub.config_path());
+    for line in [
+        "enabled = true",
+        &format!("text_channel = \"{LEAD}\""),
+        "speech_model = \"gpt-live-1\"",
+        "backend_model = \"gpt-5.6-luna\"",
+        "summary_model = \"gpt-6-luna\"",
+        "voice = \"marin\"",
+        "backend_prices = { input = 0.25, cached_input = 0.025, cache_write = 0.3, output = 2.0 }",
+        "search_price = 0.01",
+        "speech_price_per_minute = 0.06",
+        "daily_minutes = 30",
+        "spending_cap_usd = 3.0",
+        &format!("key_file = \"{}\"", key.display()),
+    ] {
+        assert!(text.contains(line), "{line} missing:\n{text}");
+    }
+    assert!(
+        text.contains("voice_channel = \"") && text.contains("zone = \""),
+        "{text}"
+    );
+    assert_eq!(config_warnings(&hub), json!([]), "voice would start");
+
+    // Again: nothing changes.
+    let (ok, again, stderr) = run_with(&hub, &base, &["--voice", "on"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(again["action"], "keep", "{again}");
+}
+
+#[cfg(feature = "voice")]
+#[test]
+fn voice_on_keeps_the_keys_already_set() {
+    let (hub, fake) = sandbox(false);
+    let token = hub.private_file("discord-token", TOKEN);
+    fake.join(GUILD, "home");
+    fake.named(LEAD, "cataly", 0, GUILD);
+    let general = "500000000000000020";
+    fake.named(general, "General", 2, GUILD);
+    fake.named("500000000000000021", "Music", 2, GUILD);
+    voice_key(&hub);
+    let mut text = read(&hub.config_path());
+    text.push_str("\n# my voice\n[voice]\nvoice = \"cedar\"\ndaily_minutes = 10\n");
+    hub.write_config(&text);
+    let base = script(&token);
+    let (ok, done, stderr) = run_with(
+        &hub,
+        &base,
+        &["--voice", "on", "--voice-cap-usd", "5", "--yes"],
+    );
+    assert!(ok, "{stderr}");
+    assert_eq!(
+        creates(&fake),
+        ["cataly-ops"],
+        "General is the voice channel"
+    );
+    let cost = item(&done, "voice cost")["value"].as_str().unwrap();
+    assert!(cost.contains("10 minutes and 5.0 USD a day"), "{cost}");
+    let text = read(&hub.config_path());
+    for line in [
+        "# my voice",
+        "voice = \"cedar\"",
+        "daily_minutes = 10",
+        "spending_cap_usd = 5.0",
+        &format!("voice_channel = \"{general}\""),
+        "enabled = true",
+    ] {
+        assert!(text.contains(line), "{line} missing:\n{text}");
+    }
+    assert!(
+        !text.contains("marin") && !text.contains("daily_minutes = 30"),
+        "{text}"
+    );
+    assert_eq!(config_warnings(&hub), json!([]));
+}
+
+#[test]
+fn voice_off_keeps_the_other_keys() {
+    let (hub, fake) = sandbox(false);
+    let token = hub.private_file("discord-token", TOKEN);
+    fake.join(GUILD, "home");
+    fake.named(LEAD, "cataly", 0, GUILD);
+    let mut text = read(&hub.config_path());
+    text.push_str(
+        "\n[voice]\nenabled = true\nvoice_channel = \"500000000000000020\"\nvoice = \"cedar\"\n",
+    );
+    hub.write_config(&text);
+    let (ok, done, stderr) = run_with(&hub, &script(&token), &["--voice", "off", "--yes"]);
+    assert!(ok, "{stderr}");
+    assert_eq!(item(&done, "voice")["change"], true);
+    let text = read(&hub.config_path());
+    for line in [
+        "enabled = false",
+        "voice_channel = \"500000000000000020\"",
+        "voice = \"cedar\"",
+    ] {
+        assert!(text.contains(line), "{line} missing:\n{text}");
+    }
+    assert!(!text.contains("enabled = true"), "{text}");
+    assert_eq!(creates(&fake), ["cataly-ops"]);
+}

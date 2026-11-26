@@ -484,7 +484,7 @@ fn set_value(
 }
 
 /// `on` or `off` from a flag such as `--approvals`.
-fn switch(p: &Parsed, flag: &str) -> Result<Option<bool>, Failure> {
+pub(super) fn switch(p: &Parsed, flag: &str) -> Result<Option<bool>, Failure> {
     p.value(flag)
         .map(|v| match v {
             "on" => Ok(true),
@@ -495,7 +495,7 @@ fn switch(p: &Parsed, flag: &str) -> Result<Option<bool>, Failure> {
 }
 
 /// Whether the TOML text sets `key` in `[section]` (a dotted section names nested tables).
-fn in_file(text: &str, section: &str, key: &str) -> bool {
+pub(super) fn in_file(text: &str, section: &str, key: &str) -> bool {
     let table = toml::from_str::<toml::Table>(text).ok();
     let mut at = table.as_ref();
     for part in section.split('.') {
@@ -505,14 +505,14 @@ fn in_file(text: &str, section: &str, key: &str) -> bool {
 }
 
 /// One line of the summary: what, its value, and whether this run changes it.
-struct Item {
+pub(super) struct Item {
     what: &'static str,
     value: String,
     change: bool,
 }
 
 impl Item {
-    fn new(what: &'static str, value: impl Into<String>, change: bool) -> Self {
+    pub(super) fn new(what: &'static str, value: impl Into<String>, change: bool) -> Self {
         Self {
             what,
             value: value.into(),
@@ -536,6 +536,7 @@ struct Decided {
     home: Option<super::home::Home>,
     service: ServiceStep,
     items: Vec<Item>,
+    voice: Option<super::setup_voice::Pending>,
 }
 
 pub(super) fn run(p: &Parsed, paths: &Paths, as_json: bool) -> Result<(), Failure> {
@@ -741,6 +742,8 @@ fn decide(
             profile = plan.set;
         }
     }
+    let (mut text, voice) =
+        super::setup_voice::decide(p, paths, planned, text, discord.as_ref(), &mut items)?;
     text = lead(planned, text, &mut items);
     let (text, home) = backup(p, paths, planned, text, &mut items)?;
     let text = jobs(planned, text, discord.is_some(), &mut items);
@@ -752,6 +755,7 @@ fn decide(
         home,
         service,
         items,
+        voice,
     })
 }
 
@@ -949,7 +953,7 @@ fn print_summary(paths: &Paths, items: &[Item], creating: bool, pending: bool) {
     }
     out::line(
         "Change later with cataly setup --lead-model provider/id, --approvals off, --backup off, \
-         --service off, --profile, or by editing the file.",
+         --service off, --voice on|off, --profile, or by editing the file.",
     );
 }
 
@@ -966,6 +970,9 @@ fn apply(
     if let Some(d) = &mut decided.discord {
         let (lead, ops) = block_on(d.create_missing()).map_err(Failure::Refused)?;
         text = discord::config_text(planned, text, d, lead, ops);
+        if let Some(v) = &decided.voice {
+            text = super::setup_voice::apply(v, d, text).map_err(Failure::Refused)?;
+        }
         if !decided.profile.is_empty() {
             match block_on(d.set_profile(&paths.state_dir, &decided.profile)) {
                 Ok(()) => notes.push(format!("bot {} set", decided.profile.join(" and "))),

@@ -659,6 +659,51 @@ impl Discord {
         }
     }
 
+    /// The server's voice channels, as (ID, name), read now.
+    pub(super) async fn voice_channels(&self) -> Result<Vec<(Snowflake, String)>, String> {
+        let all = self
+            .rest
+            .guild_channels(self.guild)
+            .await
+            .map_err(|e| format!("reading the server's channels: {e}"))?;
+        Ok(all
+            .iter()
+            .filter(|c| c.get("type").and_then(Value::as_u64) == Some(2))
+            .filter_map(|c| {
+                let id = c
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(Snowflake::parse)?;
+                let name = c.get("name").and_then(Value::as_str).unwrap_or_default();
+                Some((id, name.to_string()))
+            })
+            .collect())
+    }
+
+    /// Creates the voice channel `name` (after the owner's yes). Never repeated after an uncertain
+    /// outcome: the next run finds it by name.
+    pub(super) async fn create_voice(&self, name: &str) -> Result<Snowflake, String> {
+        match self.rest.create_voice_channel(self.guild, name).await {
+            Ok(v) => v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(Snowflake::parse)
+                .filter(|_| v.get("name").and_then(Value::as_str) == Some(name))
+                .ok_or_else(|| {
+                    format!("Discord's answer named no voice channel {name}; run setup again, it finds the channel if it was made")
+                }),
+            Err(e) if e.status == Some(403) => Err(format!(
+                "the bot may not create channels ({e}): give it Manage Channels by opening {}, \
+                 or create the voice channel {name} yourself, then run setup again",
+                self.found.invite.as_deref().unwrap_or(INVITE)
+            )),
+            Err(e) if e.uncertain => Err(format!(
+                "Discord did not confirm the voice channel {name} ({e}); run setup again, it finds the channel if it was made"
+            )),
+            Err(e) => Err(format!("creating the voice channel {name}: {e}")),
+        }
+    }
+
     /// What the profile step does with the bot's avatar and banner and the application's icon. An
     /// image is set when there is none, when it is the one Cataly set earlier but Cataly's default
     /// changed since, or always with `force` (`--profile`); one the owner set by hand is kept.

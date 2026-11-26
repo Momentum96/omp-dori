@@ -39,6 +39,7 @@
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use cataly_voice::settings::starting;
 use cataly_voice::{
     CallAudio, Day, Io, LedgerError, Passed, Posted, Prices, Reply, Settings, StatusPart,
     StatusRead, Transport, VoiceHost,
@@ -315,7 +316,7 @@ fn gate() -> Gate {
         frames: recording(&rec),
         base: env("CATALY_LIVE_VOICE_API_BASE").unwrap_or_else(|| "https://api.openai.com".into()),
         speech_usd_per_min: env("CATALY_LIVE_VOICE_SPEECH_USD_PER_MIN")
-            .map_or(0.06, |v| v.parse().unwrap()),
+            .map_or(starting::SPEECH_PRICE_PER_MINUTE, |v| v.parse().unwrap()),
     }
 }
 
@@ -326,29 +327,19 @@ fn settings(g: &Gate, transport: Transport) -> Settings {
         owner: 2,
         voice_channel: 3,
         text_channel: TEXT,
-        speech_model: name("CATALY_LIVE_VOICE_SPEECH_MODEL", "gpt-live-1"),
-        backend_model: name("CATALY_LIVE_VOICE_BACKEND_MODEL", "gpt-5.6-luna"),
-        summary_model: name("CATALY_LIVE_VOICE_SUMMARY_MODEL", "gpt-6-luna"),
-        voice: name("CATALY_LIVE_VOICE_VOICE", "marin"),
+        speech_model: name("CATALY_LIVE_VOICE_SPEECH_MODEL", starting::SPEECH_MODEL),
+        backend_model: name("CATALY_LIVE_VOICE_BACKEND_MODEL", starting::BACKEND_MODEL),
+        summary_model: name("CATALY_LIVE_VOICE_SUMMARY_MODEL", starting::SUMMARY_MODEL),
+        voice: name("CATALY_LIVE_VOICE_VOICE", starting::VOICE),
         backend_prices: prices(
             "CATALY_LIVE_VOICE_BACKEND_USD_PER_MTOK",
-            Prices {
-                input: 0.25,
-                cached_input: 0.025,
-                cache_write: 0.3,
-                output: 2.0,
-            },
+            starting::BACKEND_PRICES,
         ),
         summary_prices: prices(
             "CATALY_LIVE_VOICE_SUMMARY_USD_PER_MTOK",
-            Prices {
-                input: 0.25,
-                cached_input: 0.025,
-                cache_write: 0.3,
-                output: 2.0,
-            },
+            starting::SUMMARY_PRICES,
         ),
-        search_price: 0.01,
+        search_price: starting::SEARCH_PRICE,
         reasoning_effort: "low".into(),
         preferences: String::new(),
         zone: "UTC".into(),

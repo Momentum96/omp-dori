@@ -125,6 +125,8 @@ cataly setup
 
 设置会询问你的机器人令牌并打印邀请链接，然后配置其余部分：主房间 `#cataly`、状态房间 `#cataly-ops`、lead 的模型、审批按钮、默认任务，以及一个启动 hub 的用户服务（Linux 上为 systemd，macOS 上为 launchd agent）。之后在 `#cataly` 里发消息即可。
 
+`cataly setup --voice on` 会以合理的默认值加上 Discord 语音通话；通话费用记在你的 OpenAI 密钥上，上限为每天 30 分钟、3 美元。
+
 ## 日常使用
 
 | 命令 | 作用 |
