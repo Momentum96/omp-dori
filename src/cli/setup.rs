@@ -14,9 +14,7 @@
 //! overwrites), and reads the file back. Unknown keys and comments are kept: only the managed lines
 //! change. `--expect <hash>` makes a scripted edit refuse a file that changed since its preview.
 
-use std::fmt::Write as _;
 use std::io::BufRead as _;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -27,10 +25,11 @@ use super::args::Parsed;
 use super::install::block_on;
 use super::setup_discord::{self as discord, Discord};
 use super::{CALL_TIMEOUT, Failure, out};
-use crate::config::{self, Config, sha256_hex};
+use crate::config::file::{self, Snapshot, set_key, set_rendered, snapshot, toml_string};
+use crate::config::{self, Config};
 use crate::omp::transcript::model_selector;
 use crate::proto::{Status, method};
-use crate::sys::fs::{create_atomic, read_private, write_atomic};
+use crate::sys::fs::read_private;
 use crate::sys::install::Layout;
 use crate::sys::paths::Paths;
 
@@ -112,60 +111,6 @@ impl Terminal {
         answer
     }
 }
-const CONFIG_MAX: u64 = 1024 * 1024;
-
-/// Device, inode, mode, owner, group, size and the modification and change times.
-type Identity = (u64, u64, u32, u32, u32, u64, i64, i64, i64, i64);
-
-/// What identifies the file: any change of it means someone else wrote meanwhile.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Snapshot {
-    identity: Option<Identity>,
-    pub(super) bytes: Option<Vec<u8>>,
-}
-
-impl Snapshot {
-    pub(super) fn digest(&self) -> String {
-        self.bytes
-            .as_deref()
-            .map_or_else(|| "none".to_string(), sha256_hex)
-    }
-}
-
-pub(super) fn snapshot(path: &Path) -> Result<Snapshot, String> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Snapshot {
-                identity: None,
-                bytes: None,
-            });
-        }
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    // The same rule the hub applies when it reads the file: refuse, naming the fix.
-    crate::sys::fs::check_private_file(path, &meta)
-        .map_err(|e| format!("{e}; setup refuses it"))?;
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CONFIG_MAX {
-        return Err(format!("{} is larger than 1 MiB", path.display()));
-    }
-    Ok(Snapshot {
-        identity: Some((
-            meta.dev(),
-            meta.ino(),
-            meta.mode(),
-            meta.uid(),
-            meta.gid(),
-            meta.size(),
-            meta.mtime(),
-            meta.mtime_nsec(),
-            meta.ctime(),
-            meta.ctime_nsec(),
-        )),
-        bytes: Some(bytes),
-    })
-}
 
 /// Why a managed owner, room or fallback value is not valid, if it is not.
 fn invalid(section: &str, key: &str, v: &str) -> Option<&'static str> {
@@ -205,70 +150,6 @@ fn comma_list(v: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-/// A TOML basic string.
-pub(super) fn toml_string(value: &str) -> String {
-    let mut out = String::from("\"");
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{:04X}", u32::from(c));
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// Sets `key` in `[section]` to `value`, replacing its line or adding it; everything else is kept.
-pub(crate) fn set_key(text: &str, section: &str, key: &str, value: &str) -> String {
-    set_rendered(text, section, key, &toml_string(value))
-}
-
-/// [`set_key`] with a value already written as TOML.
-pub(super) fn set_rendered(text: &str, section: &str, key: &str, rendered: &str) -> String {
-    let line = format!("{key} = {rendered}");
-    let header = format!("[{section}]");
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let start = lines.iter().position(|l| l.trim() == header);
-    let Some(start) = start else {
-        let mut out = text.trim_end().to_string();
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        let _ = write!(out, "{header}\n{line}\n");
-        return out;
-    };
-    let end = lines
-        .iter()
-        .enumerate()
-        .skip(start + 1)
-        .find(|(_, l)| l.trim_start().starts_with('['))
-        .map_or(lines.len(), |(i, _)| i);
-    let existing = (start + 1..end).find(|i| {
-        lines
-            .get(*i)
-            .and_then(|l| l.trim_start().strip_prefix(key))
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    });
-    if let Some(i) = existing {
-        if let Some(l) = lines.get_mut(i) {
-            *l = line;
-        }
-    } else {
-        let last = (start..end)
-            .rev()
-            .find(|i| lines.get(*i).is_some_and(|l| !l.trim().is_empty()))
-            .unwrap_or(start);
-        lines.insert(last + 1, line);
-    }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
 }
 
 const NEW_FILE: &str = "# Cataly configuration. Check it with `cataly config check`; apply it with\n\
@@ -986,7 +867,7 @@ fn apply(
     })?;
     let changed = before.bytes.as_deref() != Some(text.as_bytes());
     if changed {
-        publish(&paths.config_file, before, text.as_bytes())?;
+        file::publish(&paths.config_file, before, text.as_bytes()).map_err(Failure::Refused)?;
         notes.push(format!("written: {}", paths.config_file.display()));
     }
     match &decided.service {
@@ -1032,7 +913,7 @@ fn report(
     } else {
         decided.text.clone()
     };
-    let after = sha256_hex(text.as_bytes());
+    let after = config::sha256_hex(text.as_bytes());
     let action = if before.bytes.is_none() {
         "create"
     } else if after == before.digest() {
@@ -1085,19 +966,10 @@ pub(super) fn write_one(
     key: &str,
     value: &str,
 ) -> Result<(), String> {
-    let refused = |f: Failure| match f {
-        Failure::Refused(m) | Failure::Usage(m) | Failure::Status(_, m) => m,
-        Failure::Client(e) => e.to_string(),
-    };
-    let (before, text) = load(paths).map_err(refused)?;
-    let text = set_key(&text, section, key, value);
-    config::parse(&text).map_err(|e| {
-        format!(
-            "the result would not be a valid config: {}",
-            config::describe(&e)
-        )
-    })?;
-    publish(&paths.config_file, &before, text.as_bytes()).map_err(refused)
+    file::edit(&paths.config_file, NEW_FILE, |text| {
+        Ok(set_key(text, section, key, value))
+    })
+    .map(drop)
 }
 
 /// Sets the managed settings the flags name (a new file gets the ones OMP and the hub need).
@@ -1117,69 +989,12 @@ pub(super) fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<St
     Ok(text)
 }
 
-/// Re-checks the snapshot, writes atomically (never overwriting a file that appeared meanwhile), and
-/// reads the result back.
-fn publish(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), Failure> {
-    let now = snapshot(path).map_err(Failure::Refused)?;
-    if now != *before {
-        return Err(Failure::Refused(format!(
-            "{} changed since its snapshot; your edit is kept, run setup again",
-            path.display()
-        )));
-    }
-    if let Some(dir) = path.parent() {
-        crate::sys::fs::ensure_private_dir(dir).map_err(|e| Failure::Refused(e.to_string()))?;
-    }
-    let written = if before.bytes.is_none() {
-        create_atomic(path, bytes)
-    } else {
-        write_atomic(path, bytes)
-    };
-    written.map_err(|e| Failure::Refused(e.to_string()))?;
-    match read_private(path, CONFIG_MAX) {
-        Ok(Some(back)) if back == bytes => Ok(()),
-        _ => Err(Failure::Refused(format!(
-            "{} did not read back as written",
-            path.display()
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn set_key_replaces_adds_and_keeps_the_rest() {
-        let text = "# mine\n[hub]\nlog_level = \"warn\" # loud\n\n[jobs.x]\nkind = \"once\"\n";
-        let out = set_key(text, "hub", "log_level", "debug");
-        assert_eq!(
-            out,
-            "# mine\n[hub]\nlog_level = \"debug\"\n\n[jobs.x]\nkind = \"once\"\n"
-        );
-        let out = set_key(&out, "omp", "path", "/opt/omp \"x\"");
-        assert!(
-            out.ends_with("[omp]\npath = \"/opt/omp \\\"x\\\"\"\n"),
-            "{out}"
-        );
-        let out = set_key("[omp]\n# keep\n\n[hub]\n", "omp", "path", "omp");
-        assert_eq!(out, "[omp]\n# keep\npath = \"omp\"\n\n[hub]\n");
+    fn a_new_file_with_a_setting_is_valid() {
         assert!(config::parse(&set_key(NEW_FILE, "hub", "log_level", "info")).is_ok());
-    }
-
-    #[test]
-    fn snapshot_refuses_a_group_readable_file_like_the_hub() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("cataly-setup-perm-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("config.toml");
-        assert!(std::fs::write(&path, "[hub]\n").is_ok());
-        assert!(std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).is_ok());
-        let err = snapshot(&path).err().unwrap_or_default();
-        assert!(err.contains("chmod go="), "{err}");
-        assert!(read_private(&path, CONFIG_MAX).is_err());
-        assert!(std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).is_ok());
-        assert!(snapshot(&path).is_ok());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

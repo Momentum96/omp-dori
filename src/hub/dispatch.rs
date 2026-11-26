@@ -461,7 +461,7 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         }
         method::CONFIG_RELOAD => {
             let _: Mutation = params(raw)?;
-            let jobs = hub.reload().await.map_err(|message| Failure {
+            let jobs = hub.jobs.reload().await.map_err(|message| Failure {
                 code: code::REFUSED,
                 message,
             })?;
@@ -469,7 +469,7 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         }
         method::HEALTH => {
             let checks = hub.jobs.health().await?;
-            let ignored = hub.config_tx.borrow().health.ignore.clone();
+            let ignored = hub.config().health.ignore.clone();
             let warn = checks
                 .iter()
                 .any(|c| c.level == "warn" && !ignored.contains(&c.name));
@@ -774,7 +774,7 @@ async fn slack_upload(hub: &Hub, p: proto::DiscordParams) -> Result<Value, Failu
 
 /// The account-limits view (WS req. 37-39): off unless enabled; never retries or changes anything.
 async fn limits(hub: &Hub, refresh: bool) -> Result<Limits, Failure> {
-    let settings = hub.config_tx.borrow().limits.clone();
+    let settings = hub.config().limits.clone();
     if !settings.enabled {
         return Err(Failure {
             code: code::REFUSED,

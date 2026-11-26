@@ -101,6 +101,12 @@ pub(crate) struct Ctx {
     pub(crate) store: Store,
     pub(crate) stream: Stream,
     pub(crate) config: watch::Receiver<Arc<Config>>,
+    /// Applies a reloaded config (`config.reload`, SIGHUP, the ops panel's channel picker).
+    config_tx: watch::Sender<Arc<Config>>,
+    /// SHA-256 of the config file as last applied, so `setup` can tell whether a saved file is live.
+    config_digest: Mutex<Option<String>>,
+    /// When the config in force was applied (Unix ms).
+    config_applied_ms: std::sync::atomic::AtomicI64,
     pub(crate) files_dir: PathBuf,
     pub(crate) event_log: PathBuf,
     /// The config file; its directory holds `secrets/`.
@@ -132,7 +138,7 @@ pub(crate) struct Files {
 impl Ctx {
     pub(crate) fn new(
         store: Store,
-        config: watch::Receiver<Arc<Config>>,
+        config_tx: watch::Sender<Arc<Config>>,
         files: Files,
         omp: Arc<Omp>,
         shutdown: watch::Receiver<bool>,
@@ -142,7 +148,10 @@ impl Ctx {
         Arc::new(Self {
             stream: Stream::new(store.clone(), Arc::clone(&route_wake)),
             store,
-            config,
+            config: config_tx.subscribe(),
+            config_tx,
+            config_digest: Mutex::new(crate::config::file_digest(&files.config_file)),
+            config_applied_ms: std::sync::atomic::AtomicI64::new(now_ms()),
             files_dir: files.dir,
             event_log: files.event_log,
             config_file: files.config_file,
@@ -173,11 +182,18 @@ impl Ctx {
             .clone()
     }
 
-    pub(crate) fn set_config_error(&self, error: Option<String>) {
-        *self
-            .config_error
+    /// SHA-256 of the config file as last applied.
+    pub(crate) fn config_digest(&self) -> Option<String> {
+        self.config_digest
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = error;
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// When the config in force was applied (Unix ms): at start or by the last reload.
+    pub(crate) fn config_applied_ms(&self) -> i64 {
+        self.config_applied_ms
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// The Discord client for the current settings and token; rebuilt when either changes.
@@ -476,6 +492,49 @@ impl Jobs {
             .map_err(|_| JobsError::Stopped)
     }
 
+    /// Reloads the config file. An invalid file is refused and the running config stays in force;
+    /// returns the number of jobs applied.
+    pub(crate) async fn reload(&self) -> Result<usize, String> {
+        let ctx = &self.ctx;
+        let digest = crate::config::file_digest(&ctx.config_file);
+        match crate::config::load(&ctx.config_file) {
+            Ok(config) => {
+                let jobs = config.jobs.len();
+                log::set_level(config.hub.log_level);
+                ctx.config_applied_ms
+                    .store(now_ms(), std::sync::atomic::Ordering::Release);
+                ctx.config_tx.send_replace(Arc::new(config));
+                *ctx.config_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = None;
+                *ctx.config_digest
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = digest;
+                if let Err(e) = self.config_outcome(None).await {
+                    log::warn("config event not recorded", &[("error", &e)]);
+                }
+                log::info("config reloaded", &[("jobs", &jobs)]);
+                Ok(jobs)
+            }
+            Err(errors) => {
+                let text = crate::config::describe(&errors);
+                *ctx.config_error
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(text.clone());
+                if let Err(e) = self.config_outcome(Some(&text)).await {
+                    log::warn("config event not recorded", &[("error", &e)]);
+                }
+                log::warn(
+                    "config refused; the previous one stays in force",
+                    &[("error", &text)],
+                );
+                Err(format!(
+                    "config not applied, the previous one stays in force: {text}"
+                ))
+            }
+        }
+    }
+
     /// Records whether the config file on disk is valid: one event per distinct error, one when it is
     /// valid again (transition memory of job `hub`).
     pub(crate) async fn config_outcome(&self, error: Option<&str>) -> Result<(), JobsError> {
@@ -716,7 +775,7 @@ pub(crate) mod tests {
         config_text: &str,
     ) -> (Arc<Ctx>, watch::Sender<bool>) {
         let config = Arc::new(config::parse(config_text).unwrap());
-        let (_config_tx, config_rx) = watch::channel(config);
+        let (config_tx, _) = watch::channel(config);
         let (stop_tx, stop_rx) = watch::channel(false);
         let files = dir.join("files");
         crate::sys::fs::ensure_private_dir(&files).unwrap();
@@ -725,7 +784,7 @@ pub(crate) mod tests {
             event_log: dir.join("events.jsonl"),
             config_file: dir.join("config.toml"),
         };
-        let ctx = Ctx::new(store, config_rx, paths, Omp::new(), stop_rx);
+        let ctx = Ctx::new(store, config_tx, paths, Omp::new(), stop_rx);
         (ctx, stop_tx)
     }
 

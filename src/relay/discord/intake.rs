@@ -241,7 +241,9 @@ pub(crate) async fn run<T: Runtime>(
 
 /// One running intake.
 pub(crate) struct Intake<T: Runtime> {
-    pub(super) settings: DiscordSettings,
+    /// The running `[discord]` settings; the watched channels and home change in place
+    /// ([`Intake::rewatch`]), any other change restarts intake.
+    settings: Mutex<DiscordSettings>,
     /// The owner's language for fixed card wording (DESIGN 12.2 A19).
     pub(super) language: crate::config::Language,
     pub(super) rest: Arc<Rest>,
@@ -357,7 +359,7 @@ impl<T: Runtime> Intake<T> {
             token_intents: (token, gateway::intents(settings.follow_threads, voice)),
             tap: (env.tap.clone(), voice),
             events: Arc::clone(&env.events),
-            settings: settings.clone(),
+            settings: Mutex::new(settings.clone()),
             language: config.hub.language,
             rest,
             bot,
@@ -456,6 +458,99 @@ impl<T: Runtime> Intake<T> {
         Ok(())
     }
 
+    pub(super) fn settings(&self) -> MutexGuard<'_, DiscordSettings> {
+        self.settings.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `new` differs from the running settings in the watched channels and home only.
+    fn rooms_only(&self, new: &DiscordSettings) -> bool {
+        let now = self.settings();
+        let mut same = new.clone();
+        same.channels.clone_from(&now.channels);
+        same.home = now.home;
+        same == *now
+    }
+
+    /// Applies a new list of watched channels on the running connection (the ops panel's picker
+    /// or `config reload`). An added channel is checked like a listed one at start and read from
+    /// the moment the config was applied (or its newest message, if older), so a message sent
+    /// while this runs is caught up; its threads are followed from the next listing, which the
+    /// catch-up read starts. A removed channel leaves scope at once with its threads, so its
+    /// queued messages are dropped.
+    async fn rewatch(&self, new: &DiscordSettings) -> Result<(), Stop> {
+        let unchanged = {
+            let now = self.settings();
+            now.channels == new.channels && now.home == new.home
+        };
+        if unchanged {
+            return Ok(());
+        }
+        let added: Vec<Snowflake> = {
+            let scope = self.scope();
+            new.channels
+                .iter()
+                .filter(|c| !scope.listed.contains_key(c))
+                .copied()
+                .collect()
+        };
+        let found = listed(&self.rest, &added).await?;
+        let applied = Snowflake::at_ms(self.jobs.ctx().config_applied_ms()) - 1;
+        for (channel, kind) in &found.listed {
+            if kind.forum() {
+                continue;
+            }
+            let newest = self
+                .newest(*channel)
+                .await
+                .map_err(|e| rest_stop(&format!("reading channel {channel}"), &e))?;
+            let position = newest.min(applied);
+            let room = channel.to_string();
+            // A channel watched again starts afresh too: its position moves up to this one.
+            for write in [
+                RelayWrite::Baseline {
+                    relay: NAME.into(),
+                    room: room.clone(),
+                    position,
+                    parent: None,
+                },
+                RelayWrite::Pass {
+                    relay: NAME.into(),
+                    room: room.clone(),
+                    seq: position,
+                },
+            ] {
+                self.write(write).await.map_err(Stop::Retry)?;
+            }
+        }
+        {
+            let mut scope = self.scope();
+            let Scope {
+                listed,
+                threads,
+                lookups,
+                listed_once,
+            } = &mut *scope;
+            listed.retain(|c, _| new.channels.contains(c));
+            listed.extend(found.listed);
+            threads.retain(|_, parent| listed.contains_key(parent));
+            lookups.clear();
+            // Threads under an added channel are met at their newest message, as on a first run.
+            *listed_once &= added.is_empty();
+        }
+        {
+            let mut settings = self.settings();
+            settings.channels.clone_from(&new.channels);
+            settings.home = new.home;
+        }
+        log::info(
+            "Discord watched channels changed",
+            &[("channels", &new.channels.len()), ("added", &added.len())],
+        );
+        self.flag(true).await;
+        self.wake.notify_one();
+        Ok(())
+    }
+
     /// Runs the connection and the handling round until something ends them.
     async fn serve(
         self: Arc<Self>,
@@ -480,7 +575,6 @@ impl<T: Runtime> Intake<T> {
         };
         self.shared.set(|h| h.state = "connecting".into());
         let mut events = self.lead.follow();
-        let settings = self.settings.clone();
         loop {
             self.round().await;
             let tick = if self.busy().await { TICK } else { IDLE_TICK };
@@ -501,8 +595,11 @@ impl<T: Runtime> Intake<T> {
                 _ = config.changed() => {
                     let config = Arc::clone(&config.borrow_and_update());
                     let voice = self.tap.0.as_ref().is_some_and(|t| (t.wanted)(&config));
-                    if config.discord != settings || voice != self.tap.1 {
+                    if voice != self.tap.1 || !self.rooms_only(&config.discord) {
                         return Stop::Again;
+                    }
+                    if let Err(stop) = self.rewatch(&config.discord).await {
+                        return stop;
                     }
                 }
                 () = self.shared.kick.notified() => return Stop::Again,
@@ -598,7 +695,7 @@ impl<T: Runtime> Intake<T> {
 
     /// Lists active threads and follows those under listed channels (DISC-IN req. 8).
     async fn refresh_threads(&self) -> Result<(), RestError> {
-        if !self.settings.follow_threads {
+        if !self.settings().follow_threads {
             return Ok(());
         }
         let guilds: HashSet<Snowflake> = self
@@ -849,7 +946,8 @@ impl<T: Runtime> Intake<T> {
             return;
         };
         let gate = types::gate(raw, self.owner);
-        if self.settings.others.contains(&room) {
+        let others = self.settings().others.contains(&room);
+        if others {
             self.track_others(raw, room, message, gate == Gate::Pass)
                 .await;
         }
@@ -913,7 +1011,7 @@ impl<T: Runtime> Intake<T> {
     /// An owner message from an unknown channel: one bounded lookup; a thread under a listed parent
     /// is adopted (DISC-IN req. 10). Results are cached for 256 channels.
     async fn adopt(&self, channel: Snowflake, raw: &Value) -> Option<Snowflake> {
-        if !self.settings.follow_threads || types::gate(raw, self.owner) != Gate::Owner {
+        if !self.settings().follow_threads || types::gate(raw, self.owner) != Gate::Owner {
             return None;
         }
         let cached = {
@@ -962,7 +1060,7 @@ impl<T: Runtime> Intake<T> {
     /// Thread changes (DISC-IN req. 9): a new thread under a listed parent is followed from its
     /// start; an archived or deleted one is no longer followed (its queue still drains).
     async fn thread_changed(&self, kind: &str, data: &Value) {
-        if !self.settings.follow_threads {
+        if !self.settings().follow_threads {
             return;
         }
         let Some(thread) = str_field(data, "id").and_then(Snowflake::parse) else {
@@ -1046,9 +1144,10 @@ impl<T: Runtime> Intake<T> {
             .ok()
             .flatten()
             .and_then(|v| v.parse::<i64>().ok());
+        let away = crate::jobs::duration_ms(self.settings().away);
         let step = self.pipeline.hand_off(row, &inbound, read_at, None).await;
         if let Some(previous) = previous
-            && now_ms() - previous >= crate::jobs::duration_ms(self.settings.away)
+            && now_ms() - previous >= away
         {
             self.digest(previous);
         }

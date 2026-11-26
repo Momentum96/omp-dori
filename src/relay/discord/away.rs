@@ -294,7 +294,7 @@ impl<T: crate::host::Runtime> super::intake::Intake<T> {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let config = Config {
-                discord: me.settings.clone(),
+                discord: me.settings().clone(),
                 ..Config::default()
             };
             let (text, rooms, events) = build(

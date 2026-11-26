@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 use self::render::{Host, HostState, Issue, Level, Limit, Panel, People, Recent};
 use super::{Ctx, Jobs, JobsError};
 use crate::config::ops::{AlertKind, OpsSettings};
-use crate::config::{Config, Destination, Language, Owner, Work};
+use crate::config::{Config, Destination, DiscordSettings, Language, Owner, Work, file};
 use crate::jobs::owner::pressure::{self, ALERT_AFTER_MS};
 use crate::lanes::BoxFut;
 use crate::lanes::board::{self, Board, EVERY_MS, Post};
@@ -911,9 +911,84 @@ impl Jobs {
                     ),
                 })
             }
+            render::WATCH => render::watch_picker(&config.discord.channels, lang),
             _ => render::private(&t("알 수 없는 버튼이에요.", "Unknown button.")),
         }
     }
+
+    /// The owner submitted the watched-channel picker (the caller checked the owner and the
+    /// server). The config file as it is now gets the chosen channels, then those the picker could
+    /// not show, and a home that is still watched; the result is checked as `cataly config check`
+    /// does and applied as `cataly config reload` does. An invalid result writes nothing.
+    pub(crate) async fn watch_channels(&self, values: &[String]) -> Value {
+        let lang = self.ctx.config().hub.language;
+        let chosen: Vec<Snowflake> = values.iter().filter_map(|v| Snowflake::parse(v)).collect();
+        if chosen.is_empty() {
+            let why = match lang {
+                Language::Korean => "고른 채널이 없어요.",
+                Language::English => "no channel was chosen.",
+            };
+            return render::watch_failed(why, lang);
+        }
+        let mut applied = (Vec::new(), 0);
+        let written = file::edit(&self.ctx.config_file, "", |text| {
+            let now = crate::config::parse(text)
+                .map_err(|e| {
+                    format!(
+                        "the config file is not valid now: {}",
+                        crate::config::describe(&e)
+                    )
+                })?
+                .discord;
+            let (channels, home, kept) = picked(&now, &chosen);
+            let mut text =
+                file::set_rendered(text, "discord", "channels", &file::string_list(&channels));
+            if let Some(home) = home {
+                text = file::set_key(&text, "discord", "home", &home.to_string());
+            }
+            applied = (channels, kept);
+            Ok(text)
+        });
+        if let Err(e) = written {
+            log::warn("watched channels not written", &[("error", &e)]);
+            return render::watch_failed(&e, lang);
+        }
+        match self.reload().await {
+            Ok(_) => render::watching(&applied.0, applied.1, lang),
+            Err(e) => render::watch_failed(&e, lang),
+        }
+    }
+}
+
+/// The watched list after the picker, the home to write (`None` leaves it) and how many channels
+/// the picker could not show were kept. Those come after the chosen ones. The home stays while it
+/// is watched; else, or when it was unset and several channels are now watched, it becomes the
+/// current home if still watched, else the first chosen channel.
+fn picked(
+    now: &DiscordSettings,
+    chosen: &[Snowflake],
+) -> (Vec<Snowflake>, Option<Snowflake>, usize) {
+    let mut channels: Vec<Snowflake> = Vec::with_capacity(chosen.len() + now.channels.len());
+    for c in chosen {
+        if !channels.contains(c) {
+            channels.push(*c);
+        }
+    }
+    let mut kept = 0;
+    for c in now.channels.iter().skip(render::PICKER_MAX) {
+        if !channels.contains(c) {
+            channels.push(*c);
+            kept += 1;
+        }
+    }
+    let first = channels.first().copied();
+    let home = match now.home {
+        Some(h) if channels.contains(&h) => None,
+        Some(_) => first,
+        None if channels.len() > 1 => now.home().filter(|h| channels.contains(h)).or(first),
+        None => None,
+    };
+    (channels, home, kept)
 }
 
 /// The refusal for anyone but the owner, in the owner's language.
@@ -921,6 +996,14 @@ pub(crate) fn refusal(lang: Language) -> &'static str {
     match lang {
         Language::Korean => "이 버튼은 주인만 누를 수 있어요.",
         Language::English => "Only the owner can use these buttons.",
+    }
+}
+
+/// The refusal of a watched-channel change by anyone but the owner, or from another server.
+pub(crate) fn watch_refusal(lang: Language) -> &'static str {
+    match lang {
+        Language::Korean => "감시 채널은 주인만 바꿀 수 있어요.",
+        Language::English => "Only the owner may change the watched channels.",
     }
 }
 

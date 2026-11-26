@@ -4,6 +4,7 @@
 //! file is never applied.
 
 pub(crate) mod coord;
+pub(crate) mod file;
 pub(crate) mod lanes;
 pub(crate) mod ops;
 pub(crate) mod owner;

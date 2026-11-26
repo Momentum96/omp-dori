@@ -260,7 +260,7 @@ when both `owner` and `channels` are set; setting one without the other is an er
 | `guild` | string | none | Discord ID | Your server. Needed for destinations that name a channel by name, and for voice. | `--guild` |
 | `api_base` | string | Discord's API | `http(s)://` on localhost only | Test override of the API address. | |
 | `owner` | string | none | Discord user ID | Your account. | `--owner` (default: the application's owner) |
-| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. | `#cataly`, found or created |
+| `channels` | list of strings | `[]` | Discord IDs, at most 256, duplicates dropped | Watched channels, threads, DMs and forums. Can also be set from the [ops panel](#ops)'s 📡 button; a change applies on the running connection. | `#cataly`, found or created |
 | `follow_threads` | boolean | `true` | | Also take threads under watched channels. | |
 | `home` | string | the one watched channel, if there is exactly one | one of `channels` | Where the lead's questions go. | `#cataly` when there are several |
 | `remote_approvals` | boolean | `false` | | Let you approve OMP permission requests by button, on a card in `[hub] language` with the command in a code block. Cataly's own tools and a fixed list of read-only commands (`ls`, `cat`, `grep`, `git status`, `git log`, `git diff` and the like) never ask; anything else still does. | `--approvals on\|off` (setup's default: on) |
@@ -663,7 +663,18 @@ other providers start normally. It shows:
 
 Buttons, for the owner only (anyone else gets a private refusal): 🔄 refresh (once a minute at
 most), 📊 usage details (a private reply with every limit), 🔕 mute (silences new alerts for
-`mute`; press again to unmute; the panel keeps updating).
+`mute`; press again to unmute; the panel keeps updating), 📡 watched channels.
+
+**📡 Watched channels** opens a private channel picker (text and forum channels, up to 25) with
+the watched channels already chosen. On submit the hub writes `[discord] channels` into the file
+as it is at that moment, keeping your other lines, and moves `home` to a watched channel when it
+would no longer be one (or sets it when several channels are now watched and it was unset). The
+result is checked as `cataly config check` does and applied as `cataly config reload` does; a
+result that is not valid, or a file that cannot be written, changes nothing and is reported. A
+new channel is read from its newest message on, its threads as `follow_threads` says; a dropped
+one stops being read at once. With more than 25 watched channels the picker shows the first 25
+and keeps the rest. Only `[discord] owner` may submit it, and only from `[discord] guild`; the
+folder holding the file must be owner-only, as setup makes it.
 
 **Alerts** are small embeds with the thumbnail, each kind at most once an hour and none while
 muted. One whose condition clears (`pressure.clear`, `quota.released`, `backup.clean`, the job
