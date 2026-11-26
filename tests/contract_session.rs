@@ -876,6 +876,7 @@ fn bridge_accepted_lead_in_stock_omp() {
 }
 
 /// Resident memory of one process in bytes (Linux `/proc`); `None` elsewhere or once it is gone.
+#[cfg(debug_assertions)]
 fn rss_of(pid: u64) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let kb = status
@@ -893,6 +894,10 @@ fn rss_of(pid: u64) -> Option<u64> {
 /// message resumes the same session. Measures the lead OMP's RSS awake, the hub's RSS awake and
 /// asleep, and per wake the time from `lead send` to the lead live again, to the bridge of the same
 /// session accepted by the hub, and to the model request carrying the message.
+///
+/// Debug builds only: the 4 s idle time comes from `CATALY_IDLE_SLEEP`, which only a debug hub
+/// reads (a release hub keeps the 5-minute minimum). CI runs it in its own debug step.
+#[cfg(debug_assertions)]
 #[test]
 fn lead_sleeps_and_wakes_against_stock_omp() {
     if !enabled() {
