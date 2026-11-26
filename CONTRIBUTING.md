@@ -31,7 +31,7 @@ cd extension && bun install --frozen-lockfile && bun run typecheck && bun test
 
 `cargo deny check` checks advisories and dependency licences against `deny.toml`. Every new
 dependency is recorded in `docs/third-party.md` with its licence and source. Read
-`docs/cleanroom.md` and `docs/principles.md` before you write code.
+`docs/provenance.md` ("How new code stays clean") and `docs/principles.md` before you write code.
 
 An optional pre-commit hook runs the format check and both clippy builds before each commit:
 

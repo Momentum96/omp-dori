@@ -192,3 +192,4 @@ repository. Commercial licences without the AGPL obligations are available from
 [vntrevx](https://github.com/vntrevx). Cataly runs on
 [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi), installed separately. Third-party
 licences ship with every release in `THIRD-PARTY-NOTICES-<target>.txt`.
+Where the code comes from: [docs/provenance.md](docs/provenance.md).

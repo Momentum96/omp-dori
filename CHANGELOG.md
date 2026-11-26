@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 (Unreleased)
+## 0.2.2 (2026-11-26)
 
 - The source and the releases now live together in vntrevx/Cataly.
 - Releases for macOS and Linux on arm64 and x64: `linux-x64`, `linux-arm64`, `darwin-arm64`

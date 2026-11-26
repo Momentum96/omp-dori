@@ -24,7 +24,7 @@ print_stdout = "deny"
 
 [package]
 name = "cataly"
-version = "0.2.1"
+version = "0.2.2"
 description = "Cataly hub, CLI and job engine"
 edition.workspace = true
 rust-version.workspace = true
