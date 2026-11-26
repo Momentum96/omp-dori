@@ -65,8 +65,10 @@ The fake `gh` and fake `omp` in `tests/support/` are POSIX shell scripts written
 binary (normal dependencies, not build scripts, proc macros or dev-dependencies), its version and
 licence, and the licence and notice files the crate ships. It needs cargo and jq. The release
 workflow's build job runs it once per target with that target's Rust triple and ships the file
-beside the binary as `THIRD-PARTY-NOTICES-<target>.txt` (`linux-x64`, `darwin-arm64`); the publish
-job adds `LICENSE`. Both are listed in `SHA256SUMS` like every other asset.
+beside the binary as `THIRD-PARTY-NOTICES-<target>.txt` (`linux-x64`, `linux-arm64`, `darwin-arm64`,
+`darwin-x64`); the publish job adds `LICENSE`. Both are listed in `SHA256SUMS` like every other
+asset. `scripts/release.sh` writes the same files for the targets it packs, and each npm package
+`cataly-<target>` carries its target's file as `THIRD-PARTY-NOTICES.txt`.
 
 ```yaml
       - name: Third-party notices

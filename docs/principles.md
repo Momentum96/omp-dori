@@ -37,4 +37,4 @@ order.
 
 - Bun stays on the machine because OMP runs on it. Every Cataly-owned process and command
   is Rust.
-- Releases target linux-x64 and darwin-arm64. macOS is first class.
+- Releases target linux-x64, linux-arm64, darwin-arm64 and darwin-x64. macOS is first class.

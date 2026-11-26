@@ -389,8 +389,9 @@ fn without_bridge(hub: &TestHub, model: &FakeModel, argv: &[String]) -> (u64, u6
         .parse()
         .unwrap();
     let pid: u64 = hub.until(WAIT, || {
-        let out = Command::new("ps")
-            .args(["-o", "pid=", "--ppid", &pty.to_string()])
+        // `pgrep -P`, not `ps --ppid`: macOS `ps` has no `--ppid`.
+        let out = Command::new("pgrep")
+            .args(["-P", &pty.to_string()])
             .output()
             .ok()?;
         String::from_utf8_lossy(&out.stdout).trim().parse().ok()

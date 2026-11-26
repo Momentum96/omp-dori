@@ -16,6 +16,7 @@ holder of Cataly:
 4. **Your rights.** You keep the copyright in your contribution and may use it in any way you
    like. Contributions are provided "as is", without warranty.
 
-You accept this agreement by writing in your pull request:
+You accept this agreement by ticking "I accept the CLA in CLA.md" in the pull request template,
+or by writing in your pull request:
 
 > I have read CLA.md and agree to its terms for this and my future contributions to Cataly.

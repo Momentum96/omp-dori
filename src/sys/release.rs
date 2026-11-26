@@ -21,8 +21,12 @@ pub(crate) const COMMIT: &str = match option_env!("CATALY_COMMIT") {
 /// This binary's release target.
 pub(crate) const TARGET: &str = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
     "linux-x64"
+} else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+    "linux-arm64"
 } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     "darwin-arm64"
+} else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+    "darwin-x64"
 } else {
     "unsupported"
 };
@@ -253,21 +257,34 @@ pub(crate) fn unhex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The executable format of this host (IR req. 23): ELF 64-bit x86-64 on Linux, Mach-O 64-bit arm64
-/// on macOS. `head` is the file's first bytes.
-pub(crate) fn check_format(head: &[u8]) -> Result<(), String> {
+/// The release target an executable's first bytes `head` belong to: 64-bit little-endian ELF or
+/// Mach-O, x86-64 or arm64.
+fn format_of(head: &[u8]) -> Option<&'static str> {
     let elf = head.get(..4) == Some(b"\x7fELF".as_slice())
         && head.get(4) == Some(&2)
-        && head.get(5) == Some(&1)
-        && head.get(18..20) == Some([0x3e, 0x00].as_slice());
-    let macho = head.get(..4) == Some([0xcf, 0xfa, 0xed, 0xfe].as_slice())
-        && head.get(4..8) == Some([0x0c, 0x00, 0x00, 0x01].as_slice());
-    let ok = match TARGET {
-        "linux-x64" => elf,
-        "darwin-arm64" => macho,
-        _ => false,
-    };
-    if ok {
+        && head.get(5) == Some(&1);
+    let macho = head.get(..4) == Some([0xcf, 0xfa, 0xed, 0xfe].as_slice());
+    if elf {
+        match head.get(18..20)? {
+            [0x3e, 0x00] => Some("linux-x64"),
+            [0xb7, 0x00] => Some("linux-arm64"),
+            _ => None,
+        }
+    } else if macho {
+        match head.get(4..8)? {
+            [0x0c, 0x00, 0x00, 0x01] => Some("darwin-arm64"),
+            [0x07, 0x00, 0x00, 0x01] => Some("darwin-x64"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// The executable format of this host (IR req. 23): ELF 64-bit on Linux, Mach-O 64-bit on macOS,
+/// for this binary's CPU. `head` is the file's first bytes.
+pub(crate) fn check_format(head: &[u8]) -> Result<(), String> {
+    if format_of(head) == Some(TARGET) {
         Ok(())
     } else {
         Err(format!("the binary is not an executable for {TARGET}"))
@@ -555,17 +572,25 @@ mod tests {
         verify_signature(b"list", &sig, &key).unwrap();
         assert!(verify_signature(b"list2", &sig, &key).is_err());
         assert!(verify_signature(b"list", "zz", &key).is_err());
-        let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1];
-        elf.resize(18, 0);
-        elf.extend([0x3e, 0]);
-        let macho = [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 1];
-        let (good, bad): (&[u8], &[u8]) = if TARGET == "linux-x64" {
-            (&elf, &macho)
-        } else {
-            (&macho, &elf)
+        let elf = |machine: u8| {
+            let mut head = vec![0x7f, b'E', b'L', b'F', 2, 1];
+            head.resize(18, 0);
+            head.extend([machine, 0]);
+            head
         };
-        check_format(good).unwrap();
-        assert!(check_format(bad).is_err());
+        let macho = |cpu: u8| vec![0xcf, 0xfa, 0xed, 0xfe, cpu, 0, 0, 1];
+        let heads = [
+            ("linux-x64", elf(0x3e)),
+            ("linux-arm64", elf(0xb7)),
+            ("darwin-arm64", macho(0x0c)),
+            ("darwin-x64", macho(0x07)),
+        ];
+        for (target, head) in &heads {
+            assert_eq!(format_of(head), Some(*target));
+            assert_eq!(check_format(head).is_ok(), *target == TARGET, "{target}");
+        }
+        assert!(heads.iter().any(|(target, _)| *target == TARGET));
+        assert_eq!(format_of(&elf(0x28)), None);
         assert!(check_format(b"#!/bin/sh\n").is_err());
         let own = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         check_format(own.get(..64).unwrap()).unwrap();

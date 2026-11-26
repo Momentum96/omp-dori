@@ -126,7 +126,7 @@ um neu zu beginnen.
 
 ### Voraussetzungen
 
-- Linux x86_64 (macOS arm64 folgt).
+- Linux oder macOS, auf x86_64 oder arm64 (Apple Silicon und Intel-Macs). Windows wird nicht unterstützt.
 - [OMP](https://omp.sh) 19.1.1 oder neuer.
 - Ein Discord-Bot (die Einrichtung führt dich durch die Erstellung) oder ein Telegram- oder Slack-Bot.
 - Für die Installation über npm und Bun: Node.js 18 oder neuer auf `PATH`.
@@ -160,7 +160,7 @@ cataly setup
 Die Einrichtung fragt nach deinem Bot-Token und gibt einen Einladungslink aus, dann
 richtet sie den Rest ein: deinen Heimraum `#cataly`, den Statusraum `#cataly-ops`, das
 Modell des Leads, Freigabe-Buttons, die Standard-Jobs und einen Benutzerdienst
-(systemd), der den Hub startet. Danach schreib in `#cataly`.
+(systemd unter Linux, ein launchd-Agent unter macOS), der den Hub startet. Danach schreib in `#cataly`.
 
 ## Im Alltag
 
@@ -180,7 +180,7 @@ stammt.
 
 **Frühe Version**
 
-Vorerst nur Linux x86_64. Cataly ist täglich über Discord im Einsatz, Sprache
+Am meisten genutzt ist Linux x86_64; macOS und arm64 bestehen dieselben Tests. Cataly ist täglich über Discord im Einsatz, Sprache
 eingeschlossen; Telegram und Slack bestehen ihre Tests, wurden aber weniger real
 genutzt.
 
@@ -199,4 +199,4 @@ Cataly ist Open Source unter der [GNU AGPL 3.0](LICENSE); der Quellcode liegt in
 Repository. Kommerzielle Lizenzen ohne die AGPL-Pflichten gibt es bei
 [vntrevx](https://github.com/vntrevx). Cataly läuft auf
 [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi), das separat installiert wird.
-Lizenzen von Drittanbietern liegen jedem Release in `THIRD-PARTY-NOTICES.txt` bei.
+Lizenzen von Drittanbietern liegen jedem Release in `THIRD-PARTY-NOTICES-<target>.txt` bei.

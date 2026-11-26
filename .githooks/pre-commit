@@ -1,0 +1,8 @@
+#!/bin/sh
+# Optional pre-commit hook: the formatting and lint checks CI runs first.
+# Enable it once per clone with `git config core.hooksPath .githooks`.
+set -eu
+
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets --features voice -- -D warnings

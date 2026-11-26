@@ -200,6 +200,7 @@ impl FakeDiscord {
 
     /// Polls `f` every 20 ms for at most `limit`.
     pub fn wait<T>(&self, limit: Duration, mut f: impl FnMut(&Self) -> Option<T>) -> T {
+        let limit = super::patience(limit);
         let deadline = std::time::Instant::now() + limit;
         loop {
             if let Some(v) = f(self) {

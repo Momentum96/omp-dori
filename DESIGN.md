@@ -717,9 +717,10 @@ Owner decision 14 allows Rust the owner wrote in the earlier tree, after the coo
 
 ### 11.1 Single binary
 
-One static executable per target: `x86_64-unknown-linux-musl` (runs on any x64 Linux) and
-`aarch64-apple-darwin`. One extension file, the same for both. Release assets: two binaries, `cataly.ts`,
-`install.sh`, `SHA256SUMS`, `SHA256SUMS.sig` (IR-02, plus 11.4).
+One executable per target: `linux-x64`, `linux-arm64`, `darwin-arm64` and `darwin-x64` (the release
+workflow builds static musl binaries for Linux). One extension file, the same for all. Release assets: one
+binary per target, `cataly.ts`, `install.sh`, `SHA256SUMS`, `SHA256SUMS.sig` (IR-02, plus 11.4). Windows
+is not a target: there is no service manager or OMP build path for it in this design.
 
 ### 11.2 Where files live (same rule on Linux and macOS)
 
@@ -779,10 +780,13 @@ rest on the registry's own integrity check, not on the release signature (11.4).
   the executable format and the candidate's `version --json`, and only then switches.
 - From then on every update is verified by the running, already-trusted binary, so only the very first download
   rests on HTTPS alone.
-- Until CI runs again, `scripts/release.sh <version>` builds and signs a Linux x64 release on the owner's
+- `scripts/release.sh <version> [--add <target>=<binary>]...` builds and signs a release on the owner's
   machine (clean tree, Cargo version, `--locked`, `SOURCE_DATE_EPOCH`, key from `~/.config/cataly-release`
-  handed to cargo through `env` only) and packs the npm packages with `scripts/npm-pack.sh`. Publishing stays
-  a separate, manual step.
+  handed to cargo through `env` only): linux-x64 is built there; the other targets come from the `build`
+  workflow (a manual dispatch, the same build with the release key, commit and commit time, uploaded as
+  `cataly-<version>-<target>` artifacts). Each added binary is checked without running it: `file` reports
+  its target's format and its bytes hold the release's version, commit and key. It packs the npm packages
+  with `scripts/npm-pack.sh`. Signing stays on the owner's machine; publishing is a separate, manual step.
 
 ## 12. Owner decisions, resolved conflicts and open assumptions
 
