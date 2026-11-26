@@ -6,12 +6,28 @@ You talk to it from a messenger (Discord, Telegram or Slack): your messages go t
 for parallel work. The hub also runs scheduled jobs, posts their notices, and keeps every session
 alive across restarts.
 
+This repository holds Cataly's source. Releases, install instructions and the project's front page
+live in [`vntrevx/Cataly`](https://github.com/vntrevx/Cataly).
+
+## Build from source
+
+Needs the Rust toolchain pinned in `rust-toolchain.toml`, and [Bun](https://bun.sh) for the OMP
+extension in `extension/`.
+
+```sh
+cargo build --release                    # add --features voice for Discord voice
+cargo test --locked --no-fail-fast
+cd extension && bun install --frozen-lockfile && bun test
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full set of checks and how to contribute.
+
 ## Install
 
 Linux x86_64 (macOS arm64 once its build is published), with OMP 19.1.1 or newer installed; an npm
 or Bun install also needs Node.js 18 or newer on PATH (the `cataly` launcher runs under `node`);
-`install.sh` does not need it. Releases in `vntrevx/Cataly` tagged before v0.2.0 (the OMP-Dori
-pre-releases) belong to an earlier, separate product and are not Cataly. One of:
+`install.sh` does not need it. Releases tagged before v0.2.0 in `vntrevx/Cataly` are an earlier,
+separate product. One of:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vntrevx/Cataly/main/install.sh | sh
@@ -105,5 +121,10 @@ Every setting is described in [`docs/config.md`](docs/config.md).
 
 ## Licence
 
-Proprietary; see [`LICENSE`](LICENSE). Third-party licences ship in `THIRD-PARTY-NOTICES.txt`
-(`sh scripts/third-party-notices.sh` generates it).
+Copyright (c) 2026 vntrevx. Cataly is licensed under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only); see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Commercial
+licences without the AGPL obligations are available from vntrevx; contact
+[vntrevx on GitHub](https://github.com/vntrevx). Contributions need the [CLA](CLA.md).
+
+Third-party licences ship in `THIRD-PARTY-NOTICES.txt` (`sh scripts/third-party-notices.sh`
+generates it).

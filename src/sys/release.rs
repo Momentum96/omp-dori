@@ -602,14 +602,14 @@ mod tests {
 
     #[test]
     fn latest_skips_prereleases_drafts_and_other_software() {
-        let foreign = vec!["omp-dori-linux-x64.tar.gz".to_string()];
+        let foreign = vec!["other-linux-x64.tar.gz".to_string()];
         let list = serde_json::json!([
             entry("v0.9.0-rc.1", false, false, &full("0.9.0-rc.1")),
             entry("v0.8.0", true, false, &full("0.8.0")),
             entry("v0.7.0", false, true, &full("0.7.0")),
             entry("v5.0.0", false, false, &foreign),
             entry("v0.1.3", true, false, &foreign),
-            entry("dori-v9.0.0", false, false, &full("9.0.0")),
+            entry("other-v9.0.0", false, false, &full("9.0.0")),
             entry("v0.2.0", false, false, &full("0.2.0")),
             entry("v0.1.9", false, false, &full("0.1.9")),
         ]);

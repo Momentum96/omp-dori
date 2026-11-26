@@ -13,8 +13,8 @@ work with OMP from a messenger.
   provider quotas, host load, new mail from a command, backups, health.
 - **Voice.** Talk to the assistant in a Discord voice channel (off until you turn it on).
 
-This repository holds releases only. Releases tagged before v0.2.0 here (the OMP-Dori
-pre-releases) belong to an earlier, separate product and are not Cataly.
+This repository holds releases only; the source is at https://github.com/vntrevx/cataly-core.
+Releases tagged before v0.2.0 in vntrevx/Cataly are an earlier, separate product.
 
 ## Requirements
 
@@ -85,6 +85,8 @@ the package (`npm uninstall --global cataly` or `bun remove --global cataly`). Y
 
 ## Licence
 
-Cataly is proprietary software; see [LICENSE](LICENSE). For licensing, contact
-[vntrevx on GitHub](https://github.com/vntrevx). Third-party licences ship with every release in
-`THIRD-PARTY-NOTICES.txt`.
+Source: https://github.com/vntrevx/cataly-core
+
+Cataly is licensed under AGPL-3.0-only; see [LICENSE](LICENSE). Commercial licences without the
+AGPL obligations are available from [vntrevx on GitHub](https://github.com/vntrevx). Third-party
+licences ship with every release in `THIRD-PARTY-NOTICES.txt`.

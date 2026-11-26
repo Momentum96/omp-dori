@@ -2,6 +2,8 @@
 
 ## 0.2.1 (Unreleased)
 
+- Cataly is now open source under AGPL-3.0-only, with commercial licences available from vntrevx;
+  the source is public at https://github.com/vntrevx/cataly-core.
 - The quota gate holds new sessions only, as documented. Resuming an existing session no longer
   waits for it: the lead's last session and parked or live lanes come back after a hub restart,
   `cataly update` or `cataly rollback`, and `cataly lead start` without `--fresh` resumes. A

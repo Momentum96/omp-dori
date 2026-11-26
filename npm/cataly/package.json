@@ -2,7 +2,7 @@
 	"name": "cataly",
 	"version": "0.0.0-source",
 	"description": "Cataly: a hub over OMP that you drive from Discord, Telegram or Slack",
-	"license": "SEE LICENSE IN LICENSE",
+	"license": "AGPL-3.0-only",
 	"homepage": "https://github.com/vntrevx/Cataly",
 	"bin": {
 		"cataly": "bin/cataly.js"

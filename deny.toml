@@ -1,4 +1,5 @@
-# `cargo deny check licenses` (DESIGN.md 10.2): permissive licences only, no copyleft in the binary.
+# `cargo deny check licenses` (DESIGN.md 10.2): permissive dependency licences only, no copyleft linked
+# into the binary (Cataly's own AGPL-3.0-only crates are private and skipped below).
 [graph]
 all-features = true
 
