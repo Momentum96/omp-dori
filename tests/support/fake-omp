@@ -21,6 +21,7 @@
 #                               tool sends, and the turn ends when it is answered: "picked <choice>";
 #                               with omp-data/approve a message containing APPROVE opens the approval
 #                               select stock OMP sends under always-ask, ended the same way.
+#                               Every prompt, follow-up and steer line is appended to omp-data/prompts.
 #   with omp-data/slow-start     the first rpc-ui start answers nothing until its input closes, then
 #                               exits 1 (a start slower than the probe allows, as after an OMP update
 #                               under load); the fixture is used up and later starts are normal.
@@ -190,7 +191,9 @@ rpc() {
         fi
         printf '{"type":"response","id":"%s","command":"%s","success":%s,"data":%s}\n' "$cid" "$kind" "$ok" "$data"
         case "$kind" in
-        prompt | follow_up | steer) [ -f "$dir/turns" ] && turn "$line" "$cid" ;;
+        prompt | follow_up | steer)
+            printf '%s\n' "$line" >> "$dir/prompts"
+            [ -f "$dir/turns" ] && turn "$line" "$cid" ;;
         esac
     done
 }

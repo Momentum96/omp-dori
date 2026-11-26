@@ -206,7 +206,7 @@ impl<R: Runtime> Lanes<R> {
             Some(format!("continued; goal {goal:?}").to_lowercase()),
         )
         .await?;
-        let _ = self.mailbox(&rec.key).flush(Some(&*session), false).await;
+        self.flush_inbox(&rec.key, &session, true).await;
         self.status_word(&rec).await;
         self.nudge.notify_one();
         Ok("continued".into())
@@ -334,6 +334,7 @@ impl<R: Runtime> Lanes<R> {
             format!("[claim recorded] The lane closes automatically at {at} unless the lead objects. Stay idle."),
             Some(format!("claim:{}:{now}", rec.run_id)),
             false,
+            true,
         )
         .await;
         self.status_word(&rec).await;
@@ -376,6 +377,7 @@ impl<R: Runtime> Lanes<R> {
                 reasons.join("; ")
             ),
             None,
+            true,
             true,
         )
         .await;
@@ -821,7 +823,7 @@ impl<R: Runtime> Lanes<R> {
                         }
                     })
                     .await;
-                    let _ = self.mailbox(&key).flush(Some(&*session), false).await;
+                    self.flush_inbox(&key, &session, false).await;
                     self.nudge.notify_one();
                 }
                 SessionEvent::DialogOpened { .. } | SessionEvent::DialogClosed { .. } => {
@@ -844,7 +846,7 @@ impl<R: Runtime> Lanes<R> {
                         "the terminal session's bridge reconnected with the same session",
                         false,
                     );
-                    let _ = self.mailbox(&key).flush(Some(&*session), false).await;
+                    self.flush_inbox(&key, &session, false).await;
                 }
                 SessionEvent::Stopped { record } => {
                     self.lost(&key, &session, &record.how, record.detail.as_deref())

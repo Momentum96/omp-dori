@@ -282,7 +282,7 @@ authorisation and `pr_merged` is read on the hub.
 - 첫 글: `🖥️ linux-box (Linux x64) · a1b2c3d · 작업 폴더와 세션 파일은 워커에 있음`
 - 진행·보고·질문 카드는 로컬 레인과 같습니다. 완료 체크는 실행 위치를 붙입니다:
   `✅ command cargo test (linux-box) · ⏳ pr_merged (허브)`.
-- 운영 패널: `🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중 · old-box ⛔ 호스트 키 변경`.
+- 운영 패널: `🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중 · laptop 🟡 다시 연결 중 · 레인 1/1 · old-box ⛔ 연결 거부`.
 
 **실패할 때**
 

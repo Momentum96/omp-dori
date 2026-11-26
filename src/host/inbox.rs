@@ -8,7 +8,9 @@
 //! the marker is found in the target session file. While a written batch is unconfirmed nothing else
 //! is sent to that target. After 30 s without the entry, with the same OMP process still running, the
 //! batch is in doubt: never resent, the lead told once, the owner alerted. When the process that held
-//! it is gone and the file lacks the entry, it is resent once with the same ID into the same session.
+//! it is gone and the file lacks the entry, it is resent once with the same ID into the same session,
+//! except on a worker: there the process ends with the connection, out of the hub's sight, so the
+//! batch is in doubt (docs/design/workers.md 2.4).
 
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -773,13 +775,22 @@ impl Mailbox {
                 Check::InDoubt("no entry in the session file within 30 s".into())
             };
         }
-        // The process that held the batch is gone, so its file is final.
+        // The process that held the batch is gone, so its file is final. On a worker it ended with
+        // the connection, where the hub cannot see whether it took the batch: never resent there.
         if d.resent {
             return Check::Failed("resent once and still not in the session file".into());
         }
         match snapshot {
             None => Check::Wait,
             Some(s) if s.stop.is_some() => Check::Wait,
+            Some(_)
+                if crate::worker::split_remote(std::path::Path::new(&d.session_file)).is_some() =>
+            {
+                Check::InDoubt(
+                    "its worker connection dropped before the session file showed it; not resent"
+                        .into(),
+                )
+            }
             Some(s) if s.session_id.as_deref() == Some(d.session_id.as_str()) => Check::Resend,
             Some(_) => Check::InDoubt(
                 "its session is gone and the new one is another session; not resent there".into(),

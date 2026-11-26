@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, watch};
 
 use crate::config::Config;
-use crate::host::inbox::{HUB_SENDER, Mailbox, Message, ReceiptState};
+use crate::host::inbox::{HUB_SENDER, Mailbox, Message, Note, ReceiptState};
 use crate::host::lead::{Events, Factory};
 use crate::host::{Control, Role, Runtime, StartSpec, Status};
 use crate::jobs::event::{Emit, EventKind, Severity};
@@ -323,6 +323,11 @@ impl<R: Runtime> Lanes<R> {
         let Ok(_turn) = self.turn(key).await else {
             return;
         };
+        self.keep_locked(key, f).await;
+    }
+
+    /// [`Lanes::keep`] for a caller that holds the lane's turn.
+    async fn keep_locked(&self, key: &str, f: impl FnOnce(&mut Record)) {
         if let Ok((mut rec, rev)) = self.load(key).await {
             f(&mut rec);
             if let Err(e) = self.save(&rec, Some(rev), None).await {
@@ -331,6 +336,68 @@ impl<R: Runtime> Lanes<R> {
                     &[("lane", &key), ("error", &e)],
                 );
             }
+        }
+    }
+
+    /// Flushes the lane's inbox and acts on what it found ([`Lanes::noted`]). `locked`: the
+    /// caller holds the lane's turn.
+    async fn flush_inbox(&self, key: &str, session: &R::Session, locked: bool) {
+        let notes = self
+            .mailbox(key)
+            .flush(Some(session), false)
+            .await
+            .unwrap_or_default();
+        self.noted(key, notes, locked).await;
+    }
+
+    /// Acts on what a flush or a delivery of the lane's inbox found. A batch in doubt is never
+    /// resent: it fences the lane's messages until the lead releases it, and the owner and the lead
+    /// hear it once (DESIGN 9.3, EVR req. 62). `locked`: the caller holds the lane's turn.
+    async fn noted(&self, key: &str, notes: Vec<Note>, locked: bool) {
+        for note in notes {
+            let Note::InDoubt {
+                delivery,
+                rows,
+                reason,
+                ..
+            } = note
+            else {
+                continue;
+            };
+            log::warn(
+                "lane delivery in doubt",
+                &[("lane", &key), ("delivery", &delivery), ("reason", &reason)],
+            );
+            let mut fresh = false;
+            let fence = |r: &mut Record| {
+                fresh = !r.doubt.as_deref().is_some_and(|d| d.contains(&delivery));
+                if r.doubt.is_none() {
+                    r.doubt = Some(format!("{reason}; delivery {delivery}"));
+                }
+            };
+            if locked {
+                self.keep_locked(key, fence).await;
+            } else {
+                self.keep(key, fence).await;
+            }
+            if !fresh {
+                continue;
+            }
+            self.emit(
+                Emit::new(EventKind::DeliveryInDoubt, Severity::Warning, true, key)
+                    .with("target", key)
+                    .with("count", rows.len())
+                    .with("reason", &reason),
+            );
+            self.alert(
+                key,
+                "delivery in doubt",
+                &format!(
+                    "a message to the lane may or may not have reached it ({reason}); it is not \
+                     resent. Read the lane, then lane.release it; lane.send waits until then"
+                ),
+                true,
+            );
         }
     }
 
@@ -1470,7 +1537,15 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// Puts a note or wake in the lane's inbox and flushes it now when the lane can read.
-    async fn tell(&self, key: &str, text: String, identity: Option<String>, urgent: bool) {
+    /// `locked`: the caller holds the lane's turn.
+    async fn tell(
+        &self,
+        key: &str,
+        text: String,
+        identity: Option<String>,
+        urgent: bool,
+        locked: bool,
+    ) {
         let mailbox = self.mailbox(key);
         let session = self.session(key);
         let message = Message {
@@ -1481,8 +1556,9 @@ impl<R: Runtime> Lanes<R> {
             identity,
             request_id: None,
         };
-        if let Err(e) = mailbox.deliver(&message, session.as_deref(), false).await {
-            log::warn("lane notice not stored", &[("lane", &key), ("error", &e)]);
+        match mailbox.deliver(&message, session.as_deref(), false).await {
+            Ok((_, _, notes)) => self.noted(key, notes, locked).await,
+            Err(e) => log::warn("lane notice not stored", &[("lane", &key), ("error", &e)]),
         }
     }
 
@@ -1551,14 +1627,15 @@ impl<R: Runtime> Lanes<R> {
                 .await;
             return Ok(format!("{out:?}"));
         }
-        let (receipt, _, _) = mailbox.deliver(&message, Some(&*session), false).await?;
-        if receipt.state == ReceiptState::InDoubt {
-            drop(turn);
-            let reason = receipt.reason.clone().unwrap_or_default();
-            self.keep(key, |r| r.doubt = Some(reason)).await;
-        }
+        let (receipt, _, notes) = mailbox.deliver(&message, Some(&*session), false).await?;
+        drop(turn);
+        self.noted(key, notes, false).await;
+        let state = match receipt.inbox_id {
+            Some(row) => mailbox.receipt(None, row).await.state,
+            None => receipt.state,
+        };
         self.nudge.notify_one();
-        Ok(format!("{:?}", receipt.state).to_lowercase())
+        Ok(format!("{state:?}").to_lowercase())
     }
 
     /// Lifts the in-doubt fence; never resends, never decides what happened (EVR req. 62).
@@ -1824,7 +1901,8 @@ impl<R: Runtime> Lanes<R> {
             return Err("the lane's session identity cannot be verified".into());
         }
         let mailbox = self.mailbox(key);
-        let (receipt, _, _) = mailbox.deliver(&message, session.as_deref(), false).await?;
+        let (receipt, _, notes) = mailbox.deliver(&message, session.as_deref(), false).await?;
+        self.noted(key, notes, false).await;
         Ok(receipt)
     }
 

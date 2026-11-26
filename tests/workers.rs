@@ -792,8 +792,7 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
 
 /// The worker's `serve` dies mid-lane (as when the machine or its network drops): the lane is lost,
 /// its thread hears it in the owner's language, `worker.offline` and `worker.online` come once each,
-/// and the lane comes back by itself on the same session file and takes messages. A delivery in
-/// flight at a drop ends in doubt and is never resent.
+/// and the lane comes back by itself on the same session file and takes messages.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_dropped_worker_lane_resumes_on_its_session() {
@@ -860,6 +859,88 @@ fn a_dropped_worker_lane_resumes_on_its_session() {
     hub.until(WAIT, || {
         remote_text(&back).contains("after the drop").then_some(())
     });
+    hub.stop();
+}
+
+/// A message the worker's OMP took but whose entry was not in the session file when the worker
+/// dropped ends in doubt once the lane is back on that file: never written again, the lead and the
+/// owner told, and the lane's messages fenced until the lead releases it (DESIGN 9.3).
+#[test]
+fn a_delivery_in_flight_at_a_drop_ends_in_doubt() {
+    let (mut hub, repo) = lane_hub("");
+    let w = WorkerBox::new(&hub, "box", 22);
+    let hub_id = enrol(&hub, &w, "dev@box", &[]);
+    start(&mut hub);
+    let open = json!({
+        "key": "flight", "title": "In flight", "brief": "Work.",
+        "checks": [{ "kind": "command", "argv": ["true"] }],
+        "cwd": repo, "worker": "box",
+    });
+    assert_eq!(lane(&hub, "open", &open).unwrap()["outcome"], "started");
+    let rec = record(&hub, "flight");
+    hub.until(WAIT, || {
+        remote_text(&rec)
+            .contains("Lane instructions")
+            .then_some(())
+    });
+    // The worker's OMP takes the message, and the drop comes before its entry is written.
+    let data = w.root.join("bin/omp-data");
+    std::fs::write(data.join("noentry"), "").unwrap();
+    lane(
+        &hub,
+        "send",
+        &json!({ "key": "flight", "text": "in flight" }),
+    )
+    .unwrap();
+    let written = || {
+        std::fs::read_to_string(data.join("prompts"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("in flight"))
+            .count()
+    };
+    hub.until(WAIT, || (written() == 1).then_some(()));
+    rustix_kill(w.serve_pid(&hub_id).unwrap());
+    std::fs::remove_file(data.join("noentry")).unwrap();
+    // Back on the same session, the file without the entry: in doubt, told once, not resent.
+    let doubt = hub.until(WAIT, || {
+        hub.events()
+            .into_iter()
+            .find(|e| e["kind"] == "delivery.in_doubt" && e.to_string().contains("flight"))
+    });
+    assert!(doubt.to_string().contains("not resent"), "{doubt}");
+    let back = record(&hub, "flight");
+    assert_eq!(back["session_file"], rec["session_file"]);
+    assert!(back["live"] == true && back["lost"].is_null(), "{back}");
+    assert!(back["doubt"].is_string(), "{back}");
+    let told = || {
+        hub.events()
+            .into_iter()
+            .filter(|e| e["kind"] == "lane.alert" && e.to_string().contains("delivery in doubt"))
+            .count()
+    };
+    hub.until(WAIT, || (told() > 0).then_some(()));
+    let fenced = lane(&hub, "send", &json!({ "key": "flight", "text": "next" })).unwrap_err();
+    assert!(fenced.contains("in doubt"), "{fenced}");
+    // The lead releases the fence; the next message goes, and the one in doubt never again.
+    lane(
+        &hub,
+        "release",
+        &json!({ "key": "flight", "note": "not in the session; told the lane myself" }),
+    )
+    .unwrap();
+    lane(
+        &hub,
+        "send",
+        &json!({ "key": "flight", "text": "after release" }),
+    )
+    .unwrap();
+    hub.until(WAIT, || {
+        remote_text(&back).contains("after release").then_some(())
+    });
+    assert_eq!(written(), 1, "the message in doubt was written again");
+    assert!(!remote_text(&back).contains("in flight"));
+    assert_eq!(told(), 1, "the lead hears it once: {:?}", hub.event_kinds());
     hub.stop();
 }
 

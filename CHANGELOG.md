@@ -30,10 +30,18 @@
   Bridge connections travel as channels of the worker stream and are accepted only for lanes on
   that worker: never the lead, never another worker's lane, never the control protocol. A lane
   whose worker drops is lost; its OMP ends there, and the lane comes back by itself on the same
-  session file through the hub-restart path once the worker answers (a deliver in doubt stays in
-  doubt). A lane for an offline worker is queued and starts by itself once the worker is
-  reachable. Remote lanes are headless only and count toward `[lanes] max` and the worker's
-  `lanes`, not toward `[sessions] cap`; their spend is not read on the hub yet.
+  session file through the hub-restart path once the worker answers. A message the drop left
+  unconfirmed is then found in that file or ends in doubt: never resent (a local lane's message
+  whose process ended is resent once; a worker's process ends out of the hub's sight), the lane's
+  `lane.send` fenced until the lead releases it, and the lead and the owner told once. A lane for
+  an offline worker is queued and starts by itself once the worker is reachable. The ops panel's
+  worker line shows each worker online, idle, offline, reconnecting (lost lanes wait for it),
+  refused or incompatible, with its lanes in use. Remote lanes are headless only and count toward
+  `[lanes] max` and the worker's `lanes`, not toward `[sessions] cap`; their spend is not read on
+  the hub yet.
+- A lane message that ends in doubt after it was written (no session-file entry within 30 s, or
+  an unanswered write) now fences the lane and tells the lead and the owner; before, only the
+  delivery record said so.
 - One base64 encoder and decoder (`sys::base64`) replaces the two copies.
 
 ## 0.2.4 (2026-11-27)

@@ -761,19 +761,24 @@ fn ops_people(
     let (lead, lanes, workers) = (Arc::clone(lead), Arc::clone(lanes), Arc::clone(workers));
     jobs.ctx().ops.set_people(Arc::new(move || {
         let (lead, lanes) = (Arc::clone(&lead), Arc::clone(&lanes));
-        let workers: Vec<WorkerLine> = workers
-            .list()
-            .into_iter()
-            .map(|w| WorkerLine {
-                name: w.display,
-                state: w.state,
-                lanes: w.lanes,
-                max: w.lanes_max,
-            })
-            .collect();
+        let views = workers.list();
         Box::pin(async move {
             let view = lead.view().await;
-            let (running, waiting, lane_models) = lanes.ops_counts().await;
+            let counts = lanes.ops_counts().await;
+            // A worker's lanes are its open lane records, lost ones included.
+            let workers: Vec<WorkerLine> = views
+                .into_iter()
+                .map(|w| {
+                    let (open, lost) = counts.workers.get(&w.name).copied().unwrap_or_default();
+                    WorkerLine {
+                        name: w.display,
+                        state: w.state,
+                        lanes: open,
+                        lost,
+                        max: w.lanes_max,
+                    }
+                })
+                .collect();
             let state = match (&view.session, &view.phase) {
                 (Some(s), _) if s.quota_blocked.is_some() => LeadState::Held,
                 (Some(s), _) => match s.status {
@@ -795,12 +800,12 @@ fn ops_people(
                 .map(|s| s.model.clone().unwrap_or_else(|| s.requested_model.clone()))
                 .into_iter()
                 .collect();
-            models.extend(lane_models);
+            models.extend(counts.models);
             People {
                 lead: state,
                 model: view.session.and_then(|s| s.model),
-                running,
-                waiting,
+                running: counts.running,
+                waiting: counts.waiting,
                 models,
                 workers,
             }

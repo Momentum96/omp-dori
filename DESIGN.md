@@ -285,7 +285,9 @@ time with immediate "busy" refusal; delivery receipts keyed by request ID (HOST-
   on the hub. The worker uses its own bare clone per origin and a worktree per lane at a pushed commit.
 - Bridge connections are channels of the worker stream, accepted only for that worker's lanes.
 - A drop ends the remote OMP; the lane is lost and comes back through the hub-restart path (decision 9) once
-  the worker answers. A lane for an offline worker is queued and starts when the worker is reachable.
+  the worker answers. A delivery the drop left unconfirmed is then found in the session file or ends in doubt
+  (9.3); unlike a local process, the remote one ended out of the hub's sight, so it is never resent. A lane for
+  an offline worker is queued and starts when the worker is reachable.
 
 ## 5. Relays and voice
 

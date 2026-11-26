@@ -508,6 +508,7 @@ impl<R: Runtime> Lanes<R> {
                 rec.run_id, rec.watch.round_ms
             )),
             true,
+            false,
         )
         .await;
         self.keep(&rec.key, |r| r.watch.reminders = r.watch.reminders.max(n))

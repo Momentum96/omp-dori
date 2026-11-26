@@ -346,7 +346,8 @@ impl<R: Runtime> Lanes<R> {
 
     /// Brings back every lane a dropped worker connection lost, once its worker answers again
     /// (design 2.4, Option B): through the same restart as after a hub restart, on the exact
-    /// session file. Deliveries in doubt at the drop stay in doubt; nothing is resent.
+    /// session file. A delivery the drop left unconfirmed is then found in that file or ends in
+    /// doubt; it is never resent (DESIGN 9.3).
     pub(super) async fn reattach(self: &Arc<Self>) {
         if self.stopping.load(std::sync::atomic::Ordering::Acquire) {
             return;
@@ -387,7 +388,8 @@ impl<R: Runtime> Lanes<R> {
                 .with("lane", &rec.key)
                 .with("detail", format!("{worker} is back: {line}")),
             );
-            if back {
+            if let Some(session) = self.session(&rec.key).filter(|_| back) {
+                self.flush_inbox(&rec.key, &session, false).await;
                 self.worker_note(&rec, &worker, true).await;
             }
         }

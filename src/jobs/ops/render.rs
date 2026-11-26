@@ -116,7 +116,10 @@ pub(crate) struct People {
 pub(crate) struct WorkerLine {
     pub(crate) name: String,
     pub(crate) state: crate::worker::link::State,
+    /// Its open lanes, lost ones included.
     pub(crate) lanes: usize,
+    /// Lanes lost with its connection; they resume when it answers again.
+    pub(crate) lost: usize,
     pub(crate) max: u32,
 }
 
@@ -136,7 +139,9 @@ impl Default for People {
     }
 }
 
-/// `🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중`, or nothing without workers.
+/// `🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중 · old-box 🟡 다시 연결 중 · 레인 1/1`, or
+/// nothing without workers. A worker that is not connected names its lanes when it has any; one
+/// whose lost lanes wait for it is reconnecting.
 fn workers_line(workers: &[WorkerLine], lang: Language) -> Option<String> {
     use crate::worker::link::State;
     if workers.is_empty() {
@@ -146,17 +151,25 @@ fn workers_line(workers: &[WorkerLine], lang: Language) -> Option<String> {
         .iter()
         .take(WORKERS_SHOWN)
         .map(|w| {
-            let state = match w.state {
-                State::Online => match lang {
-                    Language::Korean => format!("🟢 레인 {}/{}", w.lanes, w.max),
-                    Language::English => format!("🟢 lanes {}/{}", w.lanes, w.max),
-                },
-                State::Idle => t(lang, "⚪ 쉬는 중", "⚪ idle").to_string(),
-                State::Offline => t(lang, "🔴 연결 끊김", "🔴 offline").to_string(),
-                State::Refused => t(lang, "⛔ 연결 거부", "⛔ refused").to_string(),
-                State::Incompatible => t(lang, "⛔ 버전 비호환", "⛔ incompatible").to_string(),
+            let lanes = match lang {
+                Language::Korean => format!("레인 {}/{}", w.lanes, w.max),
+                Language::English => format!("lanes {}/{}", w.lanes, w.max),
             };
-            format!("{} {state}", plain(&w.name))
+            let word = match w.state {
+                State::Online => return format!("{} 🟢 {lanes}", plain(&w.name)),
+                State::Idle | State::Offline if w.lost > 0 => {
+                    t(lang, "🟡 다시 연결 중", "🟡 reconnecting")
+                }
+                State::Idle => t(lang, "⚪ 쉬는 중", "⚪ idle"),
+                State::Offline => t(lang, "🔴 연결 끊김", "🔴 offline"),
+                State::Refused => t(lang, "⛔ 연결 거부", "⛔ refused"),
+                State::Incompatible => t(lang, "⛔ 버전 비호환", "⛔ incompatible"),
+            };
+            if w.lanes == 0 {
+                format!("{} {word}", plain(&w.name))
+            } else {
+                format!("{} {word} · {lanes}", plain(&w.name))
+            }
         })
         .collect();
     if workers.len() > WORKERS_SHOWN {
@@ -1043,11 +1056,12 @@ pub(crate) mod tests {
     #[test]
     fn workers_show_their_state_and_lanes() {
         use crate::worker::link::State;
-        let line = |name: &str, state, lanes| WorkerLine {
+        let line = |name: &str, state, lanes, lost| WorkerLine {
             name: name.into(),
             state,
             lanes,
-            max: 1,
+            lost,
+            max: 2,
         };
         let mut p = sample();
         assert!(
@@ -1056,19 +1070,37 @@ pub(crate) mod tests {
                 .contains("워커")
         );
         p.people.workers = vec![
-            line("linux-box", State::Online, 1),
-            line("mac-mini", State::Idle, 0),
-            line("old-box", State::Refused, 0),
+            line("linux-box", State::Online, 1, 0),
+            line("mac-mini", State::Idle, 0, 0),
+            line("old-box", State::Refused, 1, 1),
+            line("laptop", State::Offline, 0, 0),
         ];
         let ko = panel(&p, Language::Korean, "x").to_string();
         assert!(
             ko.contains(
-                "🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중 · old-box ⛔ 연결 거부"
+                "🛰️ 워커: linux-box 🟢 레인 1/2 · mac-mini ⚪ 쉬는 중 · old-box ⛔ 연결 거부 · 레인 1/2 · laptop 🔴 연결 끊김"
             ),
             "{ko}"
         );
+        // Dropped with lanes on it: reconnecting, its lanes named, lost ones included.
+        p.people.workers = vec![
+            line("linux-box", State::Offline, 2, 1),
+            line("mac-mini", State::Online, 0, 0),
+        ];
+        let ko = panel(&p, Language::Korean, "x").to_string();
+        assert!(
+            ko.contains("🛰️ 워커: linux-box 🟡 다시 연결 중 · 레인 2/2 · mac-mini 🟢 레인 0/2"),
+            "{ko}"
+        );
+        let en = panel(&p, Language::English, "x").to_string();
+        assert!(
+            en.contains(
+                "🛰️ Workers: linux-box 🟡 reconnecting · lanes 2/2 · mac-mini 🟢 lanes 0/2"
+            ),
+            "{en}"
+        );
         p.people.workers = (0..6)
-            .map(|i| line(&format!("w{i}"), State::Offline, 0))
+            .map(|i| line(&format!("w{i}"), State::Offline, 0, 0))
             .collect();
         let en = panel(&p, Language::English, "x").to_string();
         assert!(
