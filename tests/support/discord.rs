@@ -691,21 +691,7 @@ async fn answer(
         ("GET", ["guilds", _, "threads", "active"]) => {
             reply(200, &json!({ "threads": s.threads, "members": [] }))
         }
-        ("GET", ["channels", id, "messages"]) => {
-            let limit = usize::try_from(param(&query, "limit").unwrap_or(50)).unwrap();
-            let before = param(&query, "before");
-            let list = s.history.get(*id).cloned().unwrap_or_default();
-            let page: Vec<Value> = list
-                .iter()
-                .rev()
-                .filter(|m| {
-                    before.is_none_or(|b| m["id"].as_str().unwrap().parse::<u64>().unwrap() < b)
-                })
-                .take(limit)
-                .cloned()
-                .collect();
-            reply(200, &Value::Array(page))
-        }
+        ("GET", ["channels", id, "messages"]) => history_page(&s, id, &query),
         ("GET", ["channels", id, "messages", mid]) => {
             match s
                 .history
@@ -730,6 +716,21 @@ async fn answer(
         _ => reply(404, &json!({ "message": "Unknown", "code": 0 })),
     };
     Ok(response)
+}
+
+/// One page of a channel's history, newest first, as `limit` and `before` ask.
+fn history_page(s: &State, id: &str, query: &str) -> Response<Full<Bytes>> {
+    let limit = usize::try_from(param(query, "limit").unwrap_or(50)).unwrap();
+    let before = param(query, "before");
+    let list = s.history.get(id).cloned().unwrap_or_default();
+    let page: Vec<Value> = list
+        .iter()
+        .rev()
+        .filter(|m| before.is_none_or(|b| m["id"].as_str().unwrap().parse::<u64>().unwrap() < b))
+        .take(limit)
+        .cloned()
+        .collect();
+    reply(200, &Value::Array(page))
 }
 
 /// A request body: JSON, or a multipart body's `payload_json` with its files.
