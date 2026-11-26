@@ -284,29 +284,31 @@ fn an_unreadable_channel_drops_out_alone() {
         (s["healthy"] == true).then_some(s)
     });
     assert!(s["health"]["reason"].is_null(), "{s}");
-    fake.say(FakeDiscord::message(
-        CH,
-        800_000_000_000_000_401,
-        OWNER,
-        "the rest goes on",
-    ));
-    answered(&fake, CH, 800_000_000_000_000_401);
-    fake.say(FakeDiscord::message(
-        NEW,
-        800_000_000_000_000_402,
-        OWNER,
-        "not read",
-    ));
+    // Message IDs carry real time, as Discord's do: each is newer than the bot's replies before it,
+    // which a catch-up read takes as the room's position.
+    let rest = fresh(401);
+    fake.say(FakeDiscord::message(CH, rest, OWNER, "the rest goes on"));
+    answered(&fake, CH, rest);
+    let unread = fresh(402);
+    fake.say(FakeDiscord::message(NEW, unread, OWNER, "not read"));
+    let connected = |hub: &TestHub| hub.json(&["discord", "status", "--json"])["health"].clone();
+    let before = connected(&hub)["connected_ms"].clone();
     fake.gw(Gw::Op7);
     fake.wait_connections(3, WAIT);
+    // The live message comes after the catch-up read of the new connection, as on a slow host.
+    hub.until(WAIT, || {
+        let h = connected(&hub);
+        (h["connected_ms"] != before && h["caught_up"] == true).then_some(())
+    });
+    let after = fresh(403);
     fake.say(FakeDiscord::message(
         CH,
-        800_000_000_000_000_403,
+        after,
         OWNER,
         "after the second reconnect",
     ));
-    answered(&fake, CH, 800_000_000_000_000_403);
-    assert!(replies_to(&fake, NEW, 800_000_000_000_000_402).is_empty());
+    answered(&fake, CH, after);
+    assert!(replies_to(&fake, NEW, unread).is_empty());
     assert_eq!((notices(NEW), notices(THIRD)), (1, 1), "one notice each");
     assert!(hub.stop().success());
 }
