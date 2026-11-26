@@ -1,6 +1,6 @@
 [package]
 name = "cataly-voice"
-version = "0.2.2"
+version = "0.2.3"
 description = "Cataly voice calls: Discord voice, DAVE, Opus and the realtime model link"
 edition.workspace = true
 rust-version.workspace = true

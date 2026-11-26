@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3 (Unreleased)
+## 0.2.3 (2026-11-27)
 
 - `cataly update` and `cataly rollback` no longer report a stopping hub as held. A hub that
   accepts the orderly stop now writes its acceptance before it begins to stop; before, a hub
