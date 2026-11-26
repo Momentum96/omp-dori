@@ -602,3 +602,19 @@ macOS runner was available; the release workflow builds and checks that target o
 
 Not measured: the musl static build (`x86_64-unknown-linux-musl`) size, which the release workflow
 produces; the darwin-arm64 size and install time.
+
+## Watched channels from the ops panel (2026-11-27, Linux x64, release build, fake OMP and fake Discord)
+
+Idle memory as in part A: the hub's `VmRSS` 10 s after start, here once Discord intake is
+connected and caught up, the lead attached on the fake OMP in its turn mode and the ops panel
+posted. `cargo test --release --test watch -- --ignored --nocapture idle_rss`, three runs each,
+once against main (7cc4ddbe, with the test and the fake Discord's guild field added) and once with
+the picker and the live channel change:
+
+| Hub idle RSS (OMP excluded) | Before (main) | After |
+| --- | --- | --- |
+| 1 watched channel | 16.6-17.1 MiB (`VmRSS` 16984, 17048, 17540 kB) | 16.7-17.1 MiB (17148, 17360, 17508 kB) |
+| 5 watched channels | 16.5-17.1 MiB (16896, 17344, 17464 kB) | 16.7-17.1 MiB (17076, 17420, 17532 kB) |
+
+No change beyond run-to-run noise (about 0.6 MiB): the picker keeps no state in the hub (Discord's
+client renders the channel list), and a watched channel costs one entry in intake's scope.

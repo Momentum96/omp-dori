@@ -671,8 +671,9 @@ as it is at that moment, keeping your other lines, and moves `home` to a watched
 would no longer be one (or sets it when several channels are now watched and it was unset). The
 result is checked as `cataly config check` does and applied as `cataly config reload` does; a
 result that is not valid, or a file that cannot be written, changes nothing and is reported. A
-new channel is read from its newest message on, its threads as `follow_threads` says; a dropped
-one stops being read at once. With more than 25 watched channels the picker shows the first 25
+new channel is read from the moment the change was applied (a message sent meanwhile is caught
+up), its threads as `follow_threads` says; a dropped one stops being read at once, and messages
+of it still queued are dropped. With more than 25 watched channels the picker shows the first 25
 and keeps the rest. Only `[discord] owner` may submit it, and only from `[discord] guild`; the
 folder holding the file must be owner-only, as setup makes it.
 

@@ -9,9 +9,9 @@
   `cataly config reload` does. Only `[discord] owner` may use it, from `[discord] guild`; an
   invalid result or a failed write changes nothing. Channels past the picker's 25 are kept.
 - A change of `[discord] channels` or `home` alone, from the panel or `cataly config reload`,
-  now applies on the running Gateway connection: a new channel is read from its newest message
-  on and catch-up after a reconnect covers it; a dropped one stops being read at once. Before,
-  any `[discord]` change restarted intake and opened a new connection.
+  now applies on the running Gateway connection: a new channel is read from the moment the
+  change was applied and catch-up after a reconnect covers it; a dropped one stops being read at
+  once. Before, any `[discord]` change restarted intake and opened a new connection.
 
 ## 0.2.3 (2026-11-27)
 
