@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use support::TestHub;
+use support::{TestHub, output_of};
 
 /// The OMP side of one bridge connection.
 struct Bridge {
@@ -539,10 +539,9 @@ fn a_block_ends_when_its_owner_is_gone() {
         .spawn()
         .unwrap();
     hub.fixture("tern", "owner", Some(&owner.id().to_string()));
-    let out = std::process::Command::new(&tern)
-        .args(["new", "tab", "--json", "--", "sleep", "60"])
-        .output()
-        .unwrap();
+    let out = output_of(
+        std::process::Command::new(&tern).args(["new", "tab", "--json", "--", "sleep", "60"]),
+    );
     let id = serde_json::from_slice::<Value>(&out.stdout).unwrap()["id"]
         .as_str()
         .unwrap()
@@ -559,6 +558,36 @@ fn a_block_ends_when_its_owner_is_gone() {
     hub.until(Duration::from_secs(10), || {
         (!running(wrapper.trim()) && !running(&program)).then_some(())
     });
+}
+
+/// An installed fake can be refused for a moment ("Text file busy") while a child another test
+/// thread is starting still holds a copy of the descriptor that wrote it; that broke the test above
+/// on CI. Here the test holds the fake open for writing for 200 ms, and `output_of` waits it out.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_fake_held_open_for_writing_runs_once_released() {
+    let hub = TestHub::new("");
+    let tern = hub.install_fake("tern");
+    let writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&tern)
+        .unwrap();
+    let refused = std::process::Command::new(&tern)
+        .arg("--version")
+        .output()
+        .unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        drop(writer);
+    });
+    let out = output_of(std::process::Command::new(&tern).arg("--version"));
+    release.join().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "tern 0.0.0 (test stand-in)\n"
+    );
 }
 
 /// A process still running with the sandbox on its command line when the hub is dropped fails the

@@ -88,6 +88,11 @@ pub(crate) const SIGNATURE_MAX: u64 = 1024;
 /// The candidate's version report: 5 s, 64 KiB.
 pub(crate) const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 const REPORT_CAP: u64 = 64 * 1024;
+/// Starts of a candidate refused as busy ("Text file busy"), and the pause between: staging wrote it
+/// a moment before, and a child another thread was starting then can hold a copy of the write
+/// descriptor until its own exec closes it. At most one second in all.
+const BUSY_STARTS: u32 = 20;
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
 /// GitHub metadata: 15 s in all.
 pub(crate) const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 /// One asset download.
@@ -361,13 +366,13 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
 
 /// Runs `<binary> version --json` under the report bounds and reads its report.
 pub(crate) async fn candidate_report(binary: &Path) -> Result<Report, String> {
-    use crate::sys::command::{KILL_GRACE, Output, Spec, run};
+    use crate::sys::command::{CommandError, KILL_GRACE, Output, Spec, run};
     let argv = [
         binary.display().to_string(),
         "version".into(),
         "--json".into(),
     ];
-    let done = run(&Spec {
+    let spec = Spec {
         argv: &argv,
         cwd: None,
         env: &[],
@@ -375,8 +380,20 @@ pub(crate) async fn candidate_report(binary: &Path) -> Result<Report, String> {
         kill_grace: KILL_GRACE,
         output_cap: REPORT_CAP,
         output: Output::Capture,
-    })
-    .await
+    };
+    let mut starts = 1;
+    let done = loop {
+        match run(&spec).await {
+            Err(CommandError::Spawn { source, .. })
+                if source.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && starts < BUSY_STARTS =>
+            {
+                starts += 1;
+                tokio::time::sleep(BUSY_PAUSE).await;
+            }
+            done => break done,
+        }
+    }
     .map_err(|e| format!("the candidate binary did not run: {e}"))?;
     if done.timed_out || done.truncated || !done.success() {
         return Err("the candidate binary gave no version report".into());
@@ -719,5 +736,31 @@ mod tests {
             .complete()
             .unwrap_err();
         assert!(why.contains("cataly-0.3.0.ts"), "{why}");
+    }
+
+    /// Linux refuses to start a program while any process holds it open for writing. A candidate
+    /// staged a moment ago can be held so by a child another thread was starting; here the test
+    /// holds it for 200 ms, and the report waits that out.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_candidate_still_open_for_writing_reports_once_released() {
+        let dir = crate::sys::fs::tests::scratch("busy");
+        let binary = dir.join("cataly");
+        let expected = report();
+        let json = serde_json::to_string(&expected).unwrap();
+        std::fs::write(&binary, format!("#!/bin/sh\necho '{json}'\n")).unwrap();
+        crate::sys::fs::tests::make_executable(&binary);
+        let writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&binary)
+            .unwrap();
+        let refused = std::process::Command::new(&binary).output().unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(writer);
+        });
+        assert_eq!(candidate_report(&binary).await.unwrap(), expected);
+        release.join().unwrap();
     }
 }
