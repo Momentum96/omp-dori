@@ -1,7 +1,6 @@
 # Design principles
 
-Set by the owner on 2026-11-24. Every design and review is judged against them, in this
-order.
+Every design and review in Cataly is judged against these principles, in this order.
 
 ## 1. Thin over OMP
 

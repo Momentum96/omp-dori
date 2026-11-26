@@ -1,5 +1,7 @@
 # Owner jobs: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 The owner runs a set of personal watchers beside the product: a GitHub watch over his own pull requests, a quota

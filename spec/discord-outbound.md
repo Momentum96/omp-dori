@@ -1,5 +1,7 @@
 # Discord outbound: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Everything the product does toward Discord on the owner's behalf: posting and editing messages,

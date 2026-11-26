@@ -1,11 +1,11 @@
 # Third-party code
 
 Every dependency of the `cataly` crate, with licence and source. All are declared crates from crates.io;
-no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.2.
+no third-party source is included in this repository. Allowed by `DESIGN.md` 10.2.
 
 | Crate | Version | Licence | Source | Features enabled and why |
 | --- | --- | --- | --- | --- |
-| tokio | 1.54 | MIT | https://crates.io/crates/tokio | `rt-multi-thread`, `net`, `process`, `time`, `signal`, `sync`, `io-util` as in 10.2; `macros` for `select!` (compile-time only, see `docs/build-notes.md`). `fs` is not enabled: nothing uses it yet. |
+| tokio | 1.54 | MIT | https://crates.io/crates/tokio | `rt-multi-thread`, `net`, `process`, `time`, `signal`, `sync`, `io-util` as in 10.2; `macros` for `select!` (compile-time only). `fs` is not enabled: nothing uses it yet. |
 | serde | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde | `std`, `derive`: wire and record types |
 | serde_json | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde_json | `std`: control protocol, event log |
 | rusqlite | 0.37 | MIT (bundled SQLite: public domain) | https://crates.io/crates/rusqlite | `bundled`: no system SQLite; `backup`: SQLite's online backup for the consistent store snapshot of the home backup (decision 16) |

@@ -1,5 +1,7 @@
 # Session host: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Cataly runs its work inside OMP sessions: the standing lead and duty sessions, and one session per lane. This

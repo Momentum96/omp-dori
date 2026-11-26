@@ -1,5 +1,17 @@
 # Clean-room record
 
+The dated record behind `docs/provenance.md`, kept as written at the time of each step.
+
+- Roles: the **coordinator** supervised the process; it had seen the earlier product and wrote no
+  code or design here. **Analysis agents** read the earlier product and wrote behaviour specs
+  outside this repository. **Build agents** were blank agents that had not seen the earlier
+  product; they wrote the code from `spec/` and this repository only.
+- "Earlier tree" and "earlier code" mean the earlier product's repository; "upstream" means the
+  third-party project it was based on.
+- Files named here that are no longer in the tree (`docs/cleanroom.md`, `docs/plan.md`,
+  `docs/build-notes.md`, `docs/notes/`, `import/`) were removed on 2026-11-26 and stay in this
+  repository's git history. The rules of `docs/cleanroom.md` now live in `docs/provenance.md`.
+
 | Date | Item | Role | Allowed to read | Result |
 | --- | --- | --- | --- | --- |
 | 2026-11-25 | Rules, principles, repository created | Coordinator (has seen the earlier tree; writes no code or design here) | everything | `docs/cleanroom.md`, `docs/principles.md` |
@@ -40,4 +52,8 @@
 | 2026-11-26 | Public release 0.2.0: releases from `vntrevx/Cataly` with the newest stable Cataly release chosen from the release list (prereleases, drafts and other software skipped; incomplete releases refused) in the hub, `cataly update`/`check` and `install.sh`; npm and Bun packages (`npm/`: launcher, `cataly-linux-x64`, `cataly-darwin-arm64` defined), package installs detected from the binary's path (`sys::package`) with extension link at hub start, service running the package binary, `cataly update` through npm or Bun with the ordered restart, rollback and uninstall guidance; `scripts/release.sh`, `scripts/npm-pack.sh`; `public/` for the release repository; version 0.2.0 | Build agent PublicRelease (blank agent) | this repository, public npm/Bun/GitHub docs, the installed stock OMP (its package metadata only) | uncommitted in the main worktree for the coordinator; nothing read outside the allowed set |
 | 2026-11-26 | 0.2.1 fix: the quota gate holds new sessions only (lead and lane resumes after a hub restart, update or rollback and `lead start` go ahead; `--fresh`, a first lead and new lanes wait); a held lead named with provider, limits, reset times and `cataly quota lift` in `lead start`/`lead status`, the ops panel, the `cataly update` line and the update message; a refused lead start settles the update wait at once; `CHANGELOG.md` 0.2.1 Unreleased | Build agent GateResume (blank agent) | this repository, public docs | uncommitted on main; nothing read outside the allowed set |
 | 2026-11-26 | One repository: the root becomes the public front page (six READMEs and their images under `docs/`), build-from-source notes move to `CONTRIBUTING.md`, every reference to the separate source repository points at `vntrevx/Cataly`, `install.sh` carries the release public key and `scripts/release.sh` checks it instead of filling it in, `public/` removed, `scripts/npm-pack.sh` packs the root `README.md` with absolute image and link URLs | Build agent OneRepo (blank agent) | this repository, the coordinator's front page (`README*.md`, `docs/*` of the release repository's working copy), public docs | uncommitted on main; nothing read outside the allowed set |
+<<<<<<< HEAD
 | 2026-11-26 | 0.2.2 targets: releases for `linux-x64`, `linux-arm64`, `darwin-arm64` and `darwin-x64` (target and executable format per CPU, `install.sh`, the npm launcher and `cataly-<target>` packages); macOS test fixes (canonical temporary folders, `pgrep -P` for `ps --ppid`); advisories (rusqlite 0.41, documented ignores under davey); CI on four runners with a shared setup action, Cargo and Bun caches, an `os` dispatch input, per-PR cancellation, `CATALY_TEST_PATIENCE` on macOS, a release smoke job and release binaries on a dispatch with `binaries`; `scripts/release.sh --add`; PR template, `.gitattributes`, `.githooks/pre-commit` | Build agent MacBuild (blank agent) | this repository, its CI logs, public docs, stock OMP | branch `mac-support`; nothing read outside the allowed set |
+=======
+| 2026-11-26 | Public tree tidied: `docs/provenance.md` replaces `docs/cleanroom.md`; internal working files (`docs/plan.md`, `docs/build-notes.md`, `docs/notes/`, the empty `import/`) removed, their cited measurements moved to `docs/measurements.md`; `docs/decisions.md` keeps the decisions that shape the product; each spec marked as the spec used for 0.2 | Build agent RepoTidy (blank agent) | this repository and its own git history (worktree and main checkout), public docs | committed on `repo-cleanup`; nothing read outside the allowed set |
+>>>>>>> repo-cleanup

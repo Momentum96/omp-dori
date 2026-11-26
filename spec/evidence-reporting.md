@@ -1,5 +1,7 @@
 # Evidence and reporting: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Lanes do the work; the lead and the owner need to know what happened without reading transcripts. This area covers

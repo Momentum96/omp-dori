@@ -1,10 +1,10 @@
 # Cataly design
 
-Status: proposed, revised 2026-11-25 after the owner's decisions in `docs/decisions.md`, which override any
-default here (section 12.1). Written on the build side of the clean room from the 13 specs in `spec/` only.
+Status: revised 2026-11-25 after the decisions in `docs/decisions.md`, which override any default here
+(section 12.1). Written from the 13 behaviour specs in `spec/` (see `docs/provenance.md`).
 Every decision below names the principle it serves: **thin** over OMP, **light**, **fast**, **stable**
 (`docs/principles.md`). Only capabilities marked KEEP, SIMPLIFY or MERGE (and, in `spec/omp-patch.md`,
-REPLACE-PUBLIC and MOVE-OUT) are built. `docs/plan.md` assigns each of them to a milestone.
+REPLACE-PUBLIC and MOVE-OUT) are built.
 
 OMP version this design was checked against: **omp 19.1.1** (`omp --version` prints `omp/19.1.1`), the
 compiled binary at `~/.bun/bin/omp`. Its bundled documentation (`omp read omp://rpc.md` and the other
@@ -327,7 +327,7 @@ trait with two implementations: WebSocket (PCM frames in JSON events) and WebRTC
 then Opus over SRTP plus a data channel for events, through str0m). Config selects the transport; the other
 is not started. Provider standby stays dropped: idle close plus wake on speech covers it. Both transports are
 tested in CI against a fake realtime server and, before each release that changes voice, against the real
-API under the gated live test of `docs/plan.md` milestone 5. OMP's own live voice (`live_connect`, docs) is not
+API under the gated live test (`tests/live_voice.rs`). OMP's own live voice (`live_connect`, docs) is not
 used: it binds voice to the lead's process and Codex sign-in and has no spending ledger.
 
 ## 6. Job engine
@@ -603,8 +603,8 @@ the Cargo manifest at release time (IR requirement 6).
 
 ### 10.2 Dependencies
 
-Policy: few, well-known crates; each recorded in `docs/third-party.md` with licence and source (cleanroom rule
-4); `cargo deny` allows only MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0 and
+Policy: few, well-known crates; each recorded in `docs/third-party.md` with licence and source
+(`docs/provenance.md`); `cargo deny` allows only MIT, Apache-2.0, BSD-2/3-Clause, ISC, Zlib, Unicode-3.0, CDLA-Permissive-2.0 and
 public domain (SQLite); no copyleft in the binary. Default features off; each enabled feature is justified.
 A crate stays only if writing its job in-house would be large or risky; each row says what it saves. Licences
 checked on crates.io on 2026-11-25.
@@ -631,7 +631,7 @@ checked on crates.io on 2026-11-25.
 | audiopus (bundled libopus) | ISC; libopus BSD-3-Clause | The Opus codec |
 | str0m (`rust-crypto` backend, no default features) | MIT OR Apache-2.0 | Sans-I/O WebRTC (ICE, DTLS, SRTP) for the realtime model's WebRTC transport, with no C crypto |
 
-Milestone 5 note (`docs/notes/voice.md`): the voice build pulls in three things this table does not name.
+Voice build note: the voice build pulls in three things this table does not name.
 (1) chacha20poly1305 (Apache-2.0 OR MIT) for Discord's XChaCha20 transport mode, the fallback when a voice
 server offers no AES-256-GCM. (2) str0m's DTLS comes from dimpl, which links AWS-LC (aws-lc-rs/aws-lc-sys,
 ISC and Apache-2.0 family), so "no C crypto" does not hold for the WebRTC transport; every licence is on the
@@ -698,20 +698,14 @@ fingerprints and background-job completion facts from the live branch; hooks tha
 session marker and resumed-transcript ownership; tern control commands. It holds no records, no credentials,
 no files and no child processes.
 
-### 10.7 Vetted imports
+### 10.7 Reused code
 
-Owner decision 14 allows Rust the owner wrote in the earlier tree, after the coordinator's per-file check
-(`docs/cleanroom.md`, "Vetted imports"). Such files arrive under `import/`. Rules for build agents:
-
-- Before writing a module that `docs/plan.md` marks as an import candidate, look in `import/` and in
-  `docs/cleanroom-log.md` for a vetted file covering it. Never look anywhere else for it.
-- An import is adapted, never adopted: it is renamed to this glossary, placed in the module named here, made to
-  implement this design's traits (`Runtime`, `Relay`, `VoiceHost`, the `omp::rpc` client interface) and to use
-  the `store` module for anything durable. Its own persistence, locking, logging or HTTP layers are removed in
-  favour of `store`, `log`, `sys` and `relay::http` (decision 13: no second implementation).
-- An import that needs a second trait shape, another storage scheme or a dependency outside 10.2 is written
-  from the spec instead (reason noted in the clean-room log). Imported modules meet sections 9 and 10.3 and get
-  the same tests as any other module.
+Apart from code written from `spec/`, Cataly holds only Rust the owner wrote himself, checked file by file and
+listed in `docs/provenance.md`. Each reused file was adapted, not adopted: renamed to this glossary, placed in the
+module named here, made to implement this design's traits (`Runtime`, `Relay`, `VoiceHost`, the `omp::rpc`
+client interface) and to use the `store` module for anything durable. Its own persistence, locking, logging or
+HTTP layers were removed in favour of `store`, `log`, `sys` and `relay::http` (decision 13: no second
+implementation). Reused modules meet sections 9 and 10.3 and have the same tests as any other module.
 
 ## 11. Install and update
 
@@ -792,11 +786,11 @@ rest on the registry's own integrity check, not on the release signature (11.4).
 
 ### 12.1 Decided by the owner
 
-From `docs/decisions.md` (2026-11-25). These are no longer assumptions.
+From `docs/decisions.md`. These are no longer assumptions.
 
 | Decision | Topic | What this design does | Replaces row |
 | --- | --- | --- | --- |
-| 1 | Licence | No upstream code, structure, names or prose; every name in section 1 is designed here; imports only under 10.7 | — |
+| 1 | Licence | Written from `spec/`; reused code only under 10.7 (`docs/provenance.md`); every name in section 1 is designed here | — |
 | 2 | Name | The product, binary, bridge, socket and paths are all `cataly` | — |
 | 3 | Relays, voice, tern | Discord, Telegram, Slack (5.1), voice (5.2) and the tern runtime (4.3) are all built | — |
 | 4 | Windows | No Windows build or CI; Telegram on Windows dropped | A5 |
@@ -809,7 +803,6 @@ From `docs/decisions.md` (2026-11-25). These are no longer assumptions.
 | 11 | Voice transport | WebSocket and WebRTC behind one `RealtimeLink` (5.2); a gated live test against the real API before release, at a cost the owner approves; CI uses a fake | A21 |
 | 12 | Updates | Notice only; `cataly update` installs; nothing installs by itself (11.3) | part of A28 |
 | 13 | Weight | Two crates, one implementation per concern, dependency list cut (10.1, 10.2) | — |
-| 14 | Earlier Rust | Vetted imports under `import/`, adapted to this design's traits and store (10.7; import candidates per milestone in `docs/plan.md`) | — |
 
 ### 12.2 Resolved conflicts and open assumptions
 

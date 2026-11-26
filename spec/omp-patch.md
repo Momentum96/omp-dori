@@ -1,5 +1,7 @@
 # OMP patch removal: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 The old product did not run the OMP that users install. It fetched one exact OMP release (19.0.1) from source,
