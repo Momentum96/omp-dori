@@ -224,9 +224,9 @@ impl Hub {
         Arc::clone(&self.config_tx.borrow())
     }
 
-    /// Stops the hub in order unless a session works or waits on a dialog (IR req. 33); busy
-    /// sessions are never stopped.
-    fn request_stop(&self) -> Result<(), String> {
+    /// Refuses the orderly stop while a session works or waits on a dialog (IR req. 33); busy
+    /// sessions are never stopped. An accepted stop begins with [`Hub::stop`].
+    fn may_stop(&self) -> Result<(), String> {
         let mut busy: Vec<String> = self
             .lead
             .busy()
@@ -239,12 +239,18 @@ impl Hub {
                 .into_iter()
                 .map(|(key, why)| format!("lane {key} {why}")),
         );
-        if !busy.is_empty() {
-            return Err(format!("busy: {}", busy.join("; ")));
+        if busy.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("busy: {}", busy.join("; ")))
         }
+    }
+
+    /// Begins the orderly stop `hub.stop` accepted. The control connection calls it only once the
+    /// acceptance is written: the hub may end at once, and the caller must still read it.
+    fn stop(&self) {
         log::info("orderly stop requested", &[]);
         self.supervisor.request_exit(exit::OK);
-        Ok(())
     }
 
     /// The Discord client when a token is set up; `None` otherwise.

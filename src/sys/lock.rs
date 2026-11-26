@@ -62,6 +62,20 @@ pub(crate) fn acquire(path: &Path) -> Result<LockOutcome, FsError> {
     }
 }
 
+/// Whether a process holds the lock at `path` now. The probe takes a shared lock for an instant and
+/// changes nothing; a missing file is a `NotFound` error.
+pub(crate) fn is_held(path: &Path) -> std::io::Result<bool> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
+        .open(path)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,8 +85,13 @@ mod tests {
     fn second_acquire_reports_the_holder() {
         let dir = scratch("lock");
         let path = dir.join("hub.lock");
+        assert_eq!(
+            is_held(&path).map_err(|e| e.kind()),
+            Err(std::io::ErrorKind::NotFound)
+        );
         let first = acquire(&path).unwrap();
         assert!(matches!(first, LockOutcome::Acquired(_)));
+        assert!(is_held(&path).unwrap());
         match acquire(&path).unwrap() {
             LockOutcome::Held { pid } => assert_eq!(pid, Some(std::process::id())),
             LockOutcome::Acquired(_) => panic!("lock taken twice"),
