@@ -8,7 +8,12 @@ const { spawn } = require("node:child_process");
 const os = require("node:os");
 const path = require("node:path");
 
-const TARGETS = { "linux x64": "linux-x64", "darwin arm64": "darwin-arm64" };
+const TARGETS = {
+	"linux x64": "linux-x64",
+	"linux arm64": "linux-arm64",
+	"darwin arm64": "darwin-arm64",
+	"darwin x64": "darwin-x64",
+};
 const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGUSR2"];
 
 function fail(message) {
@@ -19,7 +24,7 @@ function fail(message) {
 const host = `${process.platform} ${process.arch}`;
 const target = TARGETS[host];
 if (!target) {
-	fail(`this host is ${host}; Cataly runs on Linux x64 and macOS arm64`);
+	fail(`this host is ${host}; Cataly runs on Linux and macOS, on x64 and arm64`);
 }
 
 const name = `cataly-${target}`;

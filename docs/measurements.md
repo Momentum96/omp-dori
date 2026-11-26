@@ -1,4 +1,8 @@
-# Measurements: milestone 1
+# Measurements
+
+The figures behind the targets in `DESIGN.md` 2.3, by milestone.
+
+# Milestone 1
 
 ## Part A
 
@@ -68,7 +72,7 @@ owner jobs. The part-A idle figure (7.0 MiB) had no OMP probe, no HTTP stack and
 
 ### reqwest versus hyper (`DESIGN.md` 10.2)
 
-Measured by the part-B build agent (BuildMilestone1B) on this machine before `relay::http` was written,
+Measured on this machine before `relay::http` was written,
 each variant added to the part-A binary with the same release profile, and not repeated here:
 
 | Variant | Binary added | Idle RSS added |
@@ -84,7 +88,7 @@ hyper saves about 1.3 MB of binary and about 1 MiB of resident memory, over the 
 ```sh
 cargo build --release
 # For mode in base, owner: sandbox under /tmp/cy-m-$mode with home, config, state, run; fake gh and
-# omp copied from tests/support with fixture files; config = [omp] path + ten cron jobs (+ the seven
+# omp taken from tests/support with fixture files; config = [omp] path + ten cron jobs (+ the seven
 # owner jobs in owner mode); chmod 600 the config; export HOME and the XDG variables to the sandbox.
 $B hub & P=$!; until $B status >/dev/null 2>&1; do sleep 0.01; done
 sleep 10; grep VmRSS /proc/$P/status
@@ -377,7 +381,7 @@ applied, so both columns measure the same thing:
 
 Discord halves at p50 (the arrival fsync left the path); its p95 is set by OMP's side (readback and
 `agent_start` after the write, 14-16 ms at p95) and stayed. Telegram and Slack keep the arrival
-commit before the hand-off (`docs/build-notes.md`); their p50 did not move, and their p95 in the
+commit before the hand-off; their p50 did not move, and their p95 in the
 after runs is within the spread of single 21-sample runs on the loaded machine (both after runs are
 higher; their path lost two reads and gained nothing [inference: load, not the change]). What is left
 of the Discord hub part is the readback (2 ms) and about 1 ms of reads and scheduling. macOS figures
@@ -386,8 +390,10 @@ are not measured.
 ## Memory soak (2026-11-26, Linux x64, release build, fake OMP and fake Discord)
 
 Commands: `cargo test --release --test soak -- --ignored --nocapture --test-threads=1 hub_soak`
-(`CATALY_SOAK_ITER=2000`), once against main (dfd9c6f, the test copied in) and once with the fixes
-(`docs/build-notes.md`, "Memory audit"); `CATALY_PLAN_ROUNDS=24 cargo test --release --test coord --
+(`CATALY_SOAK_ITER=2000`), once against main (dfd9c6f, with the test added) and once with the fixes
+that bound the hub's long-lived maps (bridge links, lane turn locks and spend readers, local-only
+dialogs, stuck answer sources, Discord channel types, cancelled spend offers, scheduler heap);
+`CATALY_PLAN_ROUNDS=24 cargo test --release --test coord --
 --ignored --nocapture planner_pass` (12,005 passes) on main. One iteration is an owner message on
 Discord answered (every fifth, 400 per run; every 100th an `ask` card, half answered, half expired
 after 2 s) or a `cataly lead send` turn; every 50 a lane open, bridge hello, disconnect and close;
@@ -429,7 +435,7 @@ which points at the allocator keeping freed memory of transient reads that grow 
 6.67 at 4,505, 7.74 at 6,505, the same course so far]. No per-pass retention: 2,500 passes added
 0.03 MiB on the plateau.
 
-## Heap slope (2026-11-26, LeakHunt2, Linux x64, release build, fake OMP and fake Discord)
+## Heap slope (2026-11-26, Linux x64, release build, fake OMP and fake Discord)
 
 Same soak as above, with the receipt fix (decision 20), so every fifth iteration is a Discord
 message with no limit (600 per 3,000 iterations, 2,400 per 12,000; none held a room). Runs went
@@ -500,3 +506,99 @@ inherit it (their environment is an allow-list). One arena rather than two: 11.4
 after 12,000 iterations, and the run took no longer (1,126 s against 1,124 s for the default, run
 side by side); glibc's per-thread caches serve most small allocations without the arena lock. A hub
 started by hand gets glibc's default. macOS uses its own allocator; not measured there.
+
+# Milestone 5: voice (2026-11-25)
+
+Linux x64, release builds, 2026-11-25. Hub numbers from
+`cargo test --release --features voice --test voice_hub measure -- --ignored --nocapture`: the real
+hub against the fake Discord, fake Discord voice server and fake realtime server, five turns of
+1.5 s speech plus 2.5 s silence (about 20 s) per transport. RSS added is the peak RSS during the call
+minus the RSS of the same hub and fakes with voice disabled.
+
+| Measure | WebSocket | WebRTC | Target |
+| --- | --- | --- | --- |
+| RSS, voice off | 16.5 MiB | 16.1 MiB | |
+| Peak RSS during call | 18.3 MiB | 22.0 MiB | |
+| RSS added by the call | 1.8 MiB | 5.9 MiB | ≤ 25 MiB, met |
+| CPU during the call | 3.9 % of one core | 6.4 % of one core | |
+| Speech end to first audio out (5 turns) | 347-359 ms | 357-386 ms | |
+
+Speech end is the moment the last loud frame was handed to the fake voice server; first audio out
+is the first RTP packet the hub sent after it. The fake realtime server answers on its own schedule
+with no network or model delay, so the figure is Cataly's own path (receive, decode, send to the
+link, receive audio, encode, send) plus the fake's turn detection, not what the owner hears with a
+real model.
+
+## Voice binary size (`target/release/cataly`)
+
+| Build | Bytes |
+| --- | --- |
+| default features | 13,127,192 (12.5 MiB) |
+| `--features voice` | 23,035,800 (22.0 MiB) |
+| added by `voice` | 9,908,608 (9.4 MiB) |
+
+# Milestone 6: terminal runtime (2026-11-25)
+
+Linux x64, debug test build, stock OMP 19.1.1, loopback fake model, 2026-11-25.
+
+| Measure | Value | How |
+| --- | --- | --- |
+| Tern wake, hub part (deliver command written to `agent_start` seen through the bridge) | 20.4 ms and 11.4 ms (two runs, one wake each) | `tests/contract_tern.rs`, `stats.agent_start_latency` |
+| Tern wake, `cataly lead send` to the model request | 243 ms and 154 ms | same case; includes CLI start, OMP turn set-up and the provider request |
+| Tern wake through the hub with the fake bridge (CLI to the deliver command / to `agent_start`) | 13-42 ms / 14-43 ms (3 runs) | `tests/tern.rs`, includes the CLI process start |
+| OMP TUI with the bridge connected, 30 s idle after a turn | RSS 342 -> 358 MiB, CPU 2 s (ps, 1 s resolution) | `tests/contract_tern.rs` |
+| OMP TUI with the bridge inert (no token, no model), 30 s idle | RSS 323 MiB, CPU 0.57 s | one-off pty run with `/proc` accounting |
+
+The bridge's own share is not isolated: the active run also holds a session and has just finished a turn,
+the inert one has neither. The difference (about 20-35 MiB, about 1.4 s CPU per 30 s) is an upper bound for
+the bridge plus session plus post-turn TUI work. A tighter split needs both runs with the same session.
+
+## Tern wake by stage and the bridge's own cost
+
+Same machine, debug test build, stock OMP 19.1.1, `tests/contract_tern.rs`. Ten wakes per run; CLI to the
+model request is taken from the fake model's own arrival time (no polling in the figure).
+
+| Stage (p50 / max over 10 wakes) | Tern | Headless |
+| --- | --- | --- |
+| `cataly lead send` start to the model request | 35.4 / 202 ms (other run 51.2 / 225 ms) | 32.7 / 59.7 ms |
+| CLI start to CLI exit | 23.4 / 130 ms | 20.4 / 26.5 ms |
+| Hub: send handled to command written (`wake_latency`) | 9.5 / 82.9 ms | 9.4 / 12.4 ms |
+| Written to `agent_start` (`agent_start_latency`) | 7.4 / 43.0 ms | 7.1 / 14.9 ms |
+
+Finding: the 154-243 ms of the first measurement was one wake per run, the first one in a new OMP process, read
+with a 20 ms poll behind a blocking CLI. Steady-state tern wakes match headless (p50 35 vs 33 ms). The cold first
+wake is the max in every stage and comes from OMP's first turn in a new process, not from Cataly polling or
+serial round trips: the hub's `state` readback already runs in parallel with the inbox commit. Skipping that
+readback while the link is fresh was tried and reverted: it broke the `goal get` readback (unit test) and its
+effect was not measured. Nothing was removed; no after-figures.
+
+Bridge cost, same session resumed in the stand-in's pty, same workload (ten prompts typed at the terminal,
+then 30 s idle), OMP process only, `/proc` (10 ms CPU resolution); run 1 / run 2:
+
+| | Bridge active (hub-hosted tern lead) | Extensions off (`--no-extensions`) |
+| --- | --- | --- |
+| RSS 5 s after start | 363,884 / 374,192 KiB | 331,564 / 336,284 KiB |
+| RSS after the ten turns | 397,292 / 410,160 KiB | 363,228 / 368,664 KiB |
+| RSS after 30 s idle | 368,128 / 371,988 KiB | 346,680 / 350,572 KiB |
+| CPU of the ten turns | 1,670 / 600 ms | 2,240 / 2,610 ms |
+| CPU of 30 s idle | 850 / 940 ms | 960 / 810 ms |
+
+The bridge (with OMP's extension host, which `--no-extensions` also leaves out) costs about 21-38 MiB RSS; its
+CPU cost is within run-to-run noise (idle 850-940 vs 810-960 ms per 30 s). Run 2's "with" turns were hub wakes,
+not typed prompts; run 1 is the like-for-like pair. Both runs had OMP's first-run setup screen over the TUI.
+
+# Milestone 7: install and release (2026-11-25)
+
+Measured 2026-11-25 on the build host (linux-x64, Linux 7.0). darwin-arm64 was not measured here: no
+macOS runner was available; the release workflow builds and checks that target on its own runner.
+
+| What | Value | How |
+| --- | --- | --- |
+| Binary size, linux-x64 release (`cargo build --release`, host glibc target) | 13 555 064 bytes (12.9 MiB) | `ls -l target/release/cataly` |
+| Release build time | 276 s | `/usr/bin/time cargo build --release` (full rebuild) |
+| Install through `install.sh` from a local folder | 418 ms | `tests/install.rs` `install_reinstall_and_refusals` (debug variant, 54 MiB binary; hashes, signature, format and version checks included) |
+| `update --restart` downtime (old hub's socket closed to new hub answering with the new version) | 86 ms | `tests/install.rs` `restart_switches_back_and_holds_while_busy`, the message `the new hub answered … after the old one closed` |
+| Held `--restart` while the lead has a dialog | held after the 60 s stop window, nothing changed, hub still runs | `restart_holds_while_a_session_is_busy` (rollback) |
+
+Not measured: the musl static build (`x86_64-unknown-linux-musl`) size, which the release workflow
+produces; the darwin-arm64 size and install time.

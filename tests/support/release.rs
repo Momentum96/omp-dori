@@ -13,10 +13,12 @@ pub const SEED: [u8; 32] = [9; 32];
 pub const V1: &str = env!("CARGO_PKG_VERSION");
 
 pub fn target() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "darwin-arm64"
-    } else {
-        "linux-x64"
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        (os, arch) => panic!("{os} {arch} is not a release target"),
     }
 }
 
@@ -249,7 +251,7 @@ pub fn hub_version(hub: &TestHub) -> Option<String> {
 /// Asks the hub to stop until it accepts, then waits for its socket to close. A session still
 /// finishing a turn refuses the stop, as it holds `cataly update`, so a refusal is asked again.
 pub fn stop_hub(hub: &TestHub) {
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + super::patience(Duration::from_secs(90));
     let mut refused = false;
     while let Some(reply) = hub.try_request(r#"{"v":1,"id":2,"method":"hub.stop","params":{}}"#) {
         let v: Value = serde_json::from_str(&reply).unwrap_or_default();

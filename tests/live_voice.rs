@@ -1,5 +1,5 @@
-//! The owner-gated live voice test (owner decision 11, `docs/plan.md` milestone 5 check 9,
-//! `DESIGN.md` 10.4): both transports against the real realtime API.
+//! The owner-gated live voice test (owner decision 11, `DESIGN.md` 10.4): both transports against
+//! the real realtime API.
 //!
 //! Ignored by default and never run in CI. It refuses to run unless the owner sets:
 //!

@@ -94,7 +94,7 @@
 
 ### 环境要求
 
-- Linux x86_64（macOS arm64 即将支持）。
+- Linux 或 macOS，x86_64 或 arm64（Apple Silicon 与 Intel Mac）。不支持 Windows。
 - [OMP](https://omp.sh) 19.1.1 或更高版本。
 - 一个 Discord 机器人（设置过程会引导你创建），或一个 Telegram 或 Slack 机器人。
 - 使用 npm 和 Bun 安装时：`PATH` 中有 Node.js 18 或更高版本。
@@ -123,7 +123,7 @@ bun add --global cataly
 cataly setup
 ```
 
-设置会询问你的机器人令牌并打印邀请链接，然后配置其余部分：主房间 `#cataly`、状态房间 `#cataly-ops`、lead 的模型、审批按钮、默认任务，以及一个启动 hub 的用户服务（systemd）。之后在 `#cataly` 里发消息即可。
+设置会询问你的机器人令牌并打印邀请链接，然后配置其余部分：主房间 `#cataly`、状态房间 `#cataly-ops`、lead 的模型、审批按钮、默认任务，以及一个启动 hub 的用户服务（Linux 上为 systemd，macOS 上为 launchd agent）。之后在 `#cataly` 里发消息即可。
 
 ## 日常使用
 
@@ -141,7 +141,7 @@ cataly setup
 
 **早期版本**
 
-目前仅支持 Linux x86_64。Cataly 每天都在通过 Discord 使用，包括语音；Telegram 和 Slack 通过了测试，但实际使用较少。
+使用最多的是 Linux x86_64；macOS 和 arm64 通过同样的测试。Cataly 每天都在通过 Discord 使用，包括语音；Telegram 和 Slack 通过了测试，但实际使用较少。
 
 </td></tr></table>
 
@@ -153,4 +153,4 @@ cataly setup
 
 ## 许可证
 
-Cataly 是基于 [GNU AGPL 3.0](LICENSE) 的开源软件，源代码就在本仓库中。如需不受 AGPL 义务约束的商业许可，请联系 [vntrevx](https://github.com/vntrevx)。Cataly 运行在需单独安装的 [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi) 之上。第三方许可证随每个发行版附带于 `THIRD-PARTY-NOTICES.txt` 中。
+Cataly 是基于 [GNU AGPL 3.0](LICENSE) 的开源软件，源代码就在本仓库中。如需不受 AGPL 义务约束的商业许可，请联系 [vntrevx](https://github.com/vntrevx)。Cataly 运行在需单独安装的 [oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi) 之上。第三方许可证随每个发行版附带于 `THIRD-PARTY-NOTICES-<target>.txt` 中。

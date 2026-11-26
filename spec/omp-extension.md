@@ -1,5 +1,7 @@
 # OMP extension: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Cataly needs a small piece of TypeScript inside every OMP process it cares about, because some things can only be

@@ -1,5 +1,7 @@
 # Operating contract: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 The operating contract is the set of rules the lead agent (the single OMP session that talks to the owner) follows:

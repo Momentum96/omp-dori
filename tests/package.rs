@@ -192,7 +192,8 @@ fn an_npm_install_updates_through_npm_and_restarts_the_hub() {
     trust_test_key(&mut hub);
     let new = variant(&v2, false);
     github.publish(&format!("v{v2}"), release(&hub.root.join("r2"), &new, &v2));
-    let prefix = hub.root.join("npm");
+    // The binary finds its package through its canonical path; macOS's `/tmp` is a symlink.
+    let prefix = std::fs::canonicalize(&hub.root).unwrap().join("npm");
     let dir = prefix.join(format!(
         "lib/node_modules/cataly/node_modules/cataly-{}",
         target()
@@ -269,13 +270,16 @@ fn a_bun_install_updates_through_bun() {
     ));
     trust_test_key(&mut hub);
     hub.install_fake("omp");
-    executable(
-        &hub.root.join("bin/systemctl"),
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/manager.log\"\n",
-    );
+    // Both service managers are fakes: on macOS a real `launchctl` would start the hub.
+    for manager in ["systemctl", "launchctl"] {
+        executable(
+            &hub.root.join("bin").join(manager),
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/manager.log\"\n",
+        );
+    }
     let new = variant(&v2, false);
     github.publish(&format!("v{v2}"), release(&hub.root.join("r2"), &new, &v2));
-    let home = hub.root.join("bun");
+    let home = std::fs::canonicalize(&hub.root).unwrap().join("bun");
     let dir = home.join(format!("install/global/node_modules/cataly-{}", target()));
     let binary = place_package(&dir);
     fake_manager(&hub, "bun", "add --global", &dir, &[(&v2, &new)]);
@@ -325,6 +329,16 @@ fn a_bun_install_updates_through_bun() {
         assert!(
             unit.contains(&format!("ExecStart={} hub\n", binary.display())),
             "{unit}"
+        );
+    } else {
+        let agent = std::fs::read_to_string(
+            hub.root
+                .join("home/Library/LaunchAgents/dev.cataly.hub.plist"),
+        )
+        .unwrap();
+        assert!(
+            agent.contains(&format!("<string>{}</string></array>", binary.display())),
+            "{agent}"
         );
     }
     std::fs::remove_file(root.join("service")).unwrap();

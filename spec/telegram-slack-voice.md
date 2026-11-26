@@ -1,5 +1,7 @@
 # Telegram, Slack and voice: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 The owner talks to the agent from a chat app or by speaking. This spec covers:

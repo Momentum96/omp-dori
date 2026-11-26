@@ -1,7 +1,32 @@
-# `cargo deny check licenses` (DESIGN.md 10.2): permissive dependency licences only, no copyleft linked
-# into the binary (Cataly's own AGPL-3.0-only crates are private and skipped below).
+# `cargo deny check` (DESIGN.md 10.2): no unhandled advisory, and permissive dependency licences
+# only, no copyleft linked into the binary (Cataly's own AGPL-3.0-only crates are private and
+# skipped below).
 [graph]
 all-features = true
+
+# Every ignore names the advisory, the reason it does not reach Cataly, and why no update fixes it.
+# All of them sit under the voice crate's DAVE stack: davey 0.2.0 (the newest release) pins
+# openmls_rust_crypto 0.5, which pins hpke-rs 0.6 and p256/elliptic-curve 0.13. Drop an ignore as
+# soon as davey moves to fixed versions.
+[advisories]
+ignore = [
+    # audiopus_sys is unmaintained (its CMake files predate CMake 4). Cataly builds the bundled Opus
+    # on every release target in CI; audiopus 0.3.0-rc.0 has no other sys crate. Not a vulnerability.
+    { id = "RUSTSEC-2026-0150", reason = "unmaintained only; the static Opus build works on every release target in CI and audiopus has no maintained replacement" },
+    # libcrux-sha3 0.0.8 (fixed in 0.0.10; hpke-rs 0.6 requires ^0.0.8): hpke-rs calls it only to
+    # derive X-Wing and ML-KEM keys, with one-shot shake256. DAVE's only ciphersuite is
+    # MLS_128_DHKEMP256_AES128GCM_SHA256_P256, so neither the incremental squeeze API (-0207) nor the
+    # AVX2 x4 SHAKE-256 (-0208) is ever called.
+    { id = "RUSTSEC-2026-0207", reason = "hpke-rs uses libcrux-sha3 only for X-Wing/ML-KEM key derivation; DAVE uses DHKEM-P256 only" },
+    { id = "RUSTSEC-2026-0208", reason = "the AVX2 x4 SHAKE-256 API is not called; DAVE uses DHKEM-P256 only" },
+    # libcrux-secrets 0.0.5 (fixed in 0.0.6; libcrux-traits 0.0.6 pins =0.0.5): the faulty aarch64
+    # constant-time swap/select is not used by libcrux-traits or libcrux-sha3, the only path to it.
+    { id = "RUSTSEC-2026-0212", reason = "constant-time swap/select is never called on the libcrux-traits -> libcrux-sha3 path" },
+    # crypto-bigint 0.5.5 (fixed in 0.7.6; elliptic-curve 0.13 requires ^0.5): timing side channels
+    # in P-256 arithmetic of DAVE's per-call MLS keys. Measuring them needs code timing the voice
+    # process on the owner's own machine, which already reads Cataly's state; voice builds only.
+    { id = "RUSTSEC-2026-0387", reason = "local timing side channel on per-call DAVE keys only; no p256 0.13 release uses a fixed crypto-bigint" },
+]
 
 [licenses]
 allow = [
@@ -15,7 +40,7 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
-# The one exception (docs/third-party.md, docs/notes/voice.md): DAVE's MLS stack (davey ->
+# The one exception (docs/third-party.md): DAVE's MLS stack (davey ->
 # openmls_rust_crypto) uses the hpke-rs crates for HPKE. MPL-2.0 is file-level copyleft: the crates
 # are used unmodified from crates.io, in voice builds only, and their source stays available at
 # https://github.com/cryspen/hpke-rs. Nothing else may be MPL-2.0.

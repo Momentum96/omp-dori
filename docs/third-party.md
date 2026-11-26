@@ -1,11 +1,11 @@
 # Third-party code
 
 Every dependency of the `cataly` crate, with licence and source. All are declared crates from crates.io;
-no third-party source is copied into this repository. Allowed by `DESIGN.md` 10.2.
+no third-party source is included in this repository. Allowed by `DESIGN.md` 10.2.
 
 | Crate | Version | Licence | Source | Features enabled and why |
 | --- | --- | --- | --- | --- |
-| tokio | 1.54 | MIT | https://crates.io/crates/tokio | `rt-multi-thread`, `net`, `process`, `time`, `signal`, `sync`, `io-util` as in 10.2; `macros` for `select!` (compile-time only, see `docs/build-notes.md`). `fs` is not enabled: nothing uses it yet. |
+| tokio | 1.54 | MIT | https://crates.io/crates/tokio | `rt-multi-thread`, `net`, `process`, `time`, `signal`, `sync`, `io-util` as in 10.2; `macros` for `select!` (compile-time only). `fs` is not enabled: nothing uses it yet. |
 | serde | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde | `std`, `derive`: wire and record types |
 | serde_json | 1.0 | MIT OR Apache-2.0 | https://crates.io/crates/serde_json | `std`: control protocol, event log |
 | rusqlite | 0.37 | MIT (bundled SQLite: public domain) | https://crates.io/crates/rusqlite | `bundled`: no system SQLite; `backup`: SQLite's online backup for the consistent store snapshot of the home backup (decision 16) |
@@ -65,8 +65,10 @@ The fake `gh` and fake `omp` in `tests/support/` are POSIX shell scripts written
 binary (normal dependencies, not build scripts, proc macros or dev-dependencies), its version and
 licence, and the licence and notice files the crate ships. It needs cargo and jq. The release
 workflow's build job runs it once per target with that target's Rust triple and ships the file
-beside the binary as `THIRD-PARTY-NOTICES-<target>.txt` (`linux-x64`, `darwin-arm64`); the publish
-job adds `LICENSE`. Both are listed in `SHA256SUMS` like every other asset.
+beside the binary as `THIRD-PARTY-NOTICES-<target>.txt` (`linux-x64`, `linux-arm64`, `darwin-arm64`,
+`darwin-x64`); the publish job adds `LICENSE`. Both are listed in `SHA256SUMS` like every other
+asset. `scripts/release.sh` writes the same files for the targets it packs, and each npm package
+`cataly-<target>` carries its target's file as `THIRD-PARTY-NOTICES.txt`.
 
 ```yaml
       - name: Third-party notices

@@ -8,38 +8,76 @@ on:
     # Nightly: the contract tests against the latest stock OMP release (IR-38).
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      os:
+        description: "Runners: linux (x64 and arm64), macos (arm64 and x64) or all"
+        type: choice
+        options: [all, linux, macos]
+        default: all
+      binaries:
+        description: "Also build each target's release binary with the release key and upload it as cataly-<version>-<target>"
+        type: boolean
+        default: false
   # The release workflow runs the full CI on the tagged commit (IR req. 42).
   workflow_call:
 
 permissions:
   contents: read
 
+# One run per event and ref; a newer push to a pull request cancels its running checks.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # The release targets this run covers: every target, or with a manual dispatch the Linux or the
+  # macOS ones. `patience` stretches the tests' waits (CATALY_TEST_PATIENCE) on the slower macOS
+  # runners; what a test checks is the same everywhere.
+  targets:
+    name: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          OS: ${{ inputs.os || 'all' }}
+        run: |
+          set -euo pipefail
+          all='[
+            {"target": "linux-x64", "family": "linux", "os": "ubuntu-latest", "patience": 1, "format": "ELF 64-bit LSB.*x86-64"},
+            {"target": "linux-arm64", "family": "linux", "os": "ubuntu-24.04-arm", "patience": 1, "format": "ELF 64-bit LSB.*ARM aarch64"},
+            {"target": "darwin-arm64", "family": "macos", "os": "macos-latest", "patience": 3, "format": "Mach-O 64-bit.*arm64"},
+            {"target": "darwin-x64", "family": "macos", "os": "macos-15-intel", "patience": 3, "format": "Mach-O 64-bit.*x86_64"}
+          ]'
+          matrix=$(echo "$all" | jq -c --arg os "$OS" '{include: map(select($os == "all" or .family == $os))}')
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.target }})
     if: github.event_name != 'schedule'
+    needs: targets
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: linux-x64
-            os: ubuntu-latest
-          - target: darwin-arm64
-            os: macos-latest
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    # Two feature sets, each tested and built in release: about twice the single-set time.
-    timeout-minutes: 90
+    # Two feature sets, each tested and built in release: about twice the single-set time. The Intel
+    # macOS runner is the slowest.
+    timeout-minutes: 120
+    env:
+      CATALY_TEST_PATIENCE: ${{ matrix.patience }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: ./.github/actions/setup
         with:
-          bun-version: 1.4.0
+          target: ${{ matrix.target }}
       - name: Format
         run: cargo fmt --check
       - name: Clippy
@@ -108,23 +146,19 @@ jobs:
   # OMP 19.1.1; the nightly run (and a manual dispatch) uses the latest OMP release (IR-38).
   contract:
     name: contract against OMP (${{ matrix.target }})
+    needs: targets
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: linux-x64
-            os: ubuntu-latest
-          - target: darwin-arm64
-            os: macos-latest
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      CATALY_TEST_PATIENCE: ${{ matrix.patience }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - uses: ./.github/actions/setup
         with:
-          bun-version: 1.4.0
+          target: ${{ matrix.target }}
       - name: Install stock OMP, checked against SHA256SUMS.txt
         shell: bash
         env:
@@ -156,3 +190,111 @@ jobs:
         env:
           CATALY_CONTRACT_OMP: "1"
         run: cargo test --locked --release --no-fail-fast --test 'contract*' -- --nocapture
+
+  # Release binaries without a release, for scripts/release.sh --add: on a dispatch with `binaries`,
+  # each target builds `cargo build --locked --release --features voice` with the release public key
+  # (repository variable CATALY_RELEASE_KEY), CATALY_COMMIT = the commit and SOURCE_DATE_EPOCH = its
+  # time, checks the format and version report, and uploads the artifact cataly-<version>-<target>.
+  # Nothing is signed or published: the owner signs on his own machine.
+  binary:
+    name: release binary (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch' && inputs.binaries
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          bun: "false"
+      - id: build
+        name: Release build (voice) with the release key, commit and commit time
+        shell: bash
+        env:
+          CATALY_RELEASE_KEY: ${{ vars.CATALY_RELEASE_KEY }}
+        run: |
+          set -euo pipefail
+          echo "$CATALY_RELEASE_KEY" | grep -Eq '^[0-9a-f]{64}$' || { echo "repository variable CATALY_RELEASE_KEY is not 64 hex digits"; exit 1; }
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          CATALY_COMMIT="$GITHUB_SHA" SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+            cargo build --locked --release --features voice
+          b=target/release/cataly
+          file "$b" | grep -Eq "${{ matrix.format }}"
+          "$b" version --json | tee report.json
+          jq -e --arg v "$version" --arg t "${{ matrix.target }}" --arg c "$GITHUB_SHA" \
+            '.version == $v and .target == $t and .commit == $c' report.json
+          mkdir -p out
+          cp "$b" "out/cataly-$version-${{ matrix.target }}"
+          echo "name=cataly-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.build.outputs.name }}
+          path: out/${{ steps.build.outputs.name }}
+          if-no-files-found: error
+
+  # The release binary as a user gets it, on pushes to main and manual dispatches only: built with a
+  # throwaway release key made in the job, its assets listed in a SHA256SUMS signed with that key,
+  # installed by install.sh from that folder into an empty home (the binary checks the signature with
+  # the key compiled into it), then `cataly version` and, against its own hub, `cataly health`.
+  smoke:
+    name: release smoke (${{ matrix.target }})
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          target: ${{ matrix.target }}
+          bun: "false"
+      - name: Release build with a throwaway key, signed assets, install.sh, version and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS ships LibreSSL as `openssl`, without ed25519 signing of raw input.
+          ossl=openssl
+          if [ "$(uname -s)" = Darwin ]; then
+            ossl="$(brew --prefix openssl@3)/bin/openssl"
+            [ -x "$ossl" ] || { brew install openssl@3; ossl="$(brew --prefix openssl@3)/bin/openssl"; }
+          fi
+          W="$RUNNER_TEMP/smoke"
+          A="$W/assets"
+          mkdir -p "$A"
+          "$ossl" genpkey -algorithm ed25519 -out "$W/key.pem"
+          key=$("$ossl" pkey -in "$W/key.pem" -pubout -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          CATALY_RELEASE_KEY="$key" CATALY_COMMIT="$GITHUB_SHA" SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) \
+            cargo build --locked --release --features voice
+          cp target/release/cataly "$A/cataly-$version-${{ matrix.target }}"
+          target/release/cataly extension > "$A/cataly-$version.ts"
+          ( cd "$A"
+            if command -v sha256sum > /dev/null; then sum() { sha256sum "$1"; }; else sum() { shasum -a 256 "$1"; }; fi
+            for f in *; do printf '%s  %s\n' "$(sum "$f" | cut -d' ' -f1)" "$f"; done > SHA256SUMS
+            "$ossl" pkeyutl -sign -rawin -inkey "$W/key.pem" -in SHA256SUMS -out "$W/sig.bin"
+            od -An -v -tx1 "$W/sig.bin" | tr -d ' \n' > SHA256SUMS.sig )
+          export HOME="$W/home" XDG_CONFIG_HOME="$W/config" XDG_STATE_HOME="$W/state" XDG_RUNTIME_DIR="$W/run"
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME/cataly" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
+          sh install.sh "$A"
+          c="$HOME/.local/bin/cataly"
+          "$c" version
+          "$c" version --json | jq -e --arg v "$version" --arg t "${{ matrix.target }}" --arg c "$GITHUB_SHA" \
+            '.version == $v and .target == $t and .commit == $c'
+          : > "$XDG_CONFIG_HOME/cataly/config.toml"
+          chmod 600 "$XDG_CONFIG_HOME/cataly/config.toml"
+          "$c" hub 2> "$W/hub.err" &
+          P=$!
+          for _ in $(seq 500); do "$c" status > /dev/null 2>&1 && break; sleep 0.02; done
+          # Health answers with its checks; without OMP or a bot here it reports warnings and exits 1.
+          "$c" health || true
+          "$c" health --json > "$W/health.json" || true
+          jq -e '.checks | length > 0' "$W/health.json"
+          kill -TERM "$P"
+          wait "$P"

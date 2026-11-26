@@ -24,7 +24,8 @@ function fakeHub(role: string, sent: any[], connects: { n: number }): Deps["conn
 }
 
 // The 5 ms bound is asserted on the fastest of several runs: one run under host load can stall
-// for longer while the code is fine (docs/build-notes.md, "Timing bounds under load").
+// for longer while the code is fine, and load only adds time, so the fastest run is closest to the
+// code's own cost.
 test("an ordinary session registers only start and switch and never connects (check 11)", async () => {
 	const costs: number[] = [];
 	for (let run = 0; run < 7; run++) {
