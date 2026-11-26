@@ -5,6 +5,8 @@
 - A held provider that no live session uses no longer turns the ops panel amber, and its spent
   limit no longer counts as a high limit: with nothing else wrong the panel is green, with the
   held-provider line and the per-provider ⛔ marks still shown.
+- A usage limit turns the panel amber only at 90 % or more, not 70 %. `[quota] levels` alerts
+  are unchanged.
 
 ## 0.1.4 (2026-11-26)
 

@@ -644,7 +644,7 @@ minute, like the [board](#coordination-coord). After an uncertain create it is n
 it stays in doubt until the lead names the message it found (board destination
 `ops:<channel id>`).
 Its colour is the worst state: green when all is fine, amber when something is worth a look (host
-busy, a limit of a provider that is not held at 70 % or more, a job with a failure, the lead in
+busy, a limit of a provider that is not held at 90 % or more, a job with a failure, the lead in
 error), red when it needs you (host in alert, a held provider a live session uses, the lead held
 by the quota gate or its provider's limit, a job failing twice or waiting for your ack). A held
 provider no live session uses does not change the colour: under the summary, a held provider gets

@@ -450,7 +450,7 @@ const OMP_19_2_1: &str = r#"{"generatedAt":1795660240551,"reports":[
 /// The 0.1.3 panel on the owner's machine: the lead live on anthropic, `openai-codex` and `devin`
 /// held by the quota gate.
 #[test]
-fn the_live_omp_usage_renders_named_providers_and_amber() {
+fn the_live_omp_usage_renders_named_providers_and_green() {
     let usage = crate::omp::usage::parse_usage(OMP_19_2_1.as_bytes()).unwrap();
     let held = vec!["devin".to_string(), "openai-codex".to_string()];
     let limits = worst_per_provider(&usage.limits, &held);
@@ -481,7 +481,7 @@ fn the_live_omp_usage_renders_named_providers_and_amber() {
         (
             Language::Korean,
             [
-                "🟡 살펴볼 것이 있어요",
+                "🟢 모두 정상",
                 "⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요",
                 "세션 1/20",
                 "**devin** `▰▰▰▰▰▰▰▰` 100% · 리셋 <t:1795939200:R> · ⛔ 보류",
@@ -490,7 +490,7 @@ fn the_live_omp_usage_renders_named_providers_and_amber() {
         (
             Language::English,
             [
-                "🟡 Worth a look",
+                "🟢 All fine",
                 "⛔ Held: devin, openai-codex · sessions on other providers start normally",
                 "Sessions 1/20",
                 "**devin** `▰▰▰▰▰▰▰▰` 100% · resets <t:1795939200:R> · ⛔ held",
@@ -498,7 +498,7 @@ fn the_live_omp_usage_renders_named_providers_and_amber() {
         ),
     ] {
         let body = render::panel(&p, lang, "0.1.4");
-        assert_eq!(body["embeds"][0]["color"], 0x00F1_C40F, "amber");
+        assert_eq!(body["embeds"][0]["color"], 0x002E_CC71, "green");
         let text = body.to_string();
         for want in words {
             assert!(text.contains(want), "{want} in {text}");

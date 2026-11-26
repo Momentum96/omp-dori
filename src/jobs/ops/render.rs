@@ -34,6 +34,8 @@ const BAR_CELLS: usize = 8;
 
 const GREEN: u32 = 0x002E_CC71;
 const AMBER: u32 = 0x00F1_C40F;
+/// A limit of a provider that is not held at this per cent or more makes the panel worth a look.
+const HIGH_LIMIT: f64 = 90.0;
 const RED: u32 = 0x00E7_4C3C;
 const GREY: u32 = 0x0095_A5A6;
 
@@ -273,7 +275,7 @@ impl Panel {
             .limits
             .iter()
             .flatten()
-            .any(|l| !l.held && l.percent.is_some_and(|p| p >= 70.0));
+            .any(|l| !l.held && l.percent.is_some_and(|p| p >= HIGH_LIMIT));
         if self.host.state == HostState::Busy
             || high
             || !self.issues.is_empty()
@@ -1179,6 +1181,26 @@ pub(crate) mod tests {
         assert!(
             d.contains("⛔ Held: devin, openai-codex · sessions on other providers start normally"),
             "{d}"
+        );
+    }
+
+    #[test]
+    fn a_limit_turns_amber_at_ninety_per_cent() {
+        let mut p = held_elsewhere();
+        let anthropic = |p: &mut Panel, percent: f64| {
+            for l in p.limits.iter_mut().flatten() {
+                if l.provider == "anthropic" {
+                    l.percent = Some(percent);
+                }
+            }
+        };
+        anthropic(&mut p, 85.0);
+        assert_eq!(p.level(), Level::Fine);
+        anthropic(&mut p, 90.0);
+        assert_eq!(p.level(), Level::Watch);
+        assert_eq!(
+            panel(&p, Language::English, "x")["embeds"][0]["color"],
+            AMBER
         );
     }
 
