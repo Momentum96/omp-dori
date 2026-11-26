@@ -117,9 +117,23 @@ impl DiscordThreads {
             .discord
             .owner
             .ok_or((false, "no [discord] owner".to_string()))?;
-        if !config.discord.channels.contains(&room) {
-            return Err((false, "the source message's channel is not in scope".into()));
-        }
+        // A message inside a thread under a listed channel: Discord nests no threads, so the new
+        // thread starts in that listed channel without a starter message.
+        let listed = if config.discord.channels.contains(&room) {
+            None
+        } else {
+            let channel = rest.channel(room).await.map_err(|e| (false, e.why))?;
+            let thread = matches!(channel.get("type").and_then(Value::as_u64), Some(11 | 12));
+            let parent = channel
+                .get("parent_id")
+                .and_then(Value::as_str)
+                .and_then(Snowflake::parse)
+                .filter(|p| thread && config.discord.channels.contains(p));
+            Some(parent.ok_or((
+                false,
+                "the source message's channel is not in scope".to_string(),
+            ))?)
+        };
         // Proof of source (DISC-IN req. 59): the exact message, written by the owner.
         let source = rest
             .message(room, message)
@@ -133,14 +147,22 @@ impl DiscordThreads {
         if author != Some(owner) || bot {
             return Err((false, "the source is not an owner message".into()));
         }
-        let created = rest
-            .call(
+        let (home, call, path, body) = match listed {
+            None => (
+                room,
                 "POST channels/messages/threads",
-                Method::POST,
-                &format!("/channels/{room}/messages/{message}/threads"),
-                Some(json!({ "name": title, "auto_archive_duration": 10080 })),
-                Kind::Once,
-            )
+                format!("/channels/{room}/messages/{message}/threads"),
+                json!({ "name": title, "auto_archive_duration": 10080 }),
+            ),
+            Some(p) => (
+                p,
+                "POST channels/threads",
+                format!("/channels/{p}/threads"),
+                json!({ "name": title, "auto_archive_duration": 10080, "type": 11 }),
+            ),
+        };
+        let created = rest
+            .call(call, Method::POST, &path, Some(body), Kind::Once)
             .await
             .map_err(|e| (e.uncertain, e.why))?;
         let thread = created
@@ -151,7 +173,7 @@ impl DiscordThreads {
             .get("parent_id")
             .and_then(Value::as_str)
             .and_then(Snowflake::parse);
-        let Some(thread) = thread.filter(|_| parent == Some(room)) else {
+        let Some(thread) = thread.filter(|_| parent == Some(home)) else {
             return Err((
                 true,
                 "Discord's answer named no thread under the source channel".into(),

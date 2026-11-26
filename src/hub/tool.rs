@@ -35,7 +35,9 @@ pub(crate) fn definition() -> Value {
     permission, never passed to other roles): profile.read, profile.save (text: the whole file, checked), \
     profile.snapshot, profile.check, profile.archive (text: decision lines moved out), profile.undo. Lanes: \
     lane.open (key, title, brief or brief_file, checks: list of {kind: pr_merged|issue_closed|command|file|web|pr_policy, \
-    ...}, thread? or thread_from? discord:<room>/<message>, cwd?, model?, origin?, look_only?, ceilings?, worktree?, \
+    ...}, thread? or thread_from? discord:<room>/<message> (a message in a lane thread starts a new thread beside it), \
+    kickoff? (with thread_from: one line posted first in the new thread), cwd?, model?, origin?, look_only?, ceilings?, \
+    worktree? {path, branch, base} (the lane works there), \
     priority? 1-9, after? [predecessor keys: queued], expires_hours?, preview?), lane.list (all?), lane.board (key?), \
     lane.pause|resume (key, reason?), lane.park|abandon (key, reason, condition?), lane.object (key, reason), \
     lane.close (key, note?, lesson?), lane.reopen (key, note?), lane.send (key, text, id?, steer?), lane.release \

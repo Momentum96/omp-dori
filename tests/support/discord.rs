@@ -687,6 +687,7 @@ async fn answer(
             }
         }
         ("POST", ["channels", id, "messages"]) => create(&mut s, id, &body),
+        ("POST", ["channels", id, .., "threads"]) => start_thread(&mut s, id, &parts, &body),
         ("PATCH", ["channels", id, "messages", mid]) => edit_message(&mut s, id, mid, &body),
         (
             "PUT",
@@ -710,6 +711,50 @@ fn decode(content_type: Option<&str>, bytes: &[u8]) -> (Value, Vec<(String, usiz
             Vec::new(),
         ),
     }
+}
+
+/// A public thread as Discord starts it: from a message (the thread takes the message's ID, one
+/// thread per message, none inside a thread) or without one.
+fn start_thread(
+    s: &mut State,
+    parent: &str,
+    parts: &[&str],
+    body: &Value,
+) -> Response<Full<Bytes>> {
+    let message = match parts {
+        [_, _, "messages", m, _] => Some(*m),
+        _ => None,
+    };
+    let in_thread = s
+        .channels
+        .get(parent)
+        .is_some_and(|c| matches!(c["type"].as_u64(), Some(11 | 12)));
+    if in_thread {
+        let why = json!({ "message": "Cannot execute action on this channel type", "code": 50024 });
+        return reply(400, &why);
+    }
+    let id = match message {
+        Some(m) => {
+            let found = s
+                .history
+                .get(parent)
+                .is_some_and(|l| l.iter().any(|x| x["id"] == m));
+            if !found {
+                return reply(404, &json!({ "message": "Unknown Message", "code": 10008 }));
+            }
+            if s.channels.contains_key(m) {
+                let why = json!({ "message": "A thread has already been created for this message", "code": 160_004 });
+                return reply(400, &why);
+            }
+            m.to_string()
+        }
+        None => (800_000_000_000_001_000u64 + s.threads.len() as u64).to_string(),
+    };
+    let thread = json!({ "id": id, "type": 11, "parent_id": parent, "guild_id": GUILD,
+        "name": body["name"], "thread_metadata": { "archived": false } });
+    s.channels.insert(id, thread.clone());
+    s.threads.push(thread.clone());
+    reply(201, &thread)
 }
 
 /// A channel edit: a thread's name or archived flag.

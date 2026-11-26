@@ -47,6 +47,16 @@
   urgent event, a lane report or `cataly lead send` resumes the same session, and the message is
   delivered once it is accepted. `cataly status`, `cataly lead status`, `cataly health` and the
   ops panel show `asleep`; an update keeps a sleeping lead asleep.
+- The lead hands work to lanes. It does work likely to take 5 minutes or less itself in the
+  channel; longer work, development in a repository and work worth running beside other work go
+  to a lane in a thread under the owner's message, with a brief, done checks and a one-line
+  kickoff (`lane.open` `kickoff`, posted first in the new thread), and the lead answers with one
+  line naming the thread. An owner message in a lane's thread that asks to split a task out
+  becomes a second lane in a new thread beside the first (Discord nests no threads, so
+  `thread_from` a message inside a lane thread starts the thread in its channel).
+- A lane opened with `worktree` now works in that worktree. Before, its session, its done checks
+  and its brief's directory were the repository it was cut from, so lanes meant to edit in
+  parallel all edited the main checkout.
 
 ## 0.2.3 (2026-11-27)
 
