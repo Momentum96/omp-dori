@@ -64,6 +64,17 @@ fn ready(hub: &TestHub, relays: &[&str]) {
     });
 }
 
+/// Waits until a fresh readback shows the lead idle with nothing sent or waiting, so the next
+/// request wakes it. Between a turn's end and that readback the lead's status is unknown: a request
+/// handed off then waits for the readback and is not measured as a wake.
+fn lead_idle(hub: &TestHub) {
+    hub.until(WAIT, || {
+        let lead = hub.json(&["lead", "status", "--json"]);
+        (lead["session"]["status"] == "idle" && lead["sent"] == 0 && lead["waiting"] == 0)
+            .then_some(())
+    });
+}
+
 fn session_file(hub: &TestHub) -> PathBuf {
     let lead = hub.json(&["lead", "status", "--json"]);
     PathBuf::from(lead["session"]["session_file"].as_str().unwrap())
@@ -109,6 +120,7 @@ fn telegram_and_slack_requests_are_answered_in_place_with_seen_marks() {
     let mut hub = relay_hub(Some(&tg), Some(&slack), "");
     hub.start();
     ready(&hub, &["telegram", "slack"]);
+    lead_idle(&hub);
     tg.push(
         "message",
         FakeTelegram::message(11, FakeTelegram::dm(), 7, "hello from telegram"),
@@ -124,6 +136,7 @@ fn telegram_and_slack_requests_are_answered_in_place_with_seen_marks() {
     assert_eq!(marks.len(), 1, "one seen mark");
     assert_eq!(marks[0].body["message_id"], 11);
     assert_eq!(marks[0].body["reaction"][0]["emoji"], "\u{1F440}");
+    lead_idle(&hub);
     let ts = slack.say(DM, fake_slack::OWNER, "hello from slack", None);
     let posted = slack.wait(WAIT, |f| slack_posts_in(f, DM, &ts).pop());
     assert_eq!(posted.body["text"], "the answer");
@@ -180,7 +193,8 @@ fn telegram_and_slack_requests_are_answered_in_place_with_seen_marks() {
     ] {
         assert!(
             stats[key]["count"].as_u64().unwrap_or(0) >= 1,
-            "{key}: {stats}"
+            "{key} is {}; all stats: {stats}",
+            stats[key]
         );
         eprintln!("measure {key}: {}", stats[key]);
     }
