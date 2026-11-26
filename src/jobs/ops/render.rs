@@ -257,7 +257,8 @@ fn plain(text: &str) -> String {
 impl Panel {
     /// Red only when the owner must act: the host overloaded, a job failing or waiting for an ack,
     /// the lead held, or a held provider a live session uses. A held provider no live session uses
-    /// is worth a look: sessions on the other providers start normally.
+    /// does not raise the level (its info line says sessions on the other providers start
+    /// normally), nor does its spent limit.
     pub(crate) fn level(&self) -> Level {
         let failing = self.issues.iter().any(|i| i.failures >= 2 || i.needs_ack);
         let (used, _) = self.held_split();
@@ -272,10 +273,9 @@ impl Panel {
             .limits
             .iter()
             .flatten()
-            .any(|l| l.percent.is_some_and(|p| p >= 70.0));
+            .any(|l| !l.held && l.percent.is_some_and(|p| p >= 70.0));
         if self.host.state == HostState::Busy
             || high
-            || !self.held.is_empty()
             || !self.issues.is_empty()
             || self.people.lead == LeadState::Error
         {
@@ -1128,11 +1128,25 @@ pub(crate) mod tests {
         assert_eq!(done["embeds"][0]["color"], GREEN);
     }
 
-    /// The live panel of 0.1.3: the lead alone on anthropic, `openai-codex` and `devin` held.
+    /// The live panel of 0.1.4: the lead alone on anthropic, `openai-codex` and `devin` held at
+    /// 100 %, six jobs all fine.
     fn held_elsewhere() -> Panel {
         let mut p = sample();
         p.held = vec!["devin".into(), "openai-codex".into()];
-        p.limits = Some(Vec::new());
+        let limit = |provider: &str, percent: f64, held: bool| {
+            let mut l = p.limits.iter().flatten().next().cloned().unwrap();
+            l.provider = provider.into();
+            l.percent = Some(percent);
+            l.held = held;
+            l
+        };
+        p.limits = Some(vec![
+            limit("openai-codex", 100.0, true),
+            limit("anthropic", 40.0, false),
+            limit("devin", 100.0, true),
+        ]);
+        p.jobs = 6;
+        p.issues.clear();
         p.people.running = 0;
         p.people.waiting = 0;
         p.people.models = vec!["anthropic/claude-opus-5-5".into()];
@@ -1148,20 +1162,20 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_held_provider_no_live_session_uses_is_amber() {
+    fn a_held_provider_no_live_session_uses_stays_green() {
         let p = held_elsewhere();
-        assert_eq!(p.level(), Level::Watch);
+        assert_eq!(p.level(), Level::Fine);
         let ko = panel(&p, Language::Korean, "x");
-        assert_eq!(ko["embeds"][0]["color"], AMBER);
+        assert_eq!(ko["embeds"][0]["color"], GREEN);
         let d = description(&p, Language::Korean);
-        assert!(d.starts_with("🟡 살펴볼 것이 있어요\n"), "{d}");
+        assert!(d.starts_with("🟢 모두 정상\n"), "{d}");
         assert!(
             d.contains("⛔ 보류: devin, openai-codex · 다른 제공자의 세션은 정상적으로 시작해요"),
             "{d}"
         );
         assert!(!d.contains("확인이 필요해요"), "{d}");
         let d = description(&p, Language::English);
-        assert!(d.starts_with("🟡 Worth a look\n"), "{d}");
+        assert!(d.starts_with("🟢 All fine\n"), "{d}");
         assert!(
             d.contains("⛔ Held: devin, openai-codex · sessions on other providers start normally"),
             "{d}"

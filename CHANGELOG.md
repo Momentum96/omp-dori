@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 (Unreleased)
+
+- A held provider that no live session uses no longer turns the ops panel amber, and its spent
+  limit no longer counts as a high limit: with nothing else wrong the panel is green, with the
+  held-provider line and the per-provider ⛔ marks still shown.
+
 ## 0.1.4 (2026-11-26)
 
 - The ops panel, `cataly limits` and quota events name every provider as OMP reports it, an
