@@ -10,8 +10,9 @@
 # into this shell). Each --add names a binary of another target (linux-arm64, darwin-arm64,
 # darwin-x64), as a ci dispatch with `binaries` uploads it (artifact cataly-<version>-<target>). It cannot
 # run here, so it is checked without running it: `file` reports that target's executable format,
-# and its bytes hold this release's version (the HTTP user agent `cataly/<version>`), this commit
-# and the release key, so it was built from this commit with this key. Into release-local/v<version>,
+# and its bytes hold the build stamp `cataly-build:<version>:<commit>:<key>` with this release's
+# version, this commit and the key in install.sh, so it was built from this commit with this key.
+# Into release-local/v<version>,
 # next to the repository, it writes:
 #
 #   cataly-<version>-<target>                 the binary of every target
@@ -85,8 +86,10 @@ pem_key=$(openssl pkey -in "$keys/release.pem" -pubout -outform DER | tail -c 32
 # install.sh is read straight from the repository's main branch, so it must hold this key already.
 grep -q "^RELEASE_KEY=\"$key\"\$" install.sh || fail "install.sh does not hold the key in $keys/release.pub"
 commit=$(git rev-parse HEAD)
+install_key=$(sed -n 's/^RELEASE_KEY="\([0-9a-f]\{64\}\)"$/\1/p' install.sh)
 
-# check_added <target> <binary>: the format of <target>, and this version, commit and key inside.
+# check_added <target> <binary>: the format of <target>, and the build stamp of this version, commit
+# and install.sh's key inside (src/sys/release.rs, BUILD_STAMP).
 check_added() {
 	case "$1" in
 	linux-arm64) format="ELF 64-bit LSB.*ARM aarch64" ;;
@@ -94,9 +97,8 @@ check_added() {
 	darwin-x64) format="Mach-O 64-bit.*x86_64" ;;
 	esac
 	file -b "$2" | grep -Eq "$format" || fail "$2 is not a $1 executable: $(file -b "$2")"
-	grep -aqF "cataly/$version" "$2" || fail "$2 is not version $version"
-	grep -aqF "$commit" "$2" || fail "$2 was not built from commit $commit"
-	grep -aqF "$key" "$2" || fail "$2 does not trust the release key in $keys/release.pub"
+	stamp="cataly-build:$version:$commit:$install_key"
+	grep -aqF "$stamp" "$2" || fail "$2 lacks the build stamp $stamp: another version, commit or key"
 }
 
 for pair in $added; do

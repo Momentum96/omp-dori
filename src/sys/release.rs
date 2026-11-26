@@ -41,6 +41,44 @@ pub(crate) const SIGNATURE: &str = "SHA256SUMS.sig";
 /// (`CATALY_RELEASE_KEY`, 64 hex digits). A build without one reads the variable at run time.
 const RELEASE_KEY: Option<&str> = option_env!("CATALY_RELEASE_KEY");
 
+/// The release key in the build stamp: the compiled-in key, or `none`.
+const STAMP_KEY: &str = match RELEASE_KEY {
+    Some(k) => k,
+    None => "none",
+};
+const STAMP_PREFIX: &str = "cataly-build:";
+const STAMP_LEN: usize =
+    STAMP_PREFIX.len() + VERSION.len() + 1 + COMMIT.len() + 1 + STAMP_KEY.len();
+
+/// `cataly-build:<version>:<commit>:<key>` as one run of bytes in the binary, so that
+/// `scripts/release.sh --add` can check a binary built for another target, which it cannot run,
+/// with `grep`. The constants alone are split up by the compiler (into instruction immediates), so
+/// they are not found whole. `#[used]` and the reference in [`report`] keep it through LTO and
+/// stripping.
+#[used]
+static BUILD_STAMP: [u8; STAMP_LEN] = build_stamp();
+
+/// Evaluated only at compile time (it initialises a static), so an index out of range is a build
+/// error, never a panic.
+#[allow(clippy::indexing_slicing)]
+const fn build_stamp() -> [u8; STAMP_LEN] {
+    let parts = [STAMP_PREFIX, VERSION, ":", COMMIT, ":", STAMP_KEY];
+    let mut out = [0u8; STAMP_LEN];
+    let mut at = 0;
+    let mut p = 0;
+    while p < parts.len() {
+        let bytes = parts[p].as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            out[at] = bytes[i];
+            at += 1;
+            i += 1;
+        }
+        p += 1;
+    }
+    out
+}
+
 /// Bounds (IR req. 9, 23, 32).
 pub(crate) const SUMS_MAX: u64 = 64 * 1024;
 pub(crate) const EXTENSION_MAX: u64 = 1024 * 1024;
@@ -72,6 +110,7 @@ pub(crate) struct Report {
 
 /// This binary's report.
 pub(crate) fn report() -> Report {
+    std::hint::black_box(&BUILD_STAMP);
     Report {
         version: VERSION.into(),
         commit: COMMIT.into(),
@@ -594,6 +633,14 @@ mod tests {
         assert!(check_format(b"#!/bin/sh\n").is_err());
         let own = std::fs::read(std::env::current_exe().unwrap()).unwrap();
         check_format(own.get(..64).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn build_stamp_holds_version_commit_and_key() {
+        let want = format!("cataly-build:{VERSION}:{COMMIT}:{STAMP_KEY}");
+        assert_eq!(BUILD_STAMP.as_slice(), want.as_bytes());
+        let own = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        assert!(own.windows(want.len()).any(|w| w == want.as_bytes()));
     }
 
     #[test]
