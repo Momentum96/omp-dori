@@ -177,6 +177,18 @@ Telegram과 Slack은 테스트는 통과했지만 실제 사용은 아직 적습
 
 </td></tr></table>
 
+## 여러 대의 PC
+
+허브 하나, 봇 하나로 다른 컴퓨터를 SSH(원하면 Tailscale 위)로 워커로 쓸 수 있습니다. 허브에서
+`cataly worker add user@host`를 실행하면 다른 컴퓨터에서 실행할 `cataly worker init` 줄을 보여 줍니다. 그
+줄은 허브의 키를 Cataly 워커 모드에만 허용하고 그 컴퓨터의 호스트 키 지문을 보여 줍니다. 그다음
+`cataly worker add user@host --host-key SHA256:…`로 고정하고 연결을 확인합니다. 상태는 `cataly worker
+list`와 `cataly worker doctor`로 봅니다. 그곳의 레인은 그 사용자의 권한으로 도구를 실행하므로 전용 OS
+사용자를 권합니다. "linux-box에서" 레인을 열어 달라고 하거나 그 컴퓨터에만 있는 플랫폼을 말하면 리드가 그곳에
+레인을 엽니다. 워커는 푸시된 커밋에서 자기 저장소 클론을 쓰므로 허브의 커밋 안 된 수정은 따라가지 않고,
+스레드 첫 줄이 그렇게 알려 줍니다. 워커가 꺼져 있으면 레인은 기다렸다가 연결되면 시작하고, 연결이 끊기면
+워커가 돌아올 때 같은 세션에서 이어 갑니다.
+
 ## 도움
 
 문제나 아이디어는 [Issues](https://github.com/vntrevx/Cataly/issues)에 남겨주세요.

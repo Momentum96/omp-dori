@@ -187,6 +187,20 @@ Telegram e Slack superano i loro test ma sono stati usati meno sul campo.
 
 </td></tr></table>
 
+## Più PC
+
+Un hub con un solo bot può usare altre macchine come worker via SSH (anche sopra Tailscale). Sul
+hub `cataly worker add user@host` mostra una riga `cataly worker init` da eseguire sull'altra
+macchina: consente la chiave del hub solo per la modalità worker di Cataly e mostra l'impronta
+della chiave host. Poi `cataly worker add user@host --host-key SHA256:…` la fissa e verifica la
+connessione; `cataly worker list` e `cataly worker doctor` ne mostrano lo stato. Le lane lì usano
+gli strumenti con i diritti di quell'utente, quindi è consigliato un utente di sistema dedicato.
+Chiedi una lane "su linux-box" (o nomina una piattaforma che solo quella macchina ha) e il lead la
+apre lì: il worker usa un proprio clone del repository su un commit già inviato, le modifiche non
+committate sull'hub restano indietro e la prima riga del thread lo dice. Se il worker è offline la
+lane aspetta e parte appena è raggiungibile; se la connessione cade, la lane riprende sulla stessa
+sessione quando il worker torna.
+
 ## Aiuto
 
 Problemi e idee: [Issues](https://github.com/vntrevx/Cataly/issues). Per favore non

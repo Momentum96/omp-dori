@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.5 (Unreleased)
+
+- **Remote workers, phase 1 (enrolment and connection).** `cataly worker add user@host[:port]`
+  makes one ed25519 key for that machine and prints the `cataly worker init --hub-key '…'` line
+  to run there. `worker init` writes a `restrict,command="… cataly worker serve --hub <id>"` line
+  into the worker's `~/.ssh/authorized_keys` (with `from=` when given), checks `omp`, `git` and the
+  bridge link, says plainly that lanes run tools with that user's rights, and prints the host-key
+  fingerprint. `worker add … --host-key SHA256:…` pins that key in Cataly's own `known_hosts`,
+  connects with `ssh -F none` (no agent, no forwarding, no config file, no ProxyJump), refuses a
+  worker where the forced command did not apply (the marker command `cataly-worker-v1` ran), and
+  writes `[workers.<name>]` through the shared config writer. `--tailscale` resolves the machine
+  with `tailscale ip` and refuses addresses off the tailnet. `worker list`, `worker doctor` and
+  `worker remove` ask the hub; `cataly status` and the ops panel show each worker's state. A
+  worker with another worker or bridge protocol is refused as incompatible, naming
+  `cataly update` on that machine.
+- **Remote workers, phase 2 (lanes on workers).** `lane.open` takes `worker` (a configured
+  name) and the lane record keeps it; `lane.workers` lists each worker's platform, state, lanes in
+  use and repositories. The lead sets `worker` only from evidence: the owner names the machine or
+  a platform only it has, or the repository's origin is listed for that worker; never by default.
+  The worker keeps its own bare clone per Git origin under its root (never a folder of its user),
+  fetches, checks that the commit is on the origin ("push it first, or open the lane here") and
+  adds a worktree per lane at that commit. Uncommitted edits of the hub checkout stay behind; the
+  open's reply and the thread's kickoff line say where the lane runs, at which commit, and that.
+  The worker's own OMP runs the session over the worker stream (no hub credentials, its own
+  logins), its session file stays on the worker, and delivery and resume checks of that file run
+  there with the hub's parsers. `command` and `file` checks run on the worker, `pr_merged`,
+  `issue_closed`, `web` and `pr_policy` on the hub; a worker lane's receipt names where each ran.
+  Bridge connections travel as channels of the worker stream and are accepted only for lanes on
+  that worker: never the lead, never another worker's lane, never the control protocol. A lane
+  whose worker drops is lost; its OMP ends there, and the lane comes back by itself on the same
+  session file through the hub-restart path once the worker answers (a deliver in doubt stays in
+  doubt). A lane for an offline worker is queued and starts by itself once the worker is
+  reachable. Remote lanes are headless only and count toward `[lanes] max` and the worker's
+  `lanes`, not toward `[sessions] cap`; their spend is not read on the hub yet.
+- One base64 encoder and decoder (`sys::base64`) replaces the two copies.
+
 ## 0.2.4 (2026-11-27)
 
 - The ops panel has a **📡 Watched channels** button. It opens a private Discord channel picker
