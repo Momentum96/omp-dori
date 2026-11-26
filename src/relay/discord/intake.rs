@@ -321,7 +321,7 @@ impl<T: Runtime> Intake<T> {
                 "intake state belongs to bot {account} and owner {was}; `cataly discord reset` starts afresh"
             )));
         }
-        let scope = listed(&rest, &settings.channels).await?;
+        let (scope, unreadable) = listed(&rest, &settings.channels).await?;
         let gateway_url = if settings.api_base.is_some() {
             let url = rest
                 .gateway_url()
@@ -382,6 +382,9 @@ impl<T: Runtime> Intake<T> {
             typed: Mutex::new(None),
             cards: Cards::default(),
         });
+        for (channel, e) in &unreadable {
+            intake.unlist(*channel, e);
+        }
         intake.close_left_open().await;
         intake.baseline_listed().await?;
         // A queue left from before is drained after a full catch-up read (DISC-IN req. 28).
@@ -442,10 +445,14 @@ impl<T: Runtime> Intake<T> {
             .map(|(c, _)| *c)
             .collect();
         for channel in rooms {
-            let position = self
-                .newest(channel)
-                .await
-                .map_err(|e| rest_stop(&format!("reading channel {channel}"), &e))?;
+            let position = match self.newest(channel).await {
+                Ok(position) => position,
+                Err(e) if matches!(e.status, Some(403 | 404)) => {
+                    self.unlist(channel, &e);
+                    continue;
+                }
+                Err(e) => return Err(rest_stop(&format!("reading channel {channel}"), &e)),
+            };
             self.write(RelayWrite::Baseline {
                 relay: NAME.into(),
                 room: channel.to_string(),
@@ -462,24 +469,27 @@ impl<T: Runtime> Intake<T> {
         self.settings.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Whether `new` differs from the running settings in the watched channels and home only.
+    /// Whether `new` differs from the running settings in the watched channels, home and `others`
+    /// only.
     fn rooms_only(&self, new: &DiscordSettings) -> bool {
         let now = self.settings();
         let mut same = new.clone();
         same.channels.clone_from(&now.channels);
         same.home = now.home;
+        same.others.clone_from(&now.others);
         same == *now
     }
 
-    /// Applies a new list of watched channels on the running connection (the ops panel's picker
-    /// or `config reload`). An added channel is checked like a listed one at start and read from
-    /// the moment the config was applied (or its newest message, if older), so a message sent
-    /// while this runs is caught up; its threads are followed from the next listing, which the
-    /// catch-up read starts. A removed channel leaves scope at once with its threads, so its
-    /// queued messages are dropped.
+    /// Applies a new list of watched channels (and `others`) on the running connection (the ops
+    /// panel's picker or `config reload`). An added channel is checked like a listed one at start
+    /// and read from the moment the config was applied (or its newest message, if older), so a
+    /// message sent while this runs is caught up; its threads are followed from the next listing,
+    /// which the catch-up read starts. A removed channel leaves scope at once with its threads,
+    /// so its queued messages are dropped. One the bot cannot read leaves scope alone.
     async fn rewatch(&self, new: &DiscordSettings) -> Result<(), Stop> {
         let unchanged = {
-            let now = self.settings();
+            let mut now = self.settings();
+            now.others.clone_from(&new.others);
             now.channels == new.channels && now.home == new.home
         };
         if unchanged {
@@ -493,16 +503,27 @@ impl<T: Runtime> Intake<T> {
                 .copied()
                 .collect()
         };
-        let found = listed(&self.rest, &added).await?;
+        let (mut found, unreadable) = listed(&self.rest, &added).await?;
+        for (channel, e) in &unreadable {
+            self.unlist(*channel, e);
+        }
         let applied = Snowflake::at_ms(self.jobs.ctx().config_applied_ms()) - 1;
-        for (channel, kind) in &found.listed {
-            if kind.forum() {
-                continue;
-            }
-            let newest = self
-                .newest(*channel)
-                .await
-                .map_err(|e| rest_stop(&format!("reading channel {channel}"), &e))?;
+        let rooms: Vec<Snowflake> = found
+            .listed
+            .iter()
+            .filter(|(_, kind)| !kind.forum())
+            .map(|(c, _)| *c)
+            .collect();
+        for channel in rooms {
+            let newest = match self.newest(channel).await {
+                Ok(newest) => newest,
+                Err(e) if matches!(e.status, Some(403 | 404)) => {
+                    found.listed.remove(&channel);
+                    self.unlist(channel, &e);
+                    continue;
+                }
+                Err(e) => return Err(rest_stop(&format!("reading channel {channel}"), &e)),
+            };
             let position = newest.min(applied);
             let room = channel.to_string();
             // A channel watched again starts afresh too: its position moves up to this one.
@@ -798,10 +819,13 @@ impl<T: Runtime> Intake<T> {
             };
             for (room, parent) in rooms {
                 match self.read_room(room, parent).await {
-                    Err(e) if parent.is_some() && matches!(e.status, Some(403 | 404)) => {
+                    Err(e) if matches!(e.status, Some(403 | 404)) => match parent {
                         // A followed thread that cannot be read leaves scope until listed again.
-                        self.scope().threads.remove(&room);
-                    }
+                        Some(_) => {
+                            self.scope().threads.remove(&room);
+                        }
+                        None => self.unlist(room, &e),
+                    },
                     other => other?,
                 }
             }
@@ -930,6 +954,28 @@ impl<T: Runtime> Intake<T> {
                 .with("room", room)
                 .with("reason", reason),
         );
+    }
+
+    /// A watched channel the bot cannot read leaves scope alone, with its threads and one notice;
+    /// the other channels go on. It is checked again when intake starts or the channels change.
+    fn unlist(&self, channel: Snowflake, e: &RestError) {
+        {
+            let mut scope = self.scope();
+            scope.listed.remove(&channel);
+            scope.threads.retain(|_, parent| *parent != channel);
+        }
+        let need = e
+            .missing_permission()
+            .unwrap_or("View Channel and Read Message History");
+        let reason = format!(
+            "the bot cannot read channel {channel} ({e}): it needs {need} there; the other \
+             channels are read as before"
+        );
+        log::warn(
+            "Discord channel left intake",
+            &[("room", &channel), ("reason", &reason)],
+        );
+        self.alert_held(channel, &reason);
     }
 
     /// Queues an owner message or passes anything else (DISC-IN req. 12-14, 22, 24). `read_at` is a
@@ -1188,18 +1234,20 @@ async fn account(rest: &Rest, owner: Snowflake) -> Result<(Snowflake, Snowflake,
     Ok((bot, application, buttons))
 }
 
-/// The listed channels with their kinds and guilds; one that cannot be read stops intake (DISC-IN
-/// req. 11).
-async fn listed(rest: &Rest, channels: &[Snowflake]) -> Result<Scope, Stop> {
+/// The listed channels with their kinds and guilds, and those the bot cannot see with why: those
+/// leave scope alone ([`Intake::unlist`]) instead of stopping intake for every channel.
+async fn listed(
+    rest: &Rest,
+    channels: &[Snowflake],
+) -> Result<(Scope, Vec<(Snowflake, RestError)>), Stop> {
     let mut scope = Scope::default();
+    let mut unreadable = Vec::new();
     for channel in channels {
         let info = match rest.channel(*channel).await {
             Ok(v) => v,
             Err(e) if matches!(e.status, Some(403 | 404)) => {
-                return Err(Stop::Fatal(format!(
-                    "channel {channel} cannot be read ({e}): the bot needs View Channel and Read \
-                     Message History there"
-                )));
+                unreadable.push((*channel, e));
+                continue;
             }
             Err(e) => return Err(rest_stop(&format!("reading channel {channel}"), &e)),
         };
@@ -1211,7 +1259,7 @@ async fn listed(rest: &Rest, channels: &[Snowflake]) -> Result<Scope, Stop> {
             },
         );
     }
-    Ok(scope)
+    Ok((scope, unreadable))
 }
 
 impl<T: Runtime> Handler for Arc<Intake<T>> {

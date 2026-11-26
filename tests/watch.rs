@@ -16,13 +16,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use support::TestHub;
-use support::discord::{FakeDiscord, GUILD, Seen};
+use support::discord::{FakeDiscord, GUILD, Gw, Seen};
 
 const OWNER: &str = "400000000000000001";
 const OTHER: &str = "400000000000000002";
 const CH: &str = "600000000000000001";
 const OPS: &str = "600000000000000002";
 const NEW: &str = "600000000000000003";
+const THIRD: &str = "600000000000000004";
 const WAIT: Duration = Duration::from_secs(30);
 
 /// A hub watching `channels` with the lead on the fake OMP and the ops room in `OPS`.
@@ -129,7 +130,7 @@ fn fresh(n: u64) -> u64 {
 #[test]
 fn owner_adds_a_channel_then_drops_one() {
     let fake = FakeDiscord::start();
-    let mut hub = hub(&fake, &[CH], "");
+    let mut hub = hub(&fake, &[CH], &format!("others = [\"{CH}\"]\n"));
     hub.start();
     let panel = ready(&hub, &fake);
     let picker = press(&fake, OWNER, &panel);
@@ -173,6 +174,8 @@ fn owner_adds_a_channel_then_drops_one() {
     let text = config_text(&hub);
     assert!(text.contains(&format!("channels = [\"{NEW}\"]")), "{text}");
     assert!(text.contains(&format!("home = \"{NEW}\"")), "{text}");
+    // CH talked with other people: it leaves `others` in the same write instead of refusing.
+    assert!(text.contains("others = []"), "{text}");
     let (dropped, kept) = (fresh(2), fresh(3));
     fake.say(FakeDiscord::message(
         CH,
@@ -192,12 +195,13 @@ fn owner_adds_a_channel_then_drops_one() {
     assert!(hub.stop().success());
 }
 
-/// Someone else's press or pick, or one from another server, is refused and changes nothing; an
-/// invalid result is reported and the running config stays in force.
+/// Someone else's press or pick, or one from another server, is refused and changes nothing; so
+/// is a pick of a channel the bot cannot read, naming the channel and the missing permission; an
+/// invalid result (the file as it is at submit time) is reported and the running config stays.
 #[test]
 fn refused_or_invalid_picks_change_nothing() {
     let fake = FakeDiscord::start();
-    let mut hub = hub(&fake, &[CH], &format!("others = [\"{CH}\"]\n"));
+    let mut hub = hub(&fake, &[CH], "");
     hub.start();
     let panel = ready(&hub, &fake);
     let before = config_text(&hub);
@@ -212,16 +216,36 @@ fn refused_or_invalid_picks_change_nothing() {
     assert_eq!(refused["data"]["content"], refusal);
     assert_eq!(config_text(&hub), before);
 
-    // `others` must stay among the watched channels: without CH the result is not a valid config.
-    let invalid = pick(&fake, GUILD, OWNER, &panel, &[NEW]);
-    assert_eq!(invalid["type"], 7, "{invalid}");
+    // A new channel the bot cannot read refuses the whole pick before anything is written.
+    let unchanged = "⚠️ The watched channels were not changed; the running config stays:";
+    for (code, need) in [(50013, "Read Message History"), (50001, "View Channel")] {
+        fake.deny(NEW, code);
+        let refused = pick(&fake, GUILD, OWNER, &panel, &[CH, NEW]);
+        assert_eq!(refused["type"], 7, "{refused}");
+        assert_eq!(
+            refused["data"]["content"],
+            format!("{unchanged} the bot cannot read <#{NEW}>: it needs {need} there.")
+        );
+        assert_eq!(config_text(&hub), before);
+    }
+    fake.deny(NEW, 0);
+    let checks = fake.calls("GET", &format!("/channels/{NEW}/threads/archived/public"));
+    assert_eq!(checks.len(), 2, "one check per pick");
+
+    // A hand edit made while the picker was open is what the pick is based on: here it makes the
+    // file invalid, so nothing is written and the running config stays.
+    let edited = before.replace(
+        &format!("guild = \"{GUILD}\""),
+        &format!("guild = \"{GUILD}\"\nfollow_threads = \"maybe\""),
+    );
+    std::fs::write(hub.config_path(), &edited).unwrap();
+    let invalid = pick(&fake, GUILD, OWNER, &panel, &[CH, NEW]);
     let content = invalid["data"]["content"].as_str().unwrap();
     assert!(
-        content.starts_with("⚠️ The watched channels were not changed")
-            && content.contains("others"),
+        content.starts_with(unchanged) && content.contains("follow_threads"),
         "{content}"
     );
-    assert_eq!(config_text(&hub), before);
+    assert_eq!(config_text(&hub), edited);
     let status = hub.json(&["status", "--json"]);
     assert!(status["config_error"].is_null(), "{status}");
     fake.say(FakeDiscord::message(
@@ -231,6 +255,59 @@ fn refused_or_invalid_picks_change_nothing() {
         "still here",
     ));
     answered(&fake, CH, 800_000_000_000_000_201);
+    assert!(hub.stop().success());
+}
+
+/// A watched channel the bot cannot read, at start or later, leaves intake alone with one notice;
+/// the other channels are read as before.
+#[test]
+fn an_unreadable_channel_drops_out_alone() {
+    let fake = FakeDiscord::start();
+    let mut hub = hub(&fake, &[CH, NEW, THIRD], "");
+    fake.deny(THIRD, 50001);
+    hub.start();
+    ready(&hub, &fake);
+    // Later: NEW loses Read Message History; the catch-up read after a reconnect meets it.
+    fake.deny(NEW, 50013);
+    fake.gw(Gw::Op7);
+    fake.wait_connections(2, WAIT);
+    let notices = |room: &str| {
+        hub.events()
+            .into_iter()
+            .filter(|e| e["kind"] == "relay.held" && e.to_string().contains(room))
+            .count()
+    };
+    hub.until(WAIT, || (notices(NEW) == 1).then_some(()));
+    assert_eq!(notices(THIRD), 1);
+    let s = hub.until(WAIT, || {
+        let s = hub.json(&["discord", "status", "--json"]);
+        (s["healthy"] == true).then_some(s)
+    });
+    assert!(s["health"]["reason"].is_null(), "{s}");
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_401,
+        OWNER,
+        "the rest goes on",
+    ));
+    answered(&fake, CH, 800_000_000_000_000_401);
+    fake.say(FakeDiscord::message(
+        NEW,
+        800_000_000_000_000_402,
+        OWNER,
+        "not read",
+    ));
+    fake.gw(Gw::Op7);
+    fake.wait_connections(3, WAIT);
+    fake.say(FakeDiscord::message(
+        CH,
+        800_000_000_000_000_403,
+        OWNER,
+        "after the second reconnect",
+    ));
+    answered(&fake, CH, 800_000_000_000_000_403);
+    assert!(replies_to(&fake, NEW, 800_000_000_000_000_402).is_empty());
+    assert_eq!((notices(NEW), notices(THIRD)), (1, 1), "one notice each");
     assert!(hub.stop().success());
 }
 

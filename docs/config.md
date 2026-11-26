@@ -666,16 +666,23 @@ most), 📊 usage details (a private reply with every limit), 🔕 mute (silence
 `mute`; press again to unmute; the panel keeps updating), 📡 watched channels.
 
 **📡 Watched channels** opens a private channel picker (text and forum channels, up to 25) with
-the watched channels already chosen. On submit the hub writes `[discord] channels` into the file
-as it is at that moment, keeping your other lines, and moves `home` to a watched channel when it
-would no longer be one (or sets it when several channels are now watched and it was unset). The
-result is checked as `cataly config check` does and applied as `cataly config reload` does; a
-result that is not valid, or a file that cannot be written, changes nothing and is reported. A
+the watched channels already chosen. On submit the hub first asks Discord, once per newly picked
+channel and within 2 s in all, whether the bot may view it and read its history; if not, the
+whole pick is refused with the channel and the missing permission named, and nothing changes.
+Then it writes `[discord] channels` into the file as it is at that moment, keeping your other
+lines, moves `home` to a watched channel when it would no longer be one (or sets it when several
+channels are now watched and it was unset), and drops channels no longer watched from `others`.
+The result is checked as `cataly config check` does and applied as `cataly config reload` does;
+a result that is not valid, or a file that cannot be written, changes nothing and is reported. A
 new channel is read from the moment the change was applied (a message sent meanwhile is caught
 up), its threads as `follow_threads` says; a dropped one stops being read at once, and messages
 of it still queued are dropped. With more than 25 watched channels the picker shows the first 25
 and keeps the rest. Only `[discord] owner` may submit it, and only from `[discord] guild`; the
 folder holding the file must be owner-only, as setup makes it.
+
+A watched channel the bot cannot read, when intake starts, when the channels change or later,
+leaves intake alone with one `relay.held` notice naming the missing permission; the other
+channels are read as before. It is checked again at the next start or channel change.
 
 **Alerts** are small embeds with the thumbnail, each kind at most once an hour and none while
 muted. One whose condition clears (`pressure.clear`, `quota.released`, `backup.clean`, the job

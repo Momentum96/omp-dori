@@ -917,11 +917,14 @@ impl Jobs {
     }
 
     /// The owner submitted the watched-channel picker (the caller checked the owner and the
-    /// server). The config file as it is now gets the chosen channels, then those the picker could
-    /// not show, and a home that is still watched; the result is checked as `cataly config check`
-    /// does and applied as `cataly config reload` does. An invalid result writes nothing.
+    /// server). Each newly picked channel must first be readable by the bot; then the config file
+    /// as it is now gets the chosen channels, then those the picker could not show, a home that
+    /// is still watched and `others` without the dropped channels; the result is checked as
+    /// `cataly config check` does and applied as `cataly config reload` does. A refused check or
+    /// an invalid result writes nothing.
     pub(crate) async fn watch_channels(&self, values: &[String]) -> Value {
-        let lang = self.ctx.config().hub.language;
+        let config = self.ctx.config();
+        let lang = config.hub.language;
         let chosen: Vec<Snowflake> = values.iter().filter_map(|v| Snowflake::parse(v)).collect();
         if chosen.is_empty() {
             let why = match lang {
@@ -930,7 +933,16 @@ impl Jobs {
             };
             return render::watch_failed(why, lang);
         }
-        let mut applied = (Vec::new(), 0);
+        let fresh: Vec<Snowflake> = chosen
+            .iter()
+            .filter(|c| !config.discord.channels.contains(c))
+            .copied()
+            .collect();
+        if let Err(why) = self.readable(&config, &fresh).await {
+            log::info("watched channels refused", &[("error", &why)]);
+            return render::watch_failed(&why, lang);
+        }
+        let mut applied = Picked::default();
         let written = file::edit(&self.ctx.config_file, "", |text| {
             let now = crate::config::parse(text)
                 .map_err(|e| {
@@ -940,13 +952,20 @@ impl Jobs {
                     )
                 })?
                 .discord;
-            let (channels, home, kept) = picked(&now, &chosen);
-            let mut text =
-                file::set_rendered(text, "discord", "channels", &file::string_list(&channels));
-            if let Some(home) = home {
+            let pick = picked(&now, &chosen);
+            let mut text = file::set_rendered(
+                text,
+                "discord",
+                "channels",
+                &file::string_list(&pick.channels),
+            );
+            if let Some(home) = pick.home {
                 text = file::set_key(&text, "discord", "home", &home.to_string());
             }
-            applied = (channels, kept);
+            if let Some(others) = &pick.others {
+                text = file::set_rendered(&text, "discord", "others", &file::string_list(others));
+            }
+            applied = pick;
             Ok(text)
         });
         if let Err(e) = written {
@@ -954,20 +973,90 @@ impl Jobs {
             return render::watch_failed(&e, lang);
         }
         match self.reload().await {
-            Ok(_) => render::watching(&applied.0, applied.1, lang),
+            Ok(_) => render::watching(&applied.channels, applied.kept, lang),
             Err(e) => render::watch_failed(&e, lang),
         }
     }
+
+    /// Checks that the bot may view and read the history of every channel: one bounded call
+    /// each, side by side, all within [`READABLE_WITHIN`] so the picker is answered in time. The
+    /// first channel that fails is named with the permission it lacks.
+    async fn readable(&self, config: &Config, channels: &[Snowflake]) -> Result<(), String> {
+        if channels.is_empty() {
+            return Ok(());
+        }
+        let lang = config.hub.language;
+        let rest = self.ctx.discord(config)?;
+        let mut checks = tokio::task::JoinSet::new();
+        for channel in channels {
+            let (rest, channel) = (Arc::clone(&rest), *channel);
+            checks.spawn(async move { (channel, rest.readable(channel).await) });
+        }
+        let mut answers = Vec::with_capacity(channels.len());
+        let all = tokio::time::timeout(READABLE_WITHIN, async {
+            while let Some(done) = checks.join_next().await {
+                if let Ok(answer) = done {
+                    answers.push(answer);
+                }
+            }
+        })
+        .await;
+        for channel in channels {
+            let why = match answers.iter().find(|(c, _)| c == channel) {
+                Some((_, Ok(()))) => continue,
+                Some((_, Err(e))) => match (e.missing_permission(), lang) {
+                    (Some(need), Language::Korean) => {
+                        format!("봇이 <#{channel}> 채널을 읽을 수 없어요. {need} 권한이 필요해요.")
+                    }
+                    (Some(need), Language::English) => {
+                        format!("the bot cannot read <#{channel}>: it needs {need} there.")
+                    }
+                    (None, Language::Korean) => {
+                        format!("<#{channel}> 채널을 확인하지 못했어요 ({e}).")
+                    }
+                    (None, Language::English) => {
+                        format!("<#{channel}> could not be checked ({e}).")
+                    }
+                },
+                None if all.is_err() => match lang {
+                    Language::Korean => {
+                        format!("Discord가 <#{channel}> 확인에 제때 답하지 않았어요.")
+                    }
+                    Language::English => format!("Discord did not confirm <#{channel}> in time."),
+                },
+                None => match lang {
+                    Language::Korean => format!("<#{channel}> 채널을 확인하지 못했어요."),
+                    Language::English => format!("<#{channel}> could not be checked."),
+                },
+            };
+            return Err(why);
+        }
+        Ok(())
+    }
 }
 
-/// The watched list after the picker, the home to write (`None` leaves it) and how many channels
-/// the picker could not show were kept. Those come after the chosen ones. The home stays while it
-/// is watched; else, or when it was unset and several channels are now watched, it becomes the
-/// current home if still watched, else the first chosen channel.
-fn picked(
-    now: &DiscordSettings,
-    chosen: &[Snowflake],
-) -> (Vec<Snowflake>, Option<Snowflake>, usize) {
+/// How long the readability check of newly picked channels may take: Discord wants the picker
+/// answered within 3 s.
+const READABLE_WITHIN: Duration = Duration::from_secs(2);
+
+/// The config after the picker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Picked {
+    /// The chosen channels, then those the picker could not show.
+    channels: Vec<Snowflake>,
+    /// The home to write; `None` leaves it.
+    home: Option<Snowflake>,
+    /// `others` without the channels no longer watched; `None` when it is unchanged.
+    others: Option<Vec<Snowflake>>,
+    /// How many channels the picker could not show were kept.
+    kept: usize,
+}
+
+/// The watched list after the picker. Channels the picker could not show come after the chosen
+/// ones. The home stays while it is watched; else, or when it was unset and several channels are
+/// now watched, it becomes the current home if still watched, else the first chosen channel.
+/// `others` keeps only watched channels.
+fn picked(now: &DiscordSettings, chosen: &[Snowflake]) -> Picked {
     let mut channels: Vec<Snowflake> = Vec::with_capacity(chosen.len() + now.channels.len());
     for c in chosen {
         if !channels.contains(c) {
@@ -988,7 +1077,19 @@ fn picked(
         None if channels.len() > 1 => now.home().filter(|h| channels.contains(h)).or(first),
         None => None,
     };
-    (channels, home, kept)
+    let others = now.others.iter().any(|o| !channels.contains(o)).then(|| {
+        now.others
+            .iter()
+            .filter(|o| channels.contains(o))
+            .copied()
+            .collect()
+    });
+    Picked {
+        channels,
+        home,
+        others,
+        kept,
+    }
 }
 
 /// The refusal for anyone but the owner, in the owner's language.

@@ -85,6 +85,8 @@ struct State {
     app_flags: u64,
     guilds: Vec<Value>,
     profile: HashMap<String, (String, String)>,
+    /// Channel -> the Discord error code its reads get (50001 or 50013).
+    denied: HashMap<String, u64>,
 }
 
 pub struct FakeDiscord {
@@ -225,6 +227,17 @@ impl FakeDiscord {
             v["parent_id"] = json!(p);
         }
         self.state.lock().unwrap().channels.insert(id.into(), v);
+    }
+
+    /// Takes the bot's View Channel (`code` 50001) or Read Message History (50013) in `channel`;
+    /// 0 gives it back.
+    pub fn deny(&self, channel: &str, code: u64) {
+        let mut s = self.state.lock().unwrap();
+        if code == 0 {
+            s.denied.remove(channel);
+        } else {
+            s.denied.insert(channel.into(), code);
+        }
     }
 
     /// An active thread for the listing.
@@ -504,6 +517,27 @@ fn param(query: &str, key: &str) -> Option<u64> {
         .and_then(|v| v.parse().ok())
 }
 
+/// Reads that depend on the bot's access: a denied channel's (50001, no View Channel: every read
+/// of it; 50013, no Read Message History: its history and threads) are refused, and a readable
+/// channel's public archived threads are none.
+fn access(s: &State, method: &str, parts: &[&str]) -> Option<Response<Full<Bytes>>> {
+    let ("GET", ["channels", id, rest @ ..]) = (method, parts) else {
+        return None;
+    };
+    match s.denied.get(*id).copied() {
+        Some(code) if code == 50001 || !rest.is_empty() => Some(reply(
+            403,
+            &json!({ "message": "Missing Access", "code": code }),
+        )),
+        _ => (rest == ["threads", "archived", "public"]).then(|| {
+            reply(
+                200,
+                &json!({ "threads": [], "members": [], "has_more": false }),
+            )
+        }),
+    }
+}
+
 /// The calls `cataly setup` makes: the bot account (its avatar and banner kept and changed), the
 /// application's intent flags, the bot's servers, a server's channels and a new channel.
 fn setup_route(
@@ -598,7 +632,9 @@ async fn answer(
             &json!({ "message": "401: Unauthorized", "code": 0 }),
         ));
     }
-    if let Some(r) = setup_route(&mut s, &method, &parts, &body) {
+    if let Some(r) =
+        setup_route(&mut s, &method, &parts, &body).or_else(|| access(&s, &method, &parts))
+    {
         return Ok(r);
     }
     let unknown = json!({ "message": "Unknown Message", "code": 10008 });
