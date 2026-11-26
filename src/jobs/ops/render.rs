@@ -107,7 +107,21 @@ pub(crate) struct People {
     /// The model (`provider/id`, or the requested selector until OMP names one) of every live
     /// session the hub runs, the lead's first. Its length is the count the session cap holds.
     pub(crate) models: Vec<String>,
+    /// Every configured worker (docs/design/workers.md 3).
+    pub(crate) workers: Vec<WorkerLine>,
 }
+
+/// One worker on the panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkerLine {
+    pub(crate) name: String,
+    pub(crate) state: crate::worker::link::State,
+    pub(crate) lanes: usize,
+    pub(crate) max: u32,
+}
+
+/// Workers named on the panel; the rest are counted.
+const WORKERS_SHOWN: usize = 4;
 
 impl Default for People {
     fn default() -> Self {
@@ -117,8 +131,46 @@ impl Default for People {
             running: 0,
             waiting: 0,
             models: Vec::new(),
+            workers: Vec::new(),
         }
     }
+}
+
+/// `🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중`, or nothing without workers.
+fn workers_line(workers: &[WorkerLine], lang: Language) -> Option<String> {
+    use crate::worker::link::State;
+    if workers.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = workers
+        .iter()
+        .take(WORKERS_SHOWN)
+        .map(|w| {
+            let state = match w.state {
+                State::Online => match lang {
+                    Language::Korean => format!("🟢 레인 {}/{}", w.lanes, w.max),
+                    Language::English => format!("🟢 lanes {}/{}", w.lanes, w.max),
+                },
+                State::Idle => t(lang, "⚪ 쉬는 중", "⚪ idle").to_string(),
+                State::Offline => t(lang, "🔴 연결 끊김", "🔴 offline").to_string(),
+                State::Refused => t(lang, "⛔ 연결 거부", "⛔ refused").to_string(),
+                State::Incompatible => t(lang, "⛔ 버전 비호환", "⛔ incompatible").to_string(),
+            };
+            format!("{} {state}", plain(&w.name))
+        })
+        .collect();
+    if workers.len() > WORKERS_SHOWN {
+        let more = workers.len() - WORKERS_SHOWN;
+        parts.push(match lang {
+            Language::Korean => format!("외 {more}대"),
+            Language::English => format!("{more} more"),
+        });
+    }
+    Some(format!(
+        "{} {}",
+        t(lang, "🛰️ 워커:", "🛰️ Workers:"),
+        parts.join(" · ")
+    ))
 }
 
 /// A job that is not fine.
@@ -403,7 +455,7 @@ fn people_value(p: &People, lang: Language) -> String {
         .model
         .as_deref()
         .map_or_default(|m| format!(" · {}", plain(m.rsplit('/').next().unwrap_or(m))));
-    match lang {
+    let mut text = match lang {
         Language::Korean => format!(
             "리드: {lead}{model}\n레인: 실행 {} · 대기 {}",
             p.running, p.waiting
@@ -412,7 +464,12 @@ fn people_value(p: &People, lang: Language) -> String {
             "Lead: {lead}{model}\nLanes: {} running · {} waiting",
             p.running, p.waiting
         ),
+    };
+    if let Some(line) = workers_line(&p.workers, lang) {
+        text.push('\n');
+        text.push_str(&line);
     }
+    text
 }
 
 fn jobs_value(jobs: usize, issues: &[Issue], lang: Language) -> String {
@@ -966,6 +1023,7 @@ pub(crate) mod tests {
                     "openai-codex/gpt-5.5".into(),
                     "anthropic/claude-sonnet-5".into(),
                 ],
+                workers: Vec::new(),
             },
             jobs: 5,
             issues: Vec::new(),
@@ -980,6 +1038,43 @@ pub(crate) mod tests {
             mute_minutes: 60,
             pin_refused: false,
         }
+    }
+
+    #[test]
+    fn workers_show_their_state_and_lanes() {
+        use crate::worker::link::State;
+        let line = |name: &str, state, lanes| WorkerLine {
+            name: name.into(),
+            state,
+            lanes,
+            max: 1,
+        };
+        let mut p = sample();
+        assert!(
+            !panel(&p, Language::Korean, "x")
+                .to_string()
+                .contains("워커")
+        );
+        p.people.workers = vec![
+            line("linux-box", State::Online, 1),
+            line("mac-mini", State::Idle, 0),
+            line("old-box", State::Refused, 0),
+        ];
+        let ko = panel(&p, Language::Korean, "x").to_string();
+        assert!(
+            ko.contains(
+                "🛰️ 워커: linux-box 🟢 레인 1/1 · mac-mini ⚪ 쉬는 중 · old-box ⛔ 연결 거부"
+            ),
+            "{ko}"
+        );
+        p.people.workers = (0..6)
+            .map(|i| line(&format!("w{i}"), State::Offline, 0))
+            .collect();
+        let en = panel(&p, Language::English, "x").to_string();
+        assert!(
+            en.contains("w3 🔴 offline · 2 more") && !en.contains("w4"),
+            "{en}"
+        );
     }
 
     #[test]

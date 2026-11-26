@@ -203,7 +203,8 @@ impl<'a> Chunk<'a> {
     }
 
     fn append(&self, bytes: &mut Vec<u8>) -> Result<(), RpcError> {
-        let segment = base64_decode(self.data).ok_or_else(|| protocol("invalid base64 chunk"))?;
+        let segment = crate::sys::base64::decode(self.data)
+            .ok_or_else(|| protocol("invalid base64 chunk"))?;
         if segment.is_empty() || bytes.len() + segment.len() > self.byte_length {
             return Err(protocol("rpc_chunk exceeds its declared length"));
         }
@@ -236,50 +237,6 @@ async fn read_line(
             return Ok(bytes);
         }
     }
-}
-
-/// Strict standard base64 with padding, as OMP's chunks use it.
-pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
-    fn value(c: u8) -> Option<u32> {
-        match c {
-            b'A'..=b'Z' => Some(u32::from(c - b'A')),
-            b'a'..=b'z' => Some(u32::from(c - b'a') + 26),
-            b'0'..=b'9' => Some(u32::from(c - b'0') + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let (quads, rest) = text.as_bytes().as_chunks::<4>();
-    if !rest.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(quads.len() * 3);
-    let last = quads.len().checked_sub(1);
-    for (i, quad) in quads.iter().enumerate() {
-        let pad = quad.iter().rev().take_while(|c| **c == b'=').count();
-        if pad > 2 || (pad > 0 && Some(i) != last) {
-            return None;
-        }
-        let mut n: u32 = 0;
-        for (j, c) in quad.iter().enumerate() {
-            let v = if j >= 4 - pad { 0 } else { value(*c)? };
-            n = (n << 6) | v;
-        }
-        let [_, a, b, c] = n.to_be_bytes();
-        out.push(a);
-        // Unused low bits must be zero, so every input has one decoding.
-        match pad {
-            0 => {
-                out.push(b);
-                out.push(c);
-            }
-            1 if c == 0 => out.push(b),
-            2 if b == 0 && c == 0 => {}
-            _ => return None,
-        }
-    }
-    Some(out)
 }
 
 /// The ready frame's advertised facts.
@@ -629,27 +586,6 @@ pub(crate) mod tests {
     use serde_json::json;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, duplex};
 
-    pub(crate) fn encode(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let b = [
-                chunk[0],
-                chunk.get(1).copied().unwrap_or(0),
-                chunk.get(2).copied().unwrap_or(0),
-            ];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            for i in 0..4 {
-                if i <= chunk.len() {
-                    out.push(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
-
     fn chunks(payload: &[u8], split: usize) -> [String; 2] {
         let (head, tail) = payload.split_at(split);
         [(0, head), (1, tail)].map(|(index, part)| {
@@ -657,21 +593,10 @@ pub(crate) mod tests {
                 "{}\n",
                 json!({
                     "type": "rpc_chunk", "chunkId": "proof", "index": index,
-                    "count": 2, "byteLength": payload.len(), "data": encode(part),
+                    "count": 2, "byteLength": payload.len(), "data": crate::sys::base64::encode(part),
                 })
             )
         })
-    }
-
-    #[test]
-    fn base64_is_strict() {
-        for sample in [&b""[..], b"f", b"fo", b"foo", b"foob", "한글".as_bytes()] {
-            assert_eq!(base64_decode(&encode(sample)).unwrap(), sample);
-        }
-        assert_eq!(base64_decode("Zm9v").unwrap(), b"foo");
-        for bad in ["Zm9", "Zm=v", "Zm9v=", "Zh==", "Zm9-", "Zg==Zg=="] {
-            assert!(base64_decode(bad).is_none(), "{bad}");
-        }
     }
 
     #[tokio::test]

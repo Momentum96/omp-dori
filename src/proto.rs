@@ -68,6 +68,10 @@ pub(crate) mod method {
     /// The caller's authority as the hub assigned it (DESIGN 8): `owner`, `lead`, `lane` or
     /// `unplaced`. Commands that act locally with the owner's authority ask it first.
     pub(crate) const WHOAMI: &str = "whoami";
+    /// Workers (docs/design/workers.md 4.3): the list for anyone, doctor and remove for the owner.
+    pub(crate) const WORKER_LIST: &str = "worker.list";
+    pub(crate) const WORKER_DOCTOR: &str = "worker.doctor";
+    pub(crate) const WORKER_REMOVE: &str = "worker.remove";
 }
 
 /// Error codes besides the decision classes.
@@ -236,6 +240,9 @@ pub(crate) struct Status {
     /// The sessions this hub brought back at start (DESIGN decision 9); `None` while recovering.
     #[serde(default)]
     pub(crate) resumed: Option<Resumed>,
+    /// Every configured worker (docs/design/workers.md); a hub before 0.2.5 sends none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) workers: Vec<crate::worker::link::View>,
 }
 
 /// The `quota_gate` value older clients parse: open, nothing holding it.
@@ -620,6 +627,43 @@ pub(crate) struct LimitWindow {
     pub(crate) reset_ms: Option<i64>,
     /// Headroom to the configured warning percentage, when set.
     pub(crate) headroom_percent: Option<f64>,
+}
+
+/// One line read from a newline-delimited stream.
+pub(crate) enum Line {
+    /// The line without its newline.
+    Text(String),
+    /// Over the cap, or not UTF-8.
+    TooLong,
+    Closed,
+}
+
+/// Reads one line of at most `cap` bytes.
+pub(crate) async fn read_line<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> Line {
+    use tokio::io::AsyncBufReadExt;
+    let mut buf = Vec::new();
+    loop {
+        let chunk = match reader.fill_buf().await {
+            Ok([]) | Err(_) => return Line::Closed,
+            Ok(chunk) => chunk,
+        };
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        buf.extend_from_slice(chunk.get(..take).unwrap_or_default());
+        reader.consume(take);
+        if buf.len() > cap + 1 {
+            return Line::TooLong;
+        }
+        if done {
+            buf.pop();
+            return String::from_utf8(buf).map_or(Line::TooLong, Line::Text);
+        }
+    }
 }
 
 #[cfg(test)]

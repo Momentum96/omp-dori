@@ -70,6 +70,7 @@ pub(crate) struct Hub {
     pub(crate) telegram: Arc<crate::relay::intake::Shared>,
     pub(crate) slack: Arc<crate::relay::intake::Shared>,
     links: Arc<crate::host::bridge::Links>,
+    workers: Arc<crate::worker::link::Workers>,
     streams: Arc<streams::Streams>,
     #[cfg(feature = "voice")]
     pub(crate) voice: Arc<voice::Voice<Hosted>>,
@@ -121,6 +122,7 @@ impl Hub {
             quota_gate: crate::proto::legacy_gate(),
             lead,
             resumed: self.resumed(),
+            workers: self.workers.list(),
         })
     }
 
@@ -408,6 +410,16 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     }
     let links = Arc::new(crate::host::bridge::Links::default());
     let lead_cwd = stream_cwd(&config_rx.borrow());
+    let workers = crate::worker::link::Workers::new(
+        config_rx.clone(),
+        &paths.config_file,
+        paths.logs_dir.clone(),
+        store.clone(),
+    );
+    {
+        let (workers, stop) = (Arc::clone(&workers), shutdown_rx.clone());
+        supervisor.spawn("workers", move || Arc::clone(&workers).run(stop.clone()));
+    }
     let streams = streams::Streams::new(
         jobs.clone(),
         store.clone(),
@@ -423,6 +435,7 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         &supervisor,
         &shutdown_rx,
         &links,
+        &workers,
     );
     let hub = Arc::new(Hub {
         paths: paths.clone(),
@@ -440,6 +453,7 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         telegram: relays.telegram,
         slack: relays.slack,
         links,
+        workers,
         streams: Arc::clone(&streams),
         #[cfg(feature = "voice")]
         voice: relays.voice,
@@ -509,6 +523,7 @@ fn sessions(
     supervisor: &Supervisor,
     shutdown: &watch::Receiver<bool>,
     links: &Arc<crate::host::bridge::Links>,
+    workers: &Arc<crate::worker::link::Workers>,
 ) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
@@ -540,7 +555,7 @@ fn sessions(
         let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
         supervisor.spawn("lanes", move || Arc::clone(&lanes).run(stop.clone()));
     }
-    ops_people(jobs, &lead, &lanes);
+    ops_people(jobs, &lead, &lanes, workers);
     {
         let (slots, stop) = (Arc::clone(&lanes.slots), shutdown.clone());
         supervisor.spawn("slots", move || Arc::clone(&slots).run(stop.clone()));
@@ -721,13 +736,29 @@ fn lanes(
 }
 
 /// The lead and the lanes as the ops panel shows them.
-fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::Lanes<Hosted>>) {
+fn ops_people(
+    jobs: &Jobs,
+    lead: &Arc<Lead<Hosted>>,
+    lanes: &Arc<crate::lanes::Lanes<Hosted>>,
+    workers: &Arc<crate::worker::link::Workers>,
+) {
     use crate::host::Status;
     use crate::host::lead::Phase;
+    use crate::jobs::ops::render::WorkerLine;
     use crate::jobs::ops::render::{LeadState, People};
-    let (lead, lanes) = (Arc::clone(lead), Arc::clone(lanes));
+    let (lead, lanes, workers) = (Arc::clone(lead), Arc::clone(lanes), Arc::clone(workers));
     jobs.ctx().ops.set_people(Arc::new(move || {
         let (lead, lanes) = (Arc::clone(&lead), Arc::clone(&lanes));
+        let workers: Vec<WorkerLine> = workers
+            .list()
+            .into_iter()
+            .map(|w| WorkerLine {
+                name: w.display,
+                state: w.state,
+                lanes: w.lanes,
+                max: w.lanes_max,
+            })
+            .collect();
         Box::pin(async move {
             let view = lead.view().await;
             let (running, waiting, lane_models) = lanes.ops_counts().await;
@@ -759,6 +790,7 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 running,
                 waiting,
                 models,
+                workers,
             }
         })
     }));

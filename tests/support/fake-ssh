@@ -1,0 +1,64 @@
+#!/bin/sh
+# A fake `ssh` for the worker tests: it never opens a socket. It plays the worker's sshd for a
+# destination named in `ssh-data/hosts/<host>_<port>`: that file holds the worker user's environment
+# (HOME, XDG_*, PATH; one NAME=value per line), and `<host>_<port>.pub` its ed25519 host key.
+#   - the host key must be pinned under `host` (port 22) or `[host]:port` in UserKnownHostsFile,
+#     else "Host key verification failed." and exit 255, as StrictHostKeyChecking=yes does;
+#   - the public key of `-i` must be in the worker's ~/.ssh/authorized_keys, else "Permission
+#     denied (publickey)." and exit 255;
+#   - a `command="…"` option runs instead of the asked command, with SSH_ORIGINAL_COMMAND set; a line
+#     without it runs the asked command, which for the marker fails with "not found" (exit 127);
+#   - `ssh-data/down` makes every connection fail as an unreachable host does.
+# Each connection appends its destination to ssh-data/log.
+dir=$(cd "$(dirname "$0")" && pwd)/ssh-data
+key='' port=22 known=''
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -F|-p|-i|-o)
+            case "$1" in
+                -p) port=$2 ;;
+                -i) key=$2 ;;
+                -o) case "$2" in UserKnownHostsFile=*) known=${2#UserKnownHostsFile=} ;; esac ;;
+            esac
+            shift 2 ;;
+        -T) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+dest=$1; shift
+asked="$*"
+host=${dest#*@}
+echo "$dest:$port" >> "$dir/log"
+if [ -f "$dir/down" ]; then
+    echo "ssh: connect to host $host port $port: Connection refused" >&2
+    exit 255
+fi
+env_file="$dir/hosts/${host}_$port"
+if [ ! -f "$env_file" ]; then
+    echo "ssh: Could not resolve hostname $host: Name or service not known" >&2
+    exit 255
+fi
+if [ "$port" = 22 ]; then pin=$host; else pin="[$host]:$port"; fi
+blob=$(awk '{print $2}' "$env_file.pub")
+if ! awk -v p="$pin" -v b="$blob" '$1 == p && $2 == "ssh-ed25519" && $3 == b { f = 1 } END { exit !f }' "$known" 2>/dev/null; then
+    echo "No ED25519 host key is known for $pin and you have requested strict checking." >&2
+    echo "Host key verification failed." >&2
+    exit 255
+fi
+home=$(sed -n 's/^HOME=//p' "$env_file")
+public=$(awk '{print $2}' "$key.pub")
+line=$(grep -F " $public " "$home/.ssh/authorized_keys" 2>/dev/null | head -n 1)
+if [ -z "$line" ]; then
+    echo "$dest: Permission denied (publickey)." >&2
+    exit 255
+fi
+forced=$(printf '%s' "$line" | sed -n 's/.*command="\([^"]*\)".*/\1/p')
+set --
+while IFS= read -r kv; do
+    [ -n "$kv" ] && set -- "$@" "$kv"
+done < "$env_file"
+if [ -n "$forced" ]; then
+    exec env -i "$@" SSH_ORIGINAL_COMMAND="$asked" /bin/sh -c "$forced"
+fi
+exec env -i "$@" /bin/sh -c "$asked"

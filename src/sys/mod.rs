@@ -3,6 +3,7 @@
 //! latency rings.
 
 pub(crate) mod ancestry;
+pub(crate) mod base64;
 pub(crate) mod command;
 pub(crate) mod fs;
 pub(crate) mod host;

@@ -57,7 +57,7 @@ struct Method {
     mutating: bool,
 }
 
-const METHODS: [Method; 42] = [
+const METHODS: [Method; 45] = [
     Method {
         name: method::STATUS,
         needs: Needs::Any,
@@ -274,6 +274,21 @@ const METHODS: [Method; 42] = [
         needs: Needs::Any,
         mutating: false,
     },
+    Method {
+        name: method::WORKER_LIST,
+        needs: Needs::Any,
+        mutating: false,
+    },
+    Method {
+        name: method::WORKER_DOCTOR,
+        needs: Needs::Owner,
+        mutating: false,
+    },
+    Method {
+        name: method::WORKER_REMOVE,
+        needs: Needs::Owner,
+        mutating: true,
+    },
 ];
 
 /// Replies of recent mutating calls, by (method, caller request ID).
@@ -485,6 +500,41 @@ async fn handle(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
         // The stop begins once this acceptance is written (`socket::connection`).
         method::HUB_STOP => hub.may_stop().map(|()| Value::Null).map_err(refused),
         voice if voice.starts_with("voice.") => voice_method(hub, voice, raw).await,
+        worker if worker.starts_with("worker.") => worker_method(hub, worker, raw).await,
+        _ => Err(Failure {
+            code: code::UNKNOWN_METHOD,
+            message: format!("unknown method '{name}'"),
+        }),
+    }
+}
+
+/// `worker.list`, `worker.doctor` (one worker, or all) and `worker.remove`.
+async fn worker_method(hub: &Hub, name: &str, raw: Value) -> Result<Value, Failure> {
+    let worker = raw.get("name").and_then(Value::as_str).map(str::to_string);
+    match name {
+        method::WORKER_LIST => ok(&serde_json::json!({ "workers": hub.workers.list() })),
+        method::WORKER_DOCTOR => {
+            let names: Vec<String> = match worker {
+                Some(n) => vec![n],
+                None => hub.config().workers.keys().cloned().collect(),
+            };
+            let mut out = serde_json::Map::new();
+            for n in names {
+                let checks = hub.workers.doctor(&n).await.map_err(refused)?;
+                out.insert(n, serde_json::to_value(checks).unwrap_or_default());
+            }
+            Ok(serde_json::json!({ "workers": out }))
+        }
+        method::WORKER_REMOVE => {
+            let n = worker.ok_or_else(|| refused("worker.remove needs a name".into()))?;
+            let todo = hub
+                .workers
+                .remove(&n, &hub.paths.config_file)
+                .await
+                .map_err(refused)?;
+            let jobs = hub.jobs.reload().await.map_err(refused)?;
+            ok(&serde_json::json!({ "removed": n, "todo": todo, "jobs": jobs }))
+        }
         _ => Err(Failure {
             code: code::UNKNOWN_METHOD,
             message: format!("unknown method '{name}'"),

@@ -12,6 +12,7 @@ pub(crate) mod relays;
 pub(crate) mod release;
 pub(crate) mod session;
 pub(crate) mod voice;
+pub(crate) mod workers;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -69,6 +70,8 @@ pub(crate) struct Config {
     pub(crate) jobs: BTreeMap<String, Arc<Job>>,
     pub(crate) voice: voice::VoiceConfig,
     pub(crate) transcribe: voice::TranscribeSettings,
+    /// `[workers.<name>]`: machines that run lanes for this hub.
+    pub(crate) workers: BTreeMap<String, workers::WorkerSettings>,
 }
 
 impl Default for Config {
@@ -102,6 +105,7 @@ impl Default for Config {
             jobs: BTreeMap::new(),
             voice: voice::VoiceConfig::default(),
             transcribe: voice::TranscribeSettings::default(),
+            workers: BTreeMap::new(),
         }
     }
 }
@@ -699,6 +703,7 @@ fn sections(errors: &mut Vec<ConfigError>, root: &mut Section<'_>, config: &mut 
     release::parse(errors, root, &mut config.update);
     config.voice = voice::parse(errors, root, &config.discord);
     voice::parse_transcribe(errors, root, &mut config.transcribe);
+    workers::parse(errors, root, &mut config.workers);
 }
 
 fn job(
