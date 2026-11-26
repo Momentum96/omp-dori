@@ -75,6 +75,8 @@ pub struct Script {
     pub commentary_ms: u32,
     /// Answer only the first owner turn with audio.
     pub reply_once: bool,
+    /// Stream 20 ms of silence every tick, as the real API streams output audio continuously.
+    pub idle_audio: bool,
 }
 
 /// What the fake saw.
@@ -94,6 +96,8 @@ pub struct Log {
     pub auth: Vec<String>,
     /// Summary requests.
     pub summaries: Vec<Value>,
+    /// Error events sent for client events the real API rejects (`check`).
+    pub rejected: Vec<Value>,
 }
 
 impl Log {
@@ -104,6 +108,156 @@ impl Log {
             .map(|(_, v)| v.clone())
             .collect()
     }
+}
+
+/// Fields documented for each client event of the Live API (the API reference for the Live
+/// primary WebSocket, its client events): the event type, every field it takes, and the required
+/// ones. Like the real API, the fake rejects any other field as an unknown parameter.
+const CLIENT_EVENTS: &[(&str, &[&str], &[&str])] = &[
+    (
+        "session.start",
+        &["type", "event_id", "session"],
+        &["session"],
+    ),
+    (
+        "session.update",
+        &["type", "event_id", "session"],
+        &["session"],
+    ),
+    (
+        "session.input_audio.append",
+        &["type", "event_id", "audio"],
+        &["audio"],
+    ),
+    ("session.input_audio.mute", &["type", "event_id"], &[]),
+    ("session.input_audio.unmute", &["type", "event_id"], &[]),
+    (
+        "session.output_audio.fixture.play",
+        &["type", "event_id", "audio"],
+        &["audio"],
+    ),
+    (
+        "session.instructions.append",
+        &["type", "event_id", "content", "delegation_id"],
+        &["content", "delegation_id"],
+    ),
+    (
+        "session.thinking.append",
+        &["type", "event_id", "content", "delegation_id"],
+        &["content", "delegation_id"],
+    ),
+    (
+        "session.commentary.append",
+        &["type", "event_id", "content", "delegation_id"],
+        &["content", "delegation_id"],
+    ),
+    ("decision.create", &["type", "event_id"], &["event_id"]),
+    (
+        "response.item.create",
+        &["type", "event_id", "item"],
+        &["item"],
+    ),
+    ("response.create", &["type", "event_id"], &[]),
+    ("session.close", &["type", "event_id"], &[]),
+];
+
+/// The fields of the `session` object of `session.start` (and of the WebRTC session POST).
+const SESSION_FIELDS: &[&str] = &[
+    "model",
+    "audio",
+    "client",
+    "delegation",
+    "input",
+    "instructions",
+    "safety_identifier",
+    "store",
+    "triggers",
+];
+
+fn invalid(code: &str, message: String, param: &str) -> Value {
+    json!({"type": "invalid_request_error", "code": code, "message": message, "param": param})
+}
+
+/// The `session` object's fields.
+pub fn check_session(session: &Value) -> Result<(), Value> {
+    let Some(fields) = session.as_object() else {
+        return Err(invalid(
+            "invalid_type",
+            "Invalid type for 'session': expected an object.".into(),
+            "session",
+        ));
+    };
+    if let Some(k) = fields
+        .keys()
+        .find(|k| !SESSION_FIELDS.contains(&k.as_str()))
+    {
+        let param = format!("session.{k}");
+        return Err(invalid(
+            "unknown_parameter",
+            format!("Unknown parameter: '{param}'."),
+            &param,
+        ));
+    }
+    if fields
+        .get("model")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        return Err(invalid(
+            "missing_required_parameter",
+            "Missing required parameter: 'session.model'.".into(),
+            "session.model",
+        ));
+    }
+    Ok(())
+}
+
+/// One client event against its documented fields, as the real API checks it: the `error` object
+/// of the error event it answers with, or nothing. `responses` is whether the session delegates
+/// to Responses, where context appends take only a null `delegation_id`.
+pub fn check(event: &Value, responses: bool) -> Result<(), Value> {
+    let kind = event["type"].as_str().unwrap_or("");
+    let Some((_, allowed, required)) = CLIENT_EVENTS.iter().find(|(t, _, _)| *t == kind) else {
+        return Err(invalid(
+            "invalid_value",
+            format!("Invalid value: '{kind}'. It is not a Live client event."),
+            "type",
+        ));
+    };
+    let fields = event.as_object().cloned().unwrap_or_default();
+    if let Some(k) = fields.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(invalid(
+            "unknown_parameter",
+            format!("Unknown parameter: '{k}'."),
+            k,
+        ));
+    }
+    if let Some(k) = required.iter().find(|k| !fields.contains_key(**k)) {
+        return Err(invalid(
+            "missing_required_parameter",
+            format!("Missing required parameter: '{k}'."),
+            k,
+        ));
+    }
+    if responses && kind.ends_with(".append") && !event["delegation_id"].is_null() {
+        return Err(invalid(
+            "invalid_value",
+            "Non-null delegation_id is not accepted with Responses delegation.".into(),
+            "delegation_id",
+        ));
+    }
+    if matches!(kind, "session.start" | "session.update") {
+        check_session(&event["session"])?;
+    }
+    Ok(())
+}
+
+/// The error event for a rejected client event, in the documented shape.
+fn error_event(mut error: Value, event: &Value) -> Value {
+    if let Some(id) = event["event_id"].as_str() {
+        error["client_event_id"] = json!(id);
+    }
+    json!({"type": "error", "event_id": "evt_error_fake", "error": error})
 }
 
 /// A running fake.
@@ -211,6 +365,12 @@ async fn post(mut stream: TcpStream, script: Arc<Script>, log: Arc<Mutex<Log>>) 
         respond(&mut stream, 404, "{}").await;
         return;
     }
+    if let Err(error) = check_session(&body["session"]) {
+        let answer = json!({"error": error});
+        log.lock().unwrap().rejected.push(answer.clone());
+        respond(&mut stream, 400, &answer.to_string()).await;
+        return;
+    }
     let sdp = body["transport"]["sdp"].as_str().unwrap_or("").to_string();
     let index = {
         let mut l = log.lock().unwrap();
@@ -255,7 +415,13 @@ async fn websocket(stream: TcpStream, script: Arc<Script>, log: Arc<Mutex<Log>>)
         return;
     };
     let start: Value = serde_json::from_str(first.as_str()).unwrap();
-    assert_eq!(start["type"], "session.start");
+    if let Err(error) = check(&start, false) {
+        let answer = error_event(error, &start);
+        log.lock().unwrap().rejected.push(answer.clone());
+        let _ = ws.send(Message::text(answer.to_string())).await;
+        let _ = ws.close(None).await;
+        return;
+    }
     let index = {
         let mut l = log.lock().unwrap();
         l.sessions.push(start["session"].clone());
@@ -290,6 +456,9 @@ async fn websocket(stream: TcpStream, script: Arc<Script>, log: Arc<Mutex<Log>>)
                 // Arrival is stamped before parsing: decoding a large frame takes time here.
                 let arrived = Instant::now();
                 let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                if !fake.accept(&v) {
+                    continue;
+                }
                 if v["type"] == "session.input_audio.append" {
                     let bytes = unb64(v["audio"].as_str().unwrap());
                     fake.audio(&bytes, arrived);
@@ -344,7 +513,9 @@ async fn rtc_loop(mut rtc: Rtc, socket: UdpSocket, local: SocketAddr, mut fake: 
                 }
                 Event::ChannelData(d) => {
                     let v: Value = serde_json::from_slice(&d.data).unwrap();
-                    fake.event(v, Instant::now());
+                    if fake.accept(&v) {
+                        fake.event(v, Instant::now());
+                    }
                 }
                 Event::MediaAdded(m) => mid = Some(m.mid),
                 Event::MediaData(m) => {
@@ -434,6 +605,8 @@ pub struct Fake {
     awaiting: Vec<String>,
     /// Events held back until their time (`Script::call_gap_ms`).
     later: Vec<(Instant, Value)>,
+    /// The session delegates to Responses.
+    responses: bool,
 }
 
 fn tone(ms: u32) -> Vec<i16> {
@@ -449,6 +622,7 @@ impl Fake {
             log,
             index,
             greeting: session.get("input").is_some(),
+            responses: session["delegation"]["type"] == "responses",
             out: Vec::new(),
             started: false,
             loud_ms: 0,
@@ -467,6 +641,20 @@ impl Fake {
 
     fn emit(&mut self, v: Value) {
         self.out.push(Out::Event(v));
+    }
+
+    /// Checks a client event as the real API does; a rejected one is answered with an error event
+    /// and not acted on.
+    fn accept(&mut self, v: &Value) -> bool {
+        match check(v, self.responses) {
+            Ok(()) => true,
+            Err(error) => {
+                let answer = error_event(error, v);
+                self.log.lock().unwrap().rejected.push(answer.clone());
+                self.emit(answer);
+                false
+            }
+        }
     }
 
     /// Emits the `n`th event of a spaced sequence: at once without spacing, else at its time.
@@ -550,8 +738,9 @@ impl Fake {
         self.emit(json!({"type": "session.input_transcript.delta", "delta": "check the build "}));
         if self.turns == 1 && !self.script.tools.is_empty() {
             self.emit(
-                json!({"type": "session.delegation.created", "delegation_id": "d1",
-                "target": "responses", "response_id": "r1"}),
+                json!({"type": "session.delegation.created", "event_id": "evt_d1",
+                "offset_ms": 0, "delegation": {"id": "d1", "type": "delegation",
+                "target": "responses", "response_id": "r1"}}),
             );
             self.emit(json!({"type": "response.event", "delegation_id": "d1",
                 "event": {"type": "response.created", "response": {"id": "r1"}}}));
@@ -660,6 +849,9 @@ impl Fake {
         {
             let seconds = self.seconds.floor();
             self.emit(json!({"type": "session.usage.updated", "usage": {"seconds": seconds}}));
+        }
+        if self.started && self.script.idle_audio {
+            self.out.push(Out::Audio(vec![0; 480]));
         }
     }
 }

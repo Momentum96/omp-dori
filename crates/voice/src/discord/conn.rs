@@ -288,8 +288,6 @@ impl Conn {
                     && let Some(ssrc) = d["ssrc"].as_u64().and_then(|s| u32::try_from(s).ok())
                 {
                     self.receiver.owner_ssrc(ssrc, Instant::now());
-                    self.receiver
-                        .speaking(d["speaking"].as_u64().unwrap_or(0) & 1 != 0);
                     let wants = json!({"op": 15, "d": {"any": 0, ssrc.to_string(): 100}});
                     self.send(&wants).await.map_err(ConnEvent::Down)?;
                 }

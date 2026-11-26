@@ -398,14 +398,14 @@ impl<H: VoiceHost> Session<H> {
             || self.delegations.iter().any(Delegation::running)
     }
 
-    /// Owner and output both quiet, under 100 ms queued (VOICE req. 76, 78).
+    /// Owner and output both quiet, under 100 ms of audible output queued (VOICE req. 76, 78).
     fn pause(&self, playback: &Playback, now: Instant) -> bool {
         now.saturating_duration_since(self.last_owner_speech) >= OWNER_QUIET
             && now.saturating_duration_since(self.last_output) >= OUTPUT_QUIET
             && playback
                 .last_played()
                 .is_none_or(|t| now.saturating_duration_since(t) >= OUTPUT_QUIET)
-            && playback.queued() < QUEUED_MAX
+            && playback.audible_queued() < QUEUED_MAX
     }
 
     /// Records usage when a second passed or at close (VOICE req. 81).
@@ -585,7 +585,10 @@ impl<H: VoiceHost> Session<H> {
             }
             LinkEvent::Malformed => self.fail("malformed provider event".into()),
             LinkEvent::Audio(mono) => {
-                self.last_output = now;
+                // The provider streams silence between replies; only audible audio is output.
+                if crate::playback::audible(&mono) {
+                    self.last_output = now;
+                }
                 if playback.push(&mono, now).is_err() {
                     self.fail("playback buffer overflow (over 5 s queued)".into());
                 }
@@ -638,15 +641,13 @@ impl<H: VoiceHost> Session<H> {
                 }
             }
             "session.delegation.created" => {
-                let id = v["delegation_id"]
-                    .as_str()
-                    .or_else(|| v.pointer("/delegation/id").and_then(Value::as_str))
-                    .unwrap_or("")
-                    .to_string();
+                // The documented shape: `delegation: {id, target, type, response_id}`.
+                let delegation = &v["delegation"];
+                let id = delegation["id"].as_str().unwrap_or("").to_string();
                 if !id.is_empty() && !self.delegations.iter().any(|d| d.id == id) {
                     self.delegations.push(Delegation {
                         id,
-                        response: v["response_id"].as_str().map(str::to_string),
+                        response: delegation["response_id"].as_str().map(str::to_string),
                         responding: true,
                         failed: false,
                         last_event: now,
@@ -870,7 +871,9 @@ impl<H: VoiceHost> Session<H> {
         }
     }
 
-    /// Asks the backend to continue a delegation whose calls are all answered.
+    /// Asks the backend to continue a delegation whose calls are all answered. `response.create`
+    /// takes only `type` and `event_id`: it continues the delegated response waiting for tool
+    /// results, and the provider rejects any other field as an unknown parameter.
     fn resume(&mut self, delegation: &str) {
         if let Some(d) = self.delegations.iter_mut().find(|d| d.id == delegation) {
             d.answered = 0;
@@ -878,8 +881,7 @@ impl<H: VoiceHost> Session<H> {
         }
         if self.state == State::Live {
             let id = self.id("continue");
-            self.send(json!({"type": "response.create", "event_id": id,
-                "delegation_id": delegation}));
+            self.send(json!({"type": "response.create", "event_id": id}));
         }
     }
 

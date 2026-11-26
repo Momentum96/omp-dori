@@ -663,9 +663,10 @@ fn failure_holds(t: &str) {
     assert!(call.until(WAIT, |c| {
         let posts = c.text_posts();
         posts.iter().any(|p| p.contains("Voice is held"))
-            && posts
-                .iter()
-                .any(|p| p.contains("no summary: the session failed"))
+            && posts.iter().any(|p| {
+                p.contains("no model summary: the session failed")
+                    && p.contains("Owner said: hello")
+            })
     }));
     call.owner_in(false);
     std::thread::sleep(Duration::from_millis(300));
