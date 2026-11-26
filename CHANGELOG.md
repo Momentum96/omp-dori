@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.5 (Unreleased)
+## 0.1.5 (2026-11-26)
 
 - A held provider that no live session uses no longer turns the ops panel amber, and its spent
   limit no longer counts as a high limit: with nothing else wrong the panel is green, with the
