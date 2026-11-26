@@ -29,6 +29,8 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{self, ClientConfig, RootCertStore};
 
+use crate::sys::ErrorClass;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Largest response body read.
 pub(crate) const BODY_CAP: usize = 2 * 1024 * 1024;
@@ -332,7 +334,7 @@ pub(crate) async fn call(
                 }
                 (delay, Outcome::RateLimited(delay))
             }
-            Ok(resp) if resp.status == 408 || resp.status >= 500 => {
+            Ok(resp) if status_class(resp.status) == ErrorClass::Transient => {
                 observe(&resp);
                 let what = format!("HTTP {}", resp.status);
                 if req.kind == Kind::Once {
@@ -359,6 +361,16 @@ pub(crate) async fn call(
         }
         sleep(wait).await;
         backoff = backoff.saturating_mul(2);
+    }
+}
+
+/// The decision class of an answer's status (DESIGN 9.5): a timeout (408), a rate limit (429) or a
+/// server error (5xx) is worth another try; anything else is the server's answer.
+pub(crate) fn status_class(status: u16) -> ErrorClass {
+    if status == 408 || status == 429 || status >= 500 {
+        ErrorClass::Transient
+    } else {
+        ErrorClass::Rejected
     }
 }
 

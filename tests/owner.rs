@@ -181,10 +181,9 @@ fn usage(percent: u32, resets_at_ms: i64) -> String {
     .to_string()
 }
 
-/// Check 8: a band rise warns once, the gate closes at 85 % and opens at the reported reset time
-/// even while usage data stays unavailable.
+/// Check 8: a band rise warns once per level, and a fall below every level says so once.
 #[test]
-fn quota_warns_once_and_the_gate_opens_at_the_reset_time() {
+fn quota_warns_once_per_level_and_recovers_once() {
     let mut hub =
         hub_with_fake_omp(|_| "[jobs.q]\nkind = \"quota\"\nenabled = false\n".to_string());
     let later = now_ms() + 3_600_000;
@@ -198,26 +197,80 @@ fn quota_warns_once_and_the_gate_opens_at_the_reset_time() {
         Vec::<String>::new(),
         "same band: warned once"
     );
+    hub.fixture("omp", "usage.json", Some(&usage(86, later)));
+    assert_eq!(hub.tick("q"), ["quota.level"], "the next level warns too");
 
-    let reset = now_ms() + 4_000;
-    hub.fixture("omp", "usage.json", Some(&usage(86, reset)));
-    let mut kinds = hub.tick("q");
-    kinds.sort();
-    assert_eq!(kinds, ["quota.hold", "quota.level"]);
+    // The window resets: one recovery note, then nothing.
+    hub.fixture("omp", "usage.json", Some(&usage(3, later)));
+    assert_eq!(hub.tick("q"), ["quota.recovered"]);
+    assert_eq!(hub.tick("q"), Vec::<String>::new(), "recovered once");
+    assert!(hub.stop().success());
+}
 
-    // Data becomes unavailable: the gate stays closed until the reported reset time, no longer.
-    hub.fixture("omp", "usage.json", None);
-    let kinds = hub.tick("q");
-    assert!(!kinds.contains(&"quota.released".to_string()), "{kinds:?}");
-    let wait = u64::try_from(reset - now_ms() + 300).unwrap_or(0);
-    std::thread::sleep(Duration::from_millis(wait));
-    let kinds = hub.tick("q");
-    assert!(kinds.contains(&"quota.released".to_string()), "{kinds:?}");
+/// 0.2.4 dropped quota jobs' `hold`. At start the hub removes its line, keeps every other line, the
+/// mode and the original next to the file, and records one quiet event; `config check` only
+/// reports. A read-only file keeps the line: the hub still starts and `cataly health` names it.
+#[test]
+fn the_hub_removes_an_obsolete_hold_line_or_names_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut hub = hub_with_fake_omp(|_| {
+        "# my quota job\n[jobs.q]\nkind = \"quota\"\nhold = 85 # gate\nenabled = false\n".into()
+    });
+    let path = hub.config_path();
+    let old = std::fs::read_to_string(&path).unwrap();
+    let check = hub.cli(&["config", "check"]);
+    assert!(check.status.success(), "{check:?}");
     assert!(
-        !hub.tick("q").contains(&"quota.released".to_string()),
-        "released once"
+        String::from_utf8_lossy(&check.stdout)
+            .contains("warning: jobs.q.hold no longer does anything"),
+        "{check:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        old,
+        "check never writes"
+    );
+
+    hub.start();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        old.replace("hold = 85 # gate\n", "")
+    );
+    let backup = std::path::PathBuf::from(format!("{}.before-0.2.4", path.display()));
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+    for p in [&path, &backup] {
+        let mode = std::fs::metadata(p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{}", p.display());
+    }
+    let cleaned = hub.until(Duration::from_secs(10), || {
+        hub.events()
+            .into_iter()
+            .find(|e| e["kind"] == "config.cleaned")
+    });
+    let text = cleaned["text"].as_str().unwrap();
+    assert!(
+        text.contains("jobs.q.hold") && text.contains(".before-0.2.4"),
+        "{text}"
     );
     assert!(hub.stop().success());
+
+    // A read-only file: the line stays, ignored, and health names it.
+    hub.write_config(&old);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    hub.start();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+    let health = hub.cli(&["health", "--json"]);
+    let report: Value = serde_json::from_slice(&health.stdout).unwrap();
+    let named: Vec<&Value> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["name"] == "jobs.q.hold")
+        .collect();
+    assert_eq!(named.len(), 1, "{report}");
+    assert_eq!(named[0]["level"], "info");
+    assert!(hub.stop().success());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {

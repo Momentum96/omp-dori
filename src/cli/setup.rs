@@ -271,6 +271,102 @@ pub(super) fn set_rendered(text: &str, section: &str, key: &str, rendered: &str)
     out
 }
 
+/// Removes `key`'s line from `[section]`, keeping every other byte as it is; `None` when the section
+/// has no such line. The counterpart of [`set_rendered`] for a key that went away.
+pub(crate) fn remove_key(text: &str, section: &str, key: &str) -> Option<String> {
+    let header = format!("[{section}]");
+    let (mut inside, mut removed) = (false, false);
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let bare = line.split('#').next().unwrap_or_default().trim();
+        if bare.starts_with('[') {
+            inside = bare == header;
+        } else if inside
+            && !removed
+            && line
+                .trim_start()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        {
+            removed = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    removed.then_some(out)
+}
+
+/// The copy of the config file kept before the hub removed obsolete lines from it.
+pub(crate) fn before_copy(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".before-0.2.4");
+    PathBuf::from(name)
+}
+
+/// What the hub's start-up clean-up of the config file did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Cleanup {
+    /// Nothing to remove, or no file that parses (the start-up check reports that).
+    Nothing,
+    /// The lines of these settings are gone; the original is kept at `backup`.
+    Removed { keys: Vec<String>, backup: PathBuf },
+    /// The lines stay, ignored; why the file was not changed.
+    Kept { keys: Vec<String>, why: String },
+}
+
+/// Removes the obsolete `hold = …` line from every `kind = "quota"` job section of the config file,
+/// keeping every other byte and the file's 0600 mode, and writes it atomically. The original is
+/// kept next to it first (an older copy there is left as it is). A read-only file, or one that
+/// cannot be written, keeps its lines.
+pub(crate) fn remove_obsolete_hold(path: &Path) -> Cleanup {
+    let Ok(before) = snapshot(path) else {
+        return Cleanup::Nothing;
+    };
+    let Some(text) = before
+        .bytes
+        .as_deref()
+        .and_then(|b| std::str::from_utf8(b).ok())
+    else {
+        return Cleanup::Nothing;
+    };
+    let Ok(parsed) = config::parse(text) else {
+        return Cleanup::Nothing;
+    };
+    let keys = parsed.obsolete_hold();
+    if keys.is_empty() {
+        return Cleanup::Nothing;
+    }
+    let kept = |why: String| Cleanup::Kept {
+        keys: keys.clone(),
+        why,
+    };
+    if before.identity.is_some_and(|i| i.2 & 0o200 == 0) {
+        return kept(format!("{} is read-only", path.display()));
+    }
+    let mut out = text.to_string();
+    for key in &keys {
+        let section = key.strip_suffix(".hold").unwrap_or(key);
+        match remove_key(&out, section, "hold") {
+            Some(next) => out = next,
+            None => return kept(format!("{key} is not a line of its own under [{section}]")),
+        }
+    }
+    if !config::parse(&out).is_ok_and(|c| c.obsolete_hold().is_empty()) {
+        return kept("the file without those lines would not read as expected".into());
+    }
+    let backup = before_copy(path);
+    if !backup.exists()
+        && let Err(e) = create_atomic(&backup, text.as_bytes())
+    {
+        return kept(e.to_string());
+    }
+    let written = publish_text(path, &before, out.as_bytes());
+    match written {
+        Ok(()) => Cleanup::Removed { keys, backup },
+        Err(why) => Cleanup::Kept { keys, why },
+    }
+}
+
 const NEW_FILE: &str = "# Cataly configuration. Check it with `cataly config check`; apply it with\n\
                         # `cataly config reload`. Jobs and destinations go below.\n";
 
@@ -1120,34 +1216,113 @@ pub(super) fn managed(p: &Parsed, mut text: String, creating: bool) -> Result<St
 /// Re-checks the snapshot, writes atomically (never overwriting a file that appeared meanwhile), and
 /// reads the result back.
 fn publish(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), Failure> {
-    let now = snapshot(path).map_err(Failure::Refused)?;
-    if now != *before {
-        return Err(Failure::Refused(format!(
-            "{} changed since its snapshot; your edit is kept, run setup again",
-            path.display()
-        )));
-    }
     if let Some(dir) = path.parent() {
         crate::sys::fs::ensure_private_dir(dir).map_err(|e| Failure::Refused(e.to_string()))?;
+    }
+    publish_text(path, before, bytes).map_err(Failure::Refused)
+}
+
+/// [`publish`] with the reason as text and the folder as it is, for the hub's start-up clean-up too.
+fn publish_text(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), String> {
+    let now = snapshot(path)?;
+    if now != *before {
+        return Err(format!(
+            "{} changed since its snapshot; your edit is kept, run setup again",
+            path.display()
+        ));
     }
     let written = if before.bytes.is_none() {
         create_atomic(path, bytes)
     } else {
         write_atomic(path, bytes)
     };
-    written.map_err(|e| Failure::Refused(e.to_string()))?;
+    written.map_err(|e| e.to_string())?;
     match read_private(path, CONFIG_MAX) {
         Ok(Some(back)) if back == bytes => Ok(()),
-        _ => Err(Failure::Refused(format!(
-            "{} did not read back as written",
-            path.display()
-        ))),
+        _ => Err(format!("{} did not read back as written", path.display())),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 0.2.3 config with `hold` and comments: the clean-up removes that one line, keeps every other
+    /// byte and the mode, keeps the original next to it, and a second run changes nothing.
+    #[test]
+    fn the_obsolete_hold_line_goes_and_nothing_else_changes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::sys::fs::tests::scratch("hold-clean");
+        let path = dir.join("config.toml");
+        let old = "# mine\r\n[hub]\nlog_level = \"warn\" # loud\n\n\
+                   # The quota job\n[jobs.quota] # alerts\nkind = \"quota\"\nlevels = [70, 85, 95]\n\
+                   hold = 85 # the gate\nevery = \"5m\"\n\n[jobs.other]\nkind = \"quota\"\n  hold=90\n\n\
+                   [omp]\npath = \"omp\"\n";
+        crate::sys::fs::create_atomic(&path, old.as_bytes()).unwrap();
+        let Cleanup::Removed { keys, backup } = remove_obsolete_hold(&path) else {
+            panic!("not removed");
+        };
+        assert_eq!(keys, ["jobs.other.hold", "jobs.quota.hold"]);
+        let new = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            new,
+            old.replace("hold = 85 # the gate\n", "")
+                .replace("  hold=90\n", "")
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+        assert_eq!(backup, dir.join("config.toml.before-0.2.4"));
+        for p in [&path, &backup] {
+            let mode = std::fs::metadata(p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{}", p.display());
+        }
+        assert_eq!(
+            config::parse(&new).unwrap().obsolete_hold(),
+            Vec::<String>::new()
+        );
+        assert_eq!(remove_obsolete_hold(&path), Cleanup::Nothing);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            new,
+            "twice: no change"
+        );
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
+    }
+
+    /// A read-only config keeps its line, ignored, and still loads with one notice.
+    #[test]
+    fn a_read_only_config_keeps_the_line_and_still_loads() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = crate::sys::fs::tests::scratch("hold-ro");
+        let path = dir.join("config.toml");
+        let old = "[jobs.q]\nkind = \"quota\"\nhold = 85\n";
+        crate::sys::fs::create_atomic(&path, old.as_bytes()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let Cleanup::Kept { keys, why } = remove_obsolete_hold(&path) else {
+            panic!("changed a read-only file");
+        };
+        assert_eq!(keys, ["jobs.q.hold"]);
+        assert!(why.contains("read-only"), "{why}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), old);
+        assert!(!dir.join("config.toml.before-0.2.4").exists());
+        let loaded = config::load(&path).unwrap();
+        assert_eq!(loaded.obsolete_hold(), ["jobs.q.hold"]);
+        assert!(
+            config::obsolete_notice("jobs.q.hold")
+                .starts_with("jobs.q.hold no longer does anything")
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn remove_key_touches_its_section_only() {
+        let text = "[a]\nhold = 1\n[b]\nholder = 2\nhold = 3\n";
+        assert_eq!(
+            remove_key(text, "b", "hold").as_deref(),
+            Some("[a]\nhold = 1\n[b]\nholder = 2\n")
+        );
+        assert_eq!(remove_key(text, "c", "hold"), None);
+        assert_eq!(remove_key("[b]\nholder = 2\n", "b", "hold"), None);
+    }
 
     #[test]
     fn set_key_replaces_adds_and_keeps_the_rest() {

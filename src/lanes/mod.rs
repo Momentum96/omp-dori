@@ -98,7 +98,6 @@ pub(crate) struct Env<R: Runtime> {
     pub(crate) state_dir: PathBuf,
     pub(crate) events: Events,
     pub(crate) make: Factory<R>,
-    pub(crate) quota_hold: crate::jobs::owner::quota::QuotaHold,
     pub(crate) bridge_link: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     /// Whether the lead's session is live (it counts toward the session cap).
     pub(crate) lead_live: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -339,15 +338,8 @@ impl<R: Runtime> Lanes<R> {
         Ok(self.overlay.get_or_init(|| path).clone())
     }
 
-    /// Admission for every open, reopen and restart (LANE req. 18; OJ-08; C14). `new_model` is the
-    /// model of a new session, which the quota gate judges; a resume of an existing session passes
-    /// `None`, since the gate holds new sessions only.
-    async fn admission(
-        &self,
-        config: &Config,
-        cwd: &Path,
-        new_model: Option<&str>,
-    ) -> Result<PathBuf, String> {
+    /// Admission for every open, reopen and restart (LANE req. 18; C14).
+    async fn admission(&self, config: &Config, cwd: &Path) -> Result<PathBuf, String> {
         let report = self.env.omp.report().ok_or("OMP has not been probed yet")?;
         report.sessions()?;
         let exe = self
@@ -355,9 +347,6 @@ impl<R: Runtime> Lanes<R> {
             .omp
             .path()
             .ok_or("the OMP executable was not found")?;
-        if let Some(held) = new_model.and_then(|m| (self.env.quota_hold)(m)) {
-            return Err(held.to_string());
-        }
         (self.env.bridge_link)()?;
         let live = self.live_map().values().filter(|s| s.alive()).count();
         let sessions = live + usize::from((self.env.lead_live)());
@@ -548,10 +537,7 @@ impl<R: Runtime> Lanes<R> {
                     .map(PathBuf::from)
                     .or_else(|| config.lanes.cwd.clone())
                     .unwrap_or_else(|| PathBuf::from("/"));
-                let model = s(input, "model")
-                    .or(config.lanes.model.as_deref())
-                    .unwrap_or_default();
-                Ok(match self.admission(&config, &cwd, Some(model)).await {
+                Ok(match self.admission(&config, &cwd).await {
                     Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
                     Err(e) => json!({ "admit": false, "detail": e }),
                 })
@@ -1004,9 +990,7 @@ impl<R: Runtime> Lanes<R> {
             return Err(format!("the key {} is already used by a lane", valid.key));
         }
         let config = self.cfg();
-        let exe = self
-            .admission(&config, &valid.cwd, Some(&valid.model))
-            .await?;
+        let exe = self.admission(&config, &valid.cwd).await?;
         let mut rec = Self::build(&valid, &config, crate::host::random_hex(8));
         self.tern_spend(&config, &rec).await?;
         if let Some(source) = thread_from {

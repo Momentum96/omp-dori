@@ -630,7 +630,7 @@ lines; the panel words them, in `[hub] language`, and the event log keeps them a
 | `destination` | string | `"cataly-ops"` when that is a Discord destination | a Discord destination in `[destinations]`; `""` turns the room off | Where the panel and alerts go. |
 | `mute` | duration | `"1h"` | 1m–24h | How long the mute button silences new alerts. |
 | `alerts.pressure` | boolean | `true` | | Post when the host has been in alert for five minutes (`pressure.alert`). |
-| `alerts.quota` | boolean | `true` | | Post when the quota gate holds a provider (`quota.hold`). |
+| `alerts.quota` | boolean | `true` | | Post when a provider limit reaches an alert level (`quota.level`). |
 | `alerts.jobs` | boolean | `true` | | Post when a job routed here fails twice in a row. |
 | `alerts.backup` | boolean | `true` | | Post when a backup is refused (`backup.refused`). |
 | `alerts.github` | boolean | `true` | | Post GitHub news: `github.pr`, `github.notification`, `pr.feedback`, `pr.check_failed`, `pr.merged`. |
@@ -643,17 +643,15 @@ minute, like the [board](#coordination-coord). After an uncertain create it is n
 it stays in doubt until the lead names the message it found (board destination
 `ops:<channel id>`).
 Its colour is the worst state: green when all is fine, amber when something is worth a look (host
-busy, a limit of a provider that is not held at 90 % or more, a job with a failure, the lead in
-error), red when it needs you (host in alert, a held provider a live session uses, the lead held
-by the quota gate or its provider's limit, a job failing twice or waiting for your ack). A held
-provider no live session uses does not change the colour: under the summary, a held provider gets
-a line naming the held providers and saying whether a live session uses one or sessions on the
-other providers start normally. It shows:
+busy, a limit of a provider a live session uses at 90 % or more, a job with a failure, the lead in
+error), red when it needs you (host in alert, the lead held by OMP's usage limit or for the owner,
+a job failing twice or waiting for your ack). A spent limit of a provider no live session uses
+does not change the colour. It shows:
 
 - 🖥️ host: load bar and per cent, free memory and disk, live sessions (the lead and the lanes)
   of `max_sessions` (load and memory rounded to 5 %, so noise does not edit the panel);
 - 🔋 usage: one line per provider, by the name OMP reports, with its most used limit, a bar, the
-  per cent and the reset time; held providers marked;
+  per cent and the reset time;
 - 👥 sessions: the lead's state and model, lanes running and waiting;
 - 🛠️ jobs: all fine, or which jobs need attention;
 - 📮 recent: the last three events routed here (busy and ready changes left out), with relative
@@ -666,9 +664,9 @@ most), 📊 usage details (a private reply with every limit), 🔕 mute (silence
 `mute`; press again to unmute; the panel keeps updating).
 
 **Alerts** are small embeds with the thumbnail, each kind at most once an hour and none while
-muted. One whose condition clears (`pressure.clear`, `quota.released`, `backup.clean`, the job
-working again) is edited to show it resolved and when, instead of a new post. Busy and ready
-changes never post; they only change the panel.
+muted. One whose condition clears (`pressure.clear`, `backup.clean`, the job working again) is
+edited to show it resolved and when, instead of a new post. Busy and ready changes never post;
+they only change the panel.
 
 ```toml
 [ops]
@@ -753,7 +751,10 @@ templates = { "run.done" = "{job} finished: {outcome}" }
 
 Built-in kinds. Each ticks every `every`, the first tick when the job is registered. All of them
 emit `job.failed` (fields `job`, `reason`) and `job.recovered` (`job`, `failures`) besides their
-own events.
+own events. A failure on the server's side or on the way to it (HTTP 408, 429 or 5xx, a time
+limit, a network error) is tried again on the next tick and reported only when it happens twice
+in a row, the count that opens an `alerts.jobs` alert; any other failure (a 404 or 401, a bad
+setting) is reported at once. `job.recovered` follows only a reported failure.
 
 | Kind | `every` default | `every` minimum | `timeout` default |
 |---|---|---|---|
@@ -795,28 +796,24 @@ Events: `pr.baseline` (`pr`, `title`, `state`), `pr.feedback` (`pr`, `author`, `
 `count`, `old`, `new`, `rewritten`), `pr.merged` (`pr`, `commit`), `pr.closed` (`pr`),
 `pr.reopened` (`pr`).
 
-#### `quota`: provider quota and the quota gate
+#### `quota`: provider usage alerts
 
-Warns once when a provider limit rises past an alert level. While a watched limit is at or above
-`hold`, the quota gate holds new session starts on that limit's provider; a session whose model
-(`provider/id`) belongs to another provider starts as usual. Only new sessions wait: resuming an
-existing session (the lead's last session after a hub restart, `cataly update`, `cataly rollback`
-or `cataly lead start`, and parked or live lanes) goes ahead. A fresh lead (`cataly lead start
---fresh`, or a first lead with no session yet) and new lanes wait; `cataly lead status`, the ops
-panel and the update message then name the provider, the limits with their reset times and
-`cataly quota lift`. The gate opens when fresh data shows the limits below, or when every limit
-that closed it has passed its reset time. `cataly status` and `cataly quota` name the held
-providers; `cataly quota lift` opens the gate by hand.
+Warns once when a provider limit rises past an alert level, and says once when it falls back below
+every level (after its window resets). Usage never holds a session start; `cataly limits` and the
+ops panel show every limit.
 
 | Key | Type | Default | Allowed | What it does |
 |---|---|---|---|---|
 | `providers` | list of strings | `[]` (all OMP reports) | | Providers watched. |
 | `levels` | list of integers | `[70, 85, 95]` | 1–100, at least one; sorted, duplicates dropped | Alert levels in per cent. |
-| `hold` | integer | `85` | 1–100 | The gate holds a provider's new sessions from this level. |
+
+`hold` (before 0.2.4) no longer does anything. The hub removes its line when it starts, keeping
+the file as it was in `config.toml.before-0.2.4` next to it and recording a `config.cleaned`
+event. When it cannot write the file (read-only, permission denied) the line stays, ignored, and
+`cataly health` and `cataly config check` name it; `cataly config check` never writes.
 
 Events: `quota.level` (`limit`, `provider`, `account`, `percent`, `window`, `reset_in`),
-`quota.recovered` (`limit`, `provider`, `account`, `percent`), `quota.hold` (`limits`, `level`),
-`quota.released` (`reason`).
+`quota.recovered` (`limit`, `provider`, `account`, `percent`).
 
 #### `backup`: commit and push a folder
 

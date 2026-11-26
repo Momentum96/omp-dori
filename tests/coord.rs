@@ -234,24 +234,12 @@ fn plan(hub: &TestHub) -> String {
         .to_string()
 }
 
-fn usage(percent: u32) -> String {
-    json!({
-        "generatedAt": 1, "reports": [{ "provider": "fake", "fetchedAt": 1,
-            "limits": [{ "id": "five", "label": "5h", "resetsAt": 4_102_444_800_000_i64,
-                         "amount": { "used": percent, "limit": 100, "unit": "percent" } }] }],
-        "accountsWithoutUsage": [], "disabledCredentials": [], "capacity": {}
-    })
-    .to_string()
-}
-
-/// Check 3: the lane maximum and the per-run limit bound starts, the quota gate holds them, two
-/// failed starts make a question, and a claim with a merged PR makes an item done.
+/// Check 3: the lane maximum and the per-run limit bound starts, two failed starts make a question,
+/// and a claim with a merged PR makes an item done.
 #[test]
 fn planner_limits_questions_and_merged_items() {
-    let (mut hub, work) = coord_hub(
-        "objection = \"1h\"\n[coord.planner]\nmax_open = 2\nmax_starts = 2\n\
-         [jobs.q]\nkind = \"quota\"\nenabled = false\n",
-    );
+    let (mut hub, work) =
+        coord_hub("objection = \"1h\"\n[coord.planner]\nmax_open = 2\nmax_starts = 2\n");
     let text = std::fs::read_to_string(hub.config_path()).unwrap();
     hub.write_config(&text.replace("objection = \"2s\"\n", "").replace(
         "[coord.planner]",
@@ -260,9 +248,7 @@ fn planner_limits_questions_and_merged_items() {
             work.display()
         ),
     ));
-    hub.fixture("omp", "usage.json", Some(&usage(10)));
     start(&mut hub);
-    assert_eq!(hub.tick("q"), Vec::<String>::new(), "baseline");
     let gone = work.join("gone");
     std::fs::create_dir_all(&gone).unwrap();
     for (id, p) in [("it-a", 1), ("it-b", 2), ("it-c", 3)] {
@@ -325,43 +311,7 @@ fn planner_limits_questions_and_merged_items() {
             .contains("failed to start twice"),
         "{fourth}\n{c}"
     );
-    // The quota gate holds planner starts on the lanes' provider: a live quota tick at the next hub
-    // start closes it for `fake`; a session on another provider is still admitted.
-    lane(
-        &hub,
-        "item-add",
-        &json!({ "id": "it-d", "brief": "b", "checks": [{ "kind": "command", "argv": ["true"] }] }),
-    )
-    .unwrap();
     assert!(hub.stop().success());
-    hub.fixture("omp", "usage.json", Some(&usage(90)));
-    let text = std::fs::read_to_string(hub.config_path()).unwrap();
-    hub.write_config(&text.replace("enabled = false\n", ""));
-    start(&mut hub);
-    hub.until(WAIT, || {
-        (hub.json(&["quota", "--json"])["held"] == true).then_some(())
-    });
-    let gated = plan(&hub);
-    assert!(gated.contains("quota gate"), "{gated}");
-    gate_holds_only_fake(&hub);
-    assert!(hub.stop().success());
-}
-
-/// The quota gate holds new sessions on the provider at its limit only: `cataly quota` and `cataly
-/// status` name it, a `fake/…` session waits and one on another provider is admitted.
-fn gate_holds_only_fake(hub: &TestHub) {
-    assert_eq!(hub.json(&["quota", "--json"])["providers"], json!(["fake"]));
-    let held = lane(hub, "admission", &json!({ "model": "fake/primary" })).unwrap();
-    assert_eq!(held["admit"], false, "{held}");
-    assert!(
-        held["detail"].as_str().unwrap().contains("on fake"),
-        "{held}"
-    );
-    let other = lane(hub, "admission", &json!({ "model": "other/model" })).unwrap();
-    assert_eq!(other["admit"], true, "{other}");
-    let status = hub.cli(&["status"]);
-    let text = String::from_utf8_lossy(&status.stdout);
-    assert!(text.contains("holding new sessions on fake"), "{text}");
 }
 
 /// Check 4: the merge check refuses without an approving verdict at the current head, with no

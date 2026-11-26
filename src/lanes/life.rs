@@ -694,7 +694,7 @@ impl<R: Runtime> Lanes<R> {
         }
         let config = self.cfg();
         let exe = self
-            .admission(&config, std::path::Path::new(&rec.cwd), None)
+            .admission(&config, std::path::Path::new(&rec.cwd))
             .await?;
         self.tern_spend(&config, &rec).await?;
         let now = now_ms();
@@ -965,7 +965,7 @@ impl<R: Runtime> Lanes<R> {
         }
         let config = self.cfg();
         let admitted = match self
-            .admission(&config, std::path::Path::new(&rec.cwd), None)
+            .admission(&config, std::path::Path::new(&rec.cwd))
             .await
         {
             Ok(exe) => self.tern_spend(&config, &rec).await.map(|()| exe),

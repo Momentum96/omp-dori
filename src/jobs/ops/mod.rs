@@ -4,10 +4,11 @@
 //! panel is the board post rule applied to an embed (created once with its banner and thumbnail,
 //! pinned when the bot may, edited in place only on change and at most once a minute, never
 //! recreated after an uncertain create). Alerts are separate small embeds for what is worth a ping:
-//! the host over the alert level for five minutes, a quota hold, a job failing twice in a row, a
-//! refused backup, GitHub news and new mail. An alert whose condition clears is edited to show it
-//! resolved. Each alert kind posts at most once an hour; the owner's mute silences new alerts while
-//! the panel keeps updating. Owner-only buttons refresh the panel, show the usage table and mute.
+//! the host over the alert level for five minutes, a usage level reached, a job failing twice in a
+//! row, a refused backup, GitHub news and new mail. An alert whose condition clears is edited to
+//! show it resolved. Each alert kind posts at most once an hour; the owner's mute silences new
+//! alerts while the panel keeps updating. Owner-only buttons refresh the panel, show the usage
+//! table and mute.
 
 pub(crate) mod render;
 
@@ -44,8 +45,9 @@ const RECENT_KEEP: usize = 3;
 const INBOX_MAX: usize = 256;
 /// Resolved alerts are forgotten after a day.
 const RESOLVED_KEEP_MS: i64 = 24 * HOUR_MS;
-/// Failed runs or ticks in a row that make a job alert.
-const JOB_FAILURES: i64 = 2;
+/// Failed runs or ticks in a row that make a job alert; a transient tick failure is reported from
+/// this count too.
+pub(crate) const JOB_FAILURES: i64 = 2;
 
 /// The lead and lanes as the panel shows them; set by the hub once both exist.
 pub(crate) type PeopleFn = Arc<dyn Fn() -> BoxFut<'static, People> + Send + Sync>;
@@ -137,8 +139,7 @@ fn act(e: &EventRecord) -> Act {
     match e.kind.as_str() {
         "pressure.alert" => Act::Open("pressure".into(), AlertKind::Pressure),
         "pressure.clear" => Act::Close("pressure".into()),
-        "quota.hold" => Act::Open(key("quota"), AlertKind::Quota),
-        "quota.released" => Act::Close(key("quota")),
+        "quota.level" => Act::Once(AlertKind::Quota),
         "backup.refused" => Act::Open(key("backup"), AlertKind::Backup),
         "backup.clean" => Act::Close(key("backup")),
         "github.pr" | "github.notification" | "pr.feedback" | "pr.check_failed" | "pr.merged" => {
@@ -172,8 +173,6 @@ fn recent_of(e: &EventRecord) -> Recent {
 pub(crate) struct Extra {
     /// The host line for a pressure alert.
     pub(crate) host: String,
-    /// When the quota gate opens at the latest.
-    pub(crate) quota_release_ms: Option<i64>,
 }
 
 /// One pass of the ops room for one destination, with time and messenger supplied.
@@ -388,18 +387,6 @@ impl<B: Board + ?Sized> Turn<'_, B> {
         let title = render::line(r, self.lang);
         let detail = match r.kind.as_str() {
             "pressure.alert" => extra.host.clone(),
-            "quota.hold" => match (self.lang, extra.quota_release_ms) {
-                (Language::Korean, Some(at)) => format!(
-                    "새 세션은 {}까지 기다려요. `cataly quota lift`로 풀 수 있어요.",
-                    render::when(at, 'R')
-                ),
-                (Language::English, Some(at)) => format!(
-                    "New sessions wait until {}. `cataly quota lift` lifts the hold.",
-                    render::when(at, 'R')
-                ),
-                (Language::Korean, None) => "새 세션은 기다려요.".into(),
-                (Language::English, None) => "New sessions wait.".into(),
-            },
             _ => render::detail(r, self.lang),
         };
         (title, detail)
@@ -712,7 +699,7 @@ async fn pass(ctx: &Arc<Ctx>) {
             Vec::new()
         }
     };
-    let (panel, extra) = gather(ctx, &config, &jobs, now).await;
+    let (panel, extra) = gather(ctx, &config, &jobs).await;
     let board = Embeds { rest, now };
     let channel = channel.to_string();
     let turn = Turn {
@@ -730,8 +717,8 @@ async fn pass(ctx: &Arc<Ctx>) {
     turn.run(panel, events, &jobs, &extra, force).await;
 }
 
-/// The panel's facts: the host, usage and the quota gate, people, and jobs.
-async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Panel, Extra) {
+/// The panel's facts: the host, usage, people, and jobs.
+async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView]) -> (Panel, Extra) {
     let job = config.jobs.values().find_map(|j| match &j.work {
         Work::Owner(Owner::Pressure(p)) => Some((j.name.clone(), p.clone())),
         _ => None,
@@ -782,10 +769,7 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         .usage
         .read(ctx.omp.path().as_deref(), config.limits.cache, false)
         .await;
-    let gate = ctx.gate.view(now);
-    let limits = read
-        .snapshot
-        .map(|s| worst_per_provider(&s.usage.limits, &gate.providers));
+    let limits = read.snapshot.map(|s| worst_per_provider(&s.usage.limits));
     let issues = jobs
         .iter()
         .filter(|j| j.error_streak > 0 || j.needs_ack)
@@ -797,12 +781,10 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
         .collect();
     let extra = Extra {
         host: render::host_line(&host, config.hub.language),
-        quota_release_ms: gate.causes.iter().map(|c| c.release_ms).max(),
     };
     let panel = Panel {
         host,
         limits,
-        held: gate.providers,
         people,
         jobs: jobs.len(),
         issues,
@@ -814,21 +796,20 @@ async fn gather(ctx: &Ctx, config: &Config, jobs: &[JobView], now: i64) -> (Pane
     (panel, extra)
 }
 
-fn limit_of(l: &crate::omp::usage::Limit, held: &[String]) -> Limit {
+fn limit_of(l: &crate::omp::usage::Limit) -> Limit {
     Limit {
         provider: l.provider.clone(),
         label: l.label.clone(),
         percent: l.used_percent,
         reset_ms: l.reset_ms,
-        held: held.contains(&l.provider),
     }
 }
 
 /// One line per provider: its most used limit.
-fn worst_per_provider(limits: &[crate::omp::usage::Limit], held: &[String]) -> Vec<Limit> {
+fn worst_per_provider(limits: &[crate::omp::usage::Limit]) -> Vec<Limit> {
     let mut out: Vec<Limit> = Vec::new();
     for l in limits {
-        let line = limit_of(l, held);
+        let line = limit_of(l);
         match out.iter_mut().find(|o| o.provider == line.provider) {
             Some(o) if o.percent.unwrap_or(-1.0) < line.percent.unwrap_or(-1.0) => *o = line,
             Some(_) => {}
@@ -875,14 +856,9 @@ impl Jobs {
             }
             render::USAGE => {
                 let snapshot = ctx.omp.usage.last();
-                let gate = ctx.gate.view(now);
-                let limits: Option<Vec<Limit>> = snapshot.as_ref().map(|s| {
-                    s.usage
-                        .limits
-                        .iter()
-                        .map(|l| limit_of(l, &gate.providers))
-                        .collect()
-                });
+                let limits: Option<Vec<Limit>> = snapshot
+                    .as_ref()
+                    .map(|s| s.usage.limits.iter().map(limit_of).collect());
                 render::usage_table(limits.as_deref(), snapshot.map(|s| s.fetched_ms), lang)
             }
             render::MUTE => {

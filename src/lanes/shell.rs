@@ -428,7 +428,7 @@ mod tests {
             "c=cataly; $c lane close x",
             "c=cata; ${c}ly lane close x",
             "$TOOL lane close x",
-            "env FOO=1 cataly quota lift",
+            "env FOO=1 cataly job disable a",
             "sh -c 'cataly voice restart'",
             "echo \"$(cataly lead send hi)\"",
             "if true; then cataly discord release r; fi",
