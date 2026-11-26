@@ -1,7 +1,7 @@
 //! Slack (SLACK-01 to SLACK-10, SLACK-12, DISC-OUT-14): one installed app in Socket Mode, taking part
-//! either as its bot user or as a member through the app's user token (owner decision recorded in
-//! `docs/build-notes.md`: Slack's Events API delivers both bot events and events on behalf of users
-//! to an app's Socket Mode connection, so no public endpoint is needed for either role).
+//! either as its bot user or as a member through the app's user token. Slack's Events API delivers
+//! both bot events and events on behalf of users to an app's Socket Mode connection, so no public
+//! endpoint is needed for either role.
 //!
 //! - Tokens (SLACK req. 35): one owner-only file holding `app=xapp-…` (opens the socket) and
 //!   `api=xoxb-…` (app) or `api=xoxp-…` (member). Only the hub reads it.

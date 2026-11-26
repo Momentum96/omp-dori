@@ -1,5 +1,7 @@
 # Coordination: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Cataly keeps several OMP sessions working for one owner. This area covers the layer that coordinates them over

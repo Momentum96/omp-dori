@@ -514,7 +514,7 @@ fn restart_holds_while_a_session_is_busy() {
     });
     let before = snapshot(&hub);
     let started = Instant::now();
-    // This build, not the installed variant (variants are cached builds of an earlier tree).
+    // This build, not the installed variant (variants are cached builds of an older commit).
     let out = run(&hub, BIN.as_ref(), &["rollback"]);
     assert_eq!(out.status.code(), Some(6), "{}", text(&out));
     let said = String::from_utf8_lossy(&out.stderr);

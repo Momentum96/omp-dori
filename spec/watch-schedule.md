@@ -1,5 +1,7 @@
 # Watching, timed jobs and health: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 Everything Cataly does on its own while nobody is typing: noticing that a lane has gone quiet or is stuck,

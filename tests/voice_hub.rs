@@ -715,8 +715,9 @@ fn usage(pid: u32) -> (u64, u64) {
     (rss, ticks)
 }
 
-/// Milestone 5 measures (`docs/notes/voice-measurements.md`): the hub's RSS with voice off, then
-/// its peak RSS and CPU during a 20 s fake call per transport. Run in a release build on Linux:
+/// Milestone 5 measures (`docs/measurements.md`, "Milestone 5: voice"): the hub's RSS with voice
+/// off, then its peak RSS and CPU during a 20 s fake call per transport. Run in a release build on
+/// Linux:
 /// `cargo test --release --features voice --test voice_hub measure -- --ignored --nocapture`.
 #[test]
 #[ignore = "measurement; run on demand in a release build"]

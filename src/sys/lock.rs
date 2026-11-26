@@ -79,8 +79,8 @@ mod tests {
         }
         drop(first);
         // Another test thread that forks a child at this moment holds a copy of the lock's
-        // descriptor until the child's exec closes it (see docs/build-notes.md, the socket test), so
-        // the lock may stay taken for a few milliseconds after the drop.
+        // descriptor until the child's exec closes it, so the lock may stay taken for a few
+        // milliseconds after the drop.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             match acquire(&path).unwrap() {

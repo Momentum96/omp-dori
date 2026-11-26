@@ -15,7 +15,7 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
-# The one exception (docs/third-party.md, docs/notes/voice.md): DAVE's MLS stack (davey ->
+# The one exception (docs/third-party.md): DAVE's MLS stack (davey ->
 # openmls_rust_crypto) uses the hpke-rs crates for HPKE. MPL-2.0 is file-level copyleft: the crates
 # are used unmodified from crates.io, in voice builds only, and their source stays available at
 # https://github.com/cryspen/hpke-rs. Nothing else may be MPL-2.0.

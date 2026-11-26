@@ -1,5 +1,7 @@
 # Installing, updating and releasing: behaviour spec
 
+Behaviour spec used to write Cataly 0.2; see docs/provenance.md.
+
 ## Purpose
 
 How the product reaches a user's machine and stays current. Three audiences:

@@ -75,8 +75,8 @@ async fn goal_to<S: Control>(
 }
 
 /// A tern hold (LANE req. 44 in a terminal session). OMP refuses a goal change while a turn runs
-/// there (docs/notes/tern.md), so the turn is interrupted first and the pause follows once the
-/// session reads idle; a goal continuation that starts another turn in between is interrupted
+/// there, so the turn is interrupted first and the pause follows once the session reads idle; a
+/// goal continuation that starts another turn in between is interrupted
 /// again. Everything is bounded by [`TURN_END_WAIT`]; `Ok` only when the goal reads back stopped.
 async fn pause_after_turn<S: Control>(session: &S) -> Result<GoalStatus, String> {
     let until = Instant::now() + TURN_END_WAIT;
