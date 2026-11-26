@@ -6,6 +6,7 @@
 //! and posts the lead's final answer as a linked reply in parts from a durable outbox (DISC-OUT req.
 //! 20-29, DESIGN 12.2 A16).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -56,12 +57,141 @@ pub(crate) struct Arrival {
     pub(crate) raw: String,
 }
 
+/// A message by room and message ID.
+type Key = (String, String);
+
 /// A live message not handed off yet.
-struct Live {
-    /// When its frame or poll response was read, for the wake latency.
-    read_at: Instant,
-    /// Its queue item while the arrival commit runs (decision 15); `None` once committed.
-    row: Option<QueueRow>,
+enum Live {
+    /// Its arrival commit runs and may not queue it: a round that finds the message queued
+    /// meanwhile waits for the commit instead of handing it off as not read live.
+    Committing(Instant),
+    /// Its queue item, which goes to the round while its arrival commits (decision 15).
+    Early(Instant, QueueRow),
+    /// Queued by its arrival: its hand-off takes the read time.
+    Queued(Instant),
+}
+
+/// A message whose live arrival still commits: its hand-off waits for the commit.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Committing;
+
+/// Live messages not handed off yet, with the time each frame or poll response was read, for the
+/// wake latency. No entry outlives its message: its hand-off takes it, an arrival that did not
+/// queue the message or was cancelled before its commit told drops it, and a round drops a queued
+/// one whose queue item left without a hand-off.
+#[derive(Default)]
+struct LiveMessages(HashMap<Key, Live>);
+
+impl LiveMessages {
+    /// A live read starts its arrival. `false` when the message has an entry already (an earlier
+    /// read of it), which stays as it is.
+    fn begin(&mut self, key: Key, at: Instant) -> bool {
+        match self.0.entry(key) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(Live::Committing(at));
+                true
+            }
+        }
+    }
+
+    /// Decision 15: the arrival's queue item goes to the round before its commit.
+    fn early(&mut self, key: &Key, row: QueueRow) {
+        if let Some(live) = self.0.get_mut(key)
+            && let Live::Committing(at) = *live
+        {
+            *live = Live::Early(at, row);
+        }
+    }
+
+    /// The arrival committed: queued by it, the hand-off takes the read time; otherwise (or when
+    /// the store failed) the entry goes. A round that took its early item already left none.
+    fn settle(&mut self, key: &Key, queued: bool) {
+        let at = match self.0.get(key) {
+            Some(Live::Committing(at) | Live::Early(at, _)) if queued => *at,
+            Some(Live::Committing(_) | Live::Early(..)) => {
+                self.0.remove(key);
+                return;
+            }
+            Some(Live::Queued(_)) | None => return,
+        };
+        self.0.insert(key.clone(), Live::Queued(at));
+    }
+
+    /// The arrival was cancelled before its commit told: its entry goes, unless the round still
+    /// takes its early item.
+    fn abandon(&mut self, key: &Key) {
+        if matches!(self.0.get(key), Some(Live::Committing(_))) {
+            self.0.remove(key);
+        }
+    }
+
+    /// The hand-off takes the read time: `None` when the message was not read live in this run.
+    fn take(&mut self, key: &Key) -> Result<Option<Instant>, Committing> {
+        match self.0.get(key) {
+            None => Ok(None),
+            Some(Live::Committing(_)) => Err(Committing),
+            Some(Live::Early(..) | Live::Queued(_)) => {
+                Ok(self.0.remove(key).map(|live| match live {
+                    Live::Committing(at) | Live::Early(at, _) | Live::Queued(at) => at,
+                }))
+            }
+        }
+    }
+
+    /// The messages queued by their arrival now: each is in a queue read after this, unless it
+    /// left the queue since.
+    fn queued(&self) -> Vec<Key> {
+        self.0
+            .iter()
+            .filter(|(_, live)| matches!(live, Live::Queued(_)))
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Drops the entries of `queued` (taken before `queue` was read) whose message is not in
+    /// `queue`: it left without a hand-off (dropped out of scope, a reset).
+    fn prune(&mut self, queued: &[Key], queue: &[QueueRow]) {
+        for key in queued {
+            if !queue.iter().any(|q| q.room == key.0 && q.message == key.1) {
+                self.0.remove(key);
+            }
+        }
+    }
+
+    /// The early queue items not in `queue` yet (decision 15).
+    fn early_rows(&self, queue: &[QueueRow]) -> Vec<QueueRow> {
+        self.0
+            .values()
+            .filter_map(|live| match live {
+                Live::Early(_, row) => Some(row),
+                Live::Committing(_) | Live::Queued(_) => None,
+            })
+            .filter(|row| {
+                !queue
+                    .iter()
+                    .any(|q| q.room == row.room && q.message == row.message)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Drops a live read's entry when its arrival is cancelled before its commit told.
+struct Arriving<'a> {
+    live: &'a Mutex<LiveMessages>,
+    key: Option<Key>,
+}
+
+impl Drop for Arriving<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.live
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .abandon(&key);
+        }
+    }
 }
 
 /// The pipeline of one relay.
@@ -80,8 +210,8 @@ pub(crate) struct Pipeline<R: Relay, T: Runtime> {
     stuck: Mutex<HashSet<String>>,
     /// A failed seen mark is logged once per run (MSG-04).
     seen_failed: AtomicBool,
-    /// Live messages not handed off yet, by room and message.
-    live: Mutex<HashMap<(String, String), Live>>,
+    /// Live messages not handed off yet.
+    live: Mutex<LiveMessages>,
     /// Frame read time of a wake still waiting for its turn to start.
     wake: Mutex<Option<Instant>>,
     /// Relay frame read to OMP `agent_start` (DESIGN 2.3, wake end to end).
@@ -117,13 +247,15 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         }
     }
 
-    fn live(&self) -> MutexGuard<'_, HashMap<(String, String), Live>> {
+    fn live(&self) -> MutexGuard<'_, LiveMessages> {
         self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queues an owner message durably (DISC-IN req. 22, MSG req. 4): its position moves only after
     /// the hand-off. `read_at` is when a live message's frame or poll response was read, `None`
-    /// for one found by a catch-up read; `wake` starts the handling round.
+    /// for one found by a catch-up read; `wake` starts the handling round. A live read is known
+    /// before its commit, so a round that finds the message queued first waits for the commit
+    /// and its hand-off still takes the read time.
     ///
     /// Decision 15: on a relay whose live messages never come back live after a restart
     /// ([`Relay::LIVE_ONCE`]), a live message the store would queue now goes to the round at once
@@ -145,7 +277,13 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             raw,
         } = arrival;
         let key = (room.clone(), message.clone());
-        let early = match read_at {
+        let mut arriving = Arriving {
+            live: &self.live,
+            key: read_at
+                .filter(|at| self.live().begin(key.clone(), *at))
+                .map(|_| key.clone()),
+        };
+        let early = match arriving.key {
             Some(_) if R::LIVE_ONCE && !Self::commit_first() => {
                 let (r, m, bytes) = (room.clone(), message.clone(), raw.len());
                 self.store
@@ -173,19 +311,13 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
             parent,
             raw,
         };
-        let done = match (row, read_at) {
-            (Some(row), Some(at)) => {
+        let done = match row {
+            Some(row) => {
                 // Debug builds only: the crash test of a hand-off written before its arrival
                 // commits holds the arrival back.
                 #[cfg(debug_assertions)]
                 if crate::sys::fault::named("arrival_after_write") {
-                    self.live().insert(
-                        key,
-                        Live {
-                            read_at: at,
-                            row: Some(row),
-                        },
-                    );
+                    self.live().early(&key, row);
                     wake.notify_one();
                     return std::future::pending().await;
                 }
@@ -194,17 +326,11 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
                     .relay_queued(write)
                     .await
                     .map_err(|e| e.to_string())?;
-                self.live().insert(
-                    key.clone(),
-                    Live {
-                        read_at: at,
-                        row: Some(row),
-                    },
-                );
+                self.live().early(&key, row);
                 wake.notify_one();
                 committed.await
             }
-            _ => self.store.relay(write).await,
+            None => self.store.relay(write).await,
         };
         let arrived = done.map(|d| match d {
             RelayDone::Arrived(a) => a,
@@ -216,51 +342,13 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         if matches!(arrived, Ok(Arrived::Queued)) {
             crate::sys::fault::point("relay_after_arrival");
         }
-        self.settle_live(
-            key,
-            arrived.as_ref().ok().copied(),
-            read_at,
-            early.is_some(),
-            wake,
-        );
-        arrived.map_err(|e| e.to_string())
-    }
-
-    /// Keeps a live message's entry in step with what its arrival became (`None`: the store
-    /// failed). `early`: it went to the round before the commit.
-    fn settle_live(
-        &self,
-        key: (String, String),
-        arrived: Option<Arrived>,
-        read_at: Option<Instant>,
-        early: bool,
-        wake: &Notify,
-    ) {
-        let mut live = self.live();
-        match (arrived, read_at) {
-            // Committed: the stored item stands in for it, unless the round took it already.
-            (Some(Arrived::Queued), Some(_)) if early => {
-                if let Some(l) = live.get_mut(&key) {
-                    l.row = None;
-                }
-            }
-            (Some(Arrived::Queued), Some(at)) => {
-                live.insert(
-                    key,
-                    Live {
-                        read_at: at,
-                        row: None,
-                    },
-                );
-                drop(live);
-                wake.notify_one();
-            }
-            // Not queued after all: a round that has not taken it never will.
-            _ if early => {
-                live.remove(&key);
-            }
-            _ => {}
+        if let Some(key) = arriving.key.take() {
+            self.live()
+                .settle(&key, matches!(arrived, Ok(Arrived::Queued)));
+            // Also for a round that found the message queued and waits for this commit.
+            wake.notify_one();
         }
+        arrived.map_err(|e| e.to_string())
     }
 
     /// Debug builds only: the crash test that stops after the arrival commit and before the
@@ -275,36 +363,32 @@ impl<R: Relay, T: Runtime> Pipeline<R, T> {
         false
     }
 
-    /// The read time of a live message, taken by its hand-off; `None` for anything else.
-    pub(crate) fn read_at(&self, room: &str, message: &str) -> Option<Instant> {
-        self.live()
-            .remove(&(room.to_string(), message.to_string()))
-            .map(|l| l.read_at)
+    /// The read time of a live message, taken by its hand-off: `None` for anything else, and
+    /// [`Committing`] while its arrival commit runs (the hand-off waits for the next round).
+    pub(crate) fn read_at(&self, room: &str, message: &str) -> Result<Option<Instant>, Committing> {
+        self.live().take(&(room.to_string(), message.to_string()))
     }
 
     /// Hands queued messages on, lowest first per room; a room with a held or failed message is
     /// skipped for the rest of the round (DISC-IN req. 26-27, 43). `handle` takes one queue row.
-    /// Live messages whose arrival still commits take their place in the queue (decision 15).
+    /// Live messages whose arrival still commits take their place in the queue (decision 15), and a
+    /// queued live message no longer in the queue is forgotten.
     pub(crate) async fn drain<F, Fut>(&self, mut handle: F) -> Result<(), String>
     where
         F: FnMut(QueueRow) -> Fut,
         Fut: Future<Output = Result<Step, String>>,
     {
+        let queued = self.live().queued();
         let (mut queue, positions) = self
             .store
             .read(|r| Ok((r.queue(R::NAME)?, r.positions(R::NAME)?)))
             .await
             .map_err(|e| e.to_string())?;
-        let committing: Vec<QueueRow> = self
-            .live()
-            .values()
-            .filter_map(|l| l.row.clone())
-            .filter(|row| {
-                !queue
-                    .iter()
-                    .any(|q| q.room == row.room && q.message == row.message)
-            })
-            .collect();
+        let committing = {
+            let mut live = self.live();
+            live.prune(&queued, &queue);
+            live.early_rows(&queue)
+        };
         if !committing.is_empty() {
             queue.extend(committing);
             queue.sort_by_key(|r| r.seq);
@@ -1090,5 +1174,91 @@ mod tests {
         assert_eq!(stuck.lock().unwrap().len(), 1);
         keep_only(&stuck, &HashSet::new());
         assert!(stuck.lock().unwrap().is_empty());
+    }
+
+    fn key(message: &str) -> Key {
+        ("C1".to_string(), message.to_string())
+    }
+
+    fn row(message: &str) -> QueueRow {
+        QueueRow {
+            room: "C1".into(),
+            message: message.into(),
+            seq: 1,
+            parent: None,
+            position_at: 0,
+            raw: String::new(),
+            created_ms: 0,
+        }
+    }
+
+    /// The race: a live arrival commits and a round finds the message queued before the arrival
+    /// settles. That round waits; the next takes the read time, and no entry is left.
+    #[test]
+    fn a_round_ahead_of_the_arrival_waits_and_keeps_the_read_time() {
+        let mut live = LiveMessages::default();
+        for n in 0..1000 {
+            let at = Instant::now();
+            let k = key(&format!("m{n}"));
+            assert!(live.begin(k.clone(), at));
+            assert_eq!(live.take(&k), Err(Committing), "the round waits");
+            live.settle(&k, true);
+            assert_eq!(live.take(&k), Ok(Some(at)));
+        }
+        assert!(live.0.is_empty());
+        // The usual order keeps it too.
+        let at = Instant::now();
+        assert!(live.begin(key("m"), at));
+        live.settle(&key("m"), true);
+        assert_eq!(live.take(&key("m")), Ok(Some(at)));
+        assert_eq!(live.take(&key("m")), Ok(None));
+        assert!(live.0.is_empty());
+    }
+
+    #[test]
+    fn no_live_entry_outlives_its_message() {
+        let at = Instant::now();
+        let mut live = LiveMessages::default();
+        // Not queued by this read (a duplicate, already handled, a full queue, a store failure).
+        assert!(live.begin(key("dup"), at));
+        live.settle(&key("dup"), false);
+        // Cancelled before its commit told.
+        assert!(live.begin(key("cancelled"), at));
+        live.abandon(&key("cancelled"));
+        assert!(live.0.is_empty());
+        // A second read of a message still waiting adds nothing and keeps the first read time.
+        assert!(live.begin(key("again"), at));
+        live.settle(&key("again"), true);
+        assert!(!live.begin(key("again"), at + std::time::Duration::from_millis(5)));
+        assert_eq!(live.take(&key("again")), Ok(Some(at)));
+        // Decision 15: the round takes the early item before the commit settles, cancelled or not.
+        for cancelled in [false, true] {
+            assert!(live.begin(key("early"), at));
+            live.early(&key("early"), row("early"));
+            assert_eq!(live.early_rows(&[]).len(), 1);
+            assert_eq!(live.early_rows(&[row("early")]), Vec::<QueueRow>::new());
+            if cancelled {
+                live.abandon(&key("early"));
+            }
+            assert_eq!(live.take(&key("early")), Ok(Some(at)));
+            if !cancelled {
+                live.settle(&key("early"), true);
+            }
+        }
+        assert!(live.0.is_empty());
+        // Queued, then gone from the queue without a hand-off (out of scope, a reset): the next
+        // round forgets it, but not one queued after that round read its queue.
+        assert!(live.begin(key("dropped"), at));
+        live.settle(&key("dropped"), true);
+        assert!(live.begin(key("kept"), at));
+        live.settle(&key("kept"), true);
+        let queued = live.queued();
+        assert!(live.begin(key("late"), at));
+        live.settle(&key("late"), true);
+        live.prune(&queued, &[row("kept")]);
+        assert_eq!(live.take(&key("dropped")), Ok(None));
+        assert_eq!(live.take(&key("kept")), Ok(Some(at)));
+        assert_eq!(live.take(&key("late")), Ok(Some(at)));
+        assert!(live.0.is_empty());
     }
 }
