@@ -16,8 +16,8 @@
   are gone (clean cutover); tests link the bridge from `cataly extension`.
 - Hub: `hub.stop` (refused while a session works or has a dialog), daily release notice task
   (`[update] check`, `first_after`, `api_base` loopback override; event `update.available` to the
-  lead, once per version, never for `<program>/silenced`), usage counts (`[usage]`, off, no default
-  collector, `DO_NOT_TRACK` wins, hourly OTLP/HTTP JSON with counts only, 2 s, key dropped on 401/403).
+  lead, once per version, never for `<program>/silenced`). Usage counts were built here and later
+  removed (COORD-50 dropped, 2026-11-26): the hub sends no telemetry.
 - Extension carries `VERSION`, filled in from the manifest by `cataly extension`; sent in the hello.
 - `install.sh`, `.github/workflows/release.yml` (tag gate, CI via `workflow_call`, two builds per
   target compared with `cmp`, format/version checks, digest hand-over, signing with openssl, draft →

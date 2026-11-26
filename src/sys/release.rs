@@ -298,6 +298,7 @@ pub(crate) fn sha256_file(path: &Path, cap: u64) -> Result<String, String> {
 }
 
 /// SHA-256 of bytes in memory.
+#[cfg(test)]
 pub(crate) fn sha256(bytes: &[u8]) -> String {
     super::hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }

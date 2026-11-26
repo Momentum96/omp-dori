@@ -111,8 +111,6 @@ pub(crate) enum EventKind {
     UpdateDone,
     /// The hub runs an older version than its previous run.
     UpdateRolledBack,
-    /// Usage counts are on (COORD req. 69).
-    UsageOn,
 }
 
 /// Kind, wire name, template fields and default wording.
@@ -123,7 +121,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 68] = [
+const KINDS: [KindRow; 67] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -536,12 +534,6 @@ const KINDS: [KindRow; 68] = [
         "update.rolled_back",
         &["previous", "latest", "sessions"],
         "Rolled back to {latest}. {previous} -> {latest} {sessions}",
-    ),
-    (
-        EventKind::UsageOn,
-        "usage.on",
-        &["endpoint"],
-        "usage counts are on and go to {endpoint}; set [usage] enabled = false to turn them off",
     ),
 ];
 

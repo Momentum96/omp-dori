@@ -3,6 +3,8 @@
 ## 0.2.2 (Unreleased)
 
 - The source and the releases now live together in vntrevx/Cataly.
+- Cataly sends no telemetry. The opt-in usage counts and the `[usage]` config table are gone; a
+  config that still has a `[usage]` table is refused, so delete it.
 
 ## 0.2.1 (2026-11-26)
 
