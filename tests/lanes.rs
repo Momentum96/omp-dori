@@ -1065,3 +1065,195 @@ fn onboarding_consent_is_stored_and_writes_wait() {
     drop(b);
     hub.stop();
 }
+
+/// Whether a file holds `text` (an unreadable file holds nothing).
+fn holds(file: &Value, text: &str) -> bool {
+    file.as_str()
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .is_some_and(|t| t.contains(text))
+}
+
+/// The lead delegates: an owner message in a watched channel, the lead's `lane.open` with
+/// `thread_from` that message and a worktree, the thread under it with its kickoff line, the lane's
+/// session in its worktree, a report in the thread under the status word, owner thread messages to
+/// the lane and not the lead, a split asked for in the thread opening a second lane in a thread of
+/// its own while the first keeps its scope, and `lane.close` marking the thread done.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn the_lead_delegates_to_a_lane_in_a_thread_and_a_split_opens_another() {
+    let fake = FakeDiscord::start();
+    let (mut hub, work) = lane_hub("");
+    let repo = work.join("repo");
+    let origin = work.join("origin.git");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&work, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "1").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&repo, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    let token = hub.private_file("token", "fake-token");
+    fake.channel(CH, 0, None);
+    let config = std::fs::read_to_string(hub.config_path()).unwrap();
+    hub.write_config(&format!(
+        "{config}[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n{}",
+        work.display(),
+        fake.config(&token, OWNER, &[CH])
+    ));
+    start(&mut hub);
+    hub.until(WAIT, || {
+        (hub.json(&["discord", "status", "--json"])["healthy"] == true).then_some(())
+    });
+    let (mut b, meta) = lead_bridge(&hub);
+    let s = meta["session"].clone();
+    let lead_file = hub.json(&["lead", "status", "--json"])["session"]["session_file"].clone();
+    // The owner asks in the channel; the request reaches the lead.
+    let asked = 800_000_000_000_000_101u64;
+    fake.say(FakeDiscord::message(CH, asked, OWNER, "fix the login bug"));
+    hub.until(WAIT, || {
+        holds(&lead_file, "fix the login bug").then_some(())
+    });
+    // The lead opens a lane from that message.
+    let wt_a = work.join("wt-a");
+    let open_a = json!({
+        "op": "lane.open", "key": "login-fix", "title": "Fix login",
+        "brief": "Fix the login bug.", "checks": [{ "kind": "command", "argv": ["true"] }],
+        "thread_from": format!("discord:{CH}/{asked}"),
+        "kickoff": "Fixing the login bug; done when the check true passes.",
+        "cwd": repo, "worktree": { "path": wt_a, "branch": "lane-a", "base": "HEAD" },
+    });
+    let (text, err) = lead_tool(&mut b, &s, "l1", open_a);
+    assert!(!err && text.contains("started"), "{text}");
+    let thread_a = asked.to_string();
+    let made = fake.calls("POST", &format!("/channels/{CH}/messages/{asked}/threads"));
+    assert_eq!(made.len(), 1, "one thread under the owner's message");
+    assert_eq!(made[0].body["name"], "[working] Fix login");
+    let a = record(&hub, "login-fix");
+    assert_eq!(a["thread"], format!("discord:{thread_a}"), "{a}");
+    let wt_a_real = std::fs::canonicalize(&wt_a).unwrap();
+    let header = std::fs::read_to_string(a["session_file"].as_str().unwrap()).unwrap();
+    let header: Value = serde_json::from_str(header.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        header["cwd"],
+        wt_a_real.display().to_string(),
+        "the lane runs in its worktree"
+    );
+    let kickoff = fake.bot_messages(&thread_a);
+    assert_eq!(
+        kickoff[0]["content"], "Fixing the login bug; done when the check true passes.",
+        "the kickoff line comes first"
+    );
+    // A lane report reaches the thread.
+    let (mut lb, _) = hello(&hub, &a);
+    lb.lane_tool(
+        "r1",
+        &a["session_id"],
+        json!({ "op": "report", "kind": "stuck", "text": "the login test needs a fixture" }),
+    );
+    let posts = hub.until(WAIT, || {
+        let p = fake.bot_messages(&thread_a);
+        (p.len() >= 2).then_some(p)
+    });
+    assert_eq!(
+        posts[1]["content"],
+        "Lane update: the login test needs a fixture"
+    );
+    // An owner message in the thread reaches the lane, not the lead.
+    fake.say(FakeDiscord::message(
+        &thread_a,
+        800_000_000_000_000_102,
+        OWNER,
+        "also check logout",
+    ));
+    hub.until(WAIT, || {
+        holds(&a["session_file"], "also check logout").then_some(())
+    });
+    assert!(!holds(&lead_file, "also check logout"));
+    // A split asked for in the thread goes to the lane, which reports it to the lead; the lead
+    // opens a second lane with a thread of its own (Discord nests no threads, so it sits beside
+    // the first in the channel).
+    let split = 800_000_000_000_000_103u64;
+    fake.say(FakeDiscord::message(
+        &thread_a,
+        split,
+        OWNER,
+        "do the session check in a new thread",
+    ));
+    hub.until(WAIT, || {
+        holds(&a["session_file"], "do the session check in a new thread").then_some(())
+    });
+    assert!(!holds(&lead_file, "do the session check"));
+    lb.lane_tool(
+        "r2",
+        &a["session_id"],
+        json!({ "op": "report", "kind": "waiting",
+            "text": format!("split asked: session check, from discord:{thread_a}/{split}") }),
+    );
+    let wt_b = work.join("wt-b");
+    let open_b = json!({
+        "op": "lane.open", "key": "session-check", "title": "Check sessions",
+        "brief": "Check sessions.", "checks": [{ "kind": "command", "argv": ["true"] }],
+        "thread_from": format!("discord:{thread_a}/{split}"),
+        "kickoff": "Checking sessions; done when the check true passes.",
+        "cwd": repo, "worktree": { "path": wt_b, "branch": "lane-b", "base": "HEAD" },
+    });
+    let (text, err) = lead_tool(&mut b, &s, "l2", open_b);
+    assert!(!err && text.contains("started"), "{text}");
+    let bb = record(&hub, "session-check");
+    let thread_b = bb["thread"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("discord:")
+        .unwrap()
+        .to_string();
+    assert_ne!(thread_b, thread_a);
+    let beside = fake.calls("POST", &format!("/channels/{CH}/threads"));
+    assert_eq!(beside.len(), 1);
+    assert_eq!(beside[0].body["name"], "[working] Check sessions");
+    assert_eq!(
+        fake.bot_messages(&thread_b)[0]["content"],
+        "Checking sessions; done when the check true passes."
+    );
+    // The first lane keeps its scope.
+    let a_now = record(&hub, "login-fix");
+    for field in ["thread", "title", "session_id", "session_file", "state"] {
+        assert_eq!(a_now[field], a[field], "{field}");
+    }
+    fake.say(FakeDiscord::message(
+        &thread_b,
+        800_000_000_000_002_001,
+        OWNER,
+        "look at token expiry first",
+    ));
+    hub.until(WAIT, || {
+        holds(&bb["session_file"], "look at token expiry first").then_some(())
+    });
+    assert!(!holds(&a["session_file"], "look at token expiry first"));
+    assert!(!holds(&lead_file, "look at token expiry first"));
+    // The lead closes the first lane: its thread is marked done and archived.
+    let mut n = 0;
+    hub.until(WAIT, || {
+        n += 1;
+        let close = json!({ "op": "lane.close", "key": "login-fix", "note": "fixed" });
+        let (text, err) = lead_tool(&mut b, &s, &format!("c{n}"), close);
+        (!err).then_some(text)
+    });
+    let done = fake.wait(WAIT, |f| {
+        f.calls("PATCH", &format!("/channels/{thread_a}"))
+            .into_iter()
+            .find(|c| c.body["name"] == "[done] Fix login")
+    });
+    assert_eq!(done.body["archived"], true, "{:?}", done.body);
+    assert!(
+        fake.calls("PATCH", &format!("/channels/{thread_b}"))
+            .iter()
+            .all(|c| c.body.get("archived").is_none()),
+        "the second lane's thread stays open"
+    );
+    drop((b, lb));
+    hub.stop();
+}
