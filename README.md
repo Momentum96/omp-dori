@@ -1,130 +1,194 @@
-# Cataly
+<p align="center">
+  <img src="docs/cataly-portrait.webp" width="320" alt="Cataly character portrait: silver hair and a crimson halo">
+</p>
 
-Cataly is one Rust hub that runs on your machine over OMP (the coding agent).
-You talk to it from a messenger (Discord, Telegram or Slack): your messages go to a long-running
-**lead** OMP session, which can start **lanes** (further OMP sessions, each in its own worktree)
-for parallel work. The hub also runs scheduled jobs, posts their notices, and keeps every session
-alive across restarts.
+<h1 align="center">Cataly</h1>
 
-This repository holds Cataly's source. Releases, install instructions and the project's front page
-live in [`vntrevx/Cataly`](https://github.com/vntrevx/Cataly).
+<p align="center">
+  <strong>Understand the intent. Read the context. See the work through.</strong>
+</p>
 
-## Build from source
+<p align="center">
+  Cataly is an AI teammate for software work. Give it a goal and the constraints
+  that matter, not a command for every step. It takes your requests in a Discord,
+  Telegram or Slack room, works in tracked <a href="https://omp.sh">OMP</a> coding
+  sessions on your machine, and brings back a result you can verify.
+</p>
 
-Needs the Rust toolchain pinned in `rust-toolchain.toml`, and [Bun](https://bun.sh) for the OMP
-extension in `extension/`.
+<p align="center">
+  <a href="https://github.com/vntrevx/Cataly/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/vntrevx/Cataly?label=release&labelColor=2b2d33&color=c8102e"></a>
+  <a href="https://www.npmjs.com/package/cataly"><img alt="npm" src="https://img.shields.io/npm/v/cataly?label=npm&labelColor=2b2d33&color=8b9099"></a>
+  <a href="https://omp.sh"><img alt="OMP 19.1.1 or later" src="https://img.shields.io/badge/omp-%E2%89%A519.1.1-8b9099?labelColor=2b2d33"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-8b9099?labelColor=2b2d33"></a>
+</p>
 
-```sh
-cargo build --release                    # add --features voice for Discord voice
-cargo test --locked --no-fail-fast
-cd extension && bun install --frozen-lockfile && bun test
-```
+<p align="center">
+  <a href="#get-started"><strong>Get started</strong></a> ·
+  <a href="#how-it-works"><strong>How it works</strong></a> ·
+  <a href="#everyday-use"><strong>Everyday use</strong></a> ·
+  <a href="#help"><strong>Help</strong></a>
+</p>
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full set of checks and how to contribute.
+<p align="center">
+  <strong>English</strong> · <a href="README.ko.md">한국어</a> · <a href="README.ja.md">日本語</a><br>
+  <a href="README.de.md">Deutsch</a> · <a href="README.it.md">Italiano</a> · <a href="README.zh.md">中文</a>
+</p>
 
-## Install
+## Give it an outcome, not a script
 
-Linux x86_64 (macOS arm64 once its build is published), with OMP 19.1.1 or newer installed; an npm
-or Bun install also needs Node.js 18 or newer on PATH (the `cataly` launcher runs under `node`);
-`install.sh` does not need it. Releases tagged before v0.2.0 in `vntrevx/Cataly` are an earlier,
-separate product. One of:
+<table width="100%"><tr><td>
+
+**Example request**
+
+*Investigate the flaky login test. Keep the public API unchanged, run the
+relevant tests, and open a PR with the cause and the verification results.*
+
+</td></tr></table>
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h4>Understand the intent</h4>
+      The flaky test is the symptom. The goal is a fix you can review, with the
+      public API intact. Cataly uses that distinction to choose what to
+      investigate and what to leave alone.
+    </td>
+    <td width="33%" valign="top">
+      <h4>Read the context</h4>
+      The conversation, repository conventions, constraints, and your stated
+      preferences inform the next step. Routine decisions belong to Cataly; real
+      tradeoffs and permission decisions belong to you.
+    </td>
+    <td width="33%" valign="top">
+      <h4>See the work through</h4>
+      A patch is not the finish line. Check the agreed outcome, report the
+      evidence, and say what remains unverified.
+    </td>
+  </tr>
+</table>
+
+The difference is not another chat interface. It is the link between the request,
+its working session, and the evidence that it is done.
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/how-it-works-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/how-it-works-light.svg">
+  <img src="docs/how-it-works-light.svg" width="100%" alt="Workflow: a request arrives, the lead assigns it, a lane works and reports, and completion is checked before a result you can verify, with its evidence, comes back to you.">
+</picture>
+
+1. **A request arrives.** You write in your home room (`#cataly` after setup).
+   Cataly's hub runs on your machine and passes your messages, with reply
+   context, to the lead.
+2. **The lead takes it.** The lead is one long-running OMP session. It answers
+   small requests itself, or opens a **lane**: another OMP session in its own
+   worktree, with a brief and **done checks** such as "the PR is merged" or
+   "this command succeeds". Each lane gets its own thread.
+3. **The lane works and reports.** Lanes run in parallel and keep their sessions
+   across restarts and updates, so work picks up where it was.
+4. **Done is checked.** A lane saying it is done is not proof. Cataly runs the
+   done checks and reports what passed and what remains unverified.
+
+Alongside the conversation, a status room (`#cataly-ops`) keeps one live panel:
+host load, sessions, provider usage, and the state of your watch jobs. Watch
+jobs post what is worth knowing: GitHub repositories and pull requests, provider
+quotas, host load, new mail from a command, backups and health. With voice
+turned on, you can also talk to the lead in a Discord voice channel.
+
+## You stay in control
+
+- Cataly uses your accounts, your OMP and your permissions. Taking initiative
+  does not grant permission for external actions.
+- Approvals follow OMP's own settings. When OMP asks, the question comes to your
+  room as buttons, and you can also answer in plain text.
+- Installing starts nothing and writes no configuration. `cataly setup` shows a
+  summary and changes nothing until you say yes.
+- Voice is off until you turn it on, and uses your own OpenAI key.
+
+## Get started
+
+<table width="100%"><tr><td>
+
+**Cataly 0.2.0 is a new product**
+
+Releases before v0.2.0 in this repository and `cataly` npm versions before 0.2.0
+are an earlier, separate product. Nothing is carried over from them: updating the
+npm package replaces the old command with `cataly`. Run `cataly setup` to start fresh.
+
+</td></tr></table>
+
+### Requirements
+
+- Linux x86_64 (macOS arm64 is coming).
+- [OMP](https://omp.sh) 19.1.1 or newer.
+- A Discord bot (setup walks you through making one), or a Telegram or Slack bot.
+- For the npm and Bun installs: Node.js 18 or newer on `PATH`.
+
+### Install
+
+Pick one:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/vntrevx/Cataly/main/install.sh | sh
+```
+
+```sh
 npm install --global cataly
+```
+
+```sh
 bun add --global cataly
 ```
 
-`install.sh` picks the newest stable Cataly release on GitHub (`vntrevx/Cataly`; prereleases and
-releases of other software there are skipped), checks its hashes and signature, and installs
-`cataly` into the program folder with the command link `~/.local/bin/cataly`. npm and Bun install
-the `cataly` package, whose launcher runs the binary from the platform package
-`cataly-linux-x64` (or `cataly-darwin-arm64`) beside it; that package also holds the OMP
-extension, and the hub links it into OMP when it starts. None of them starts anything or writes
-configuration.
+`install.sh` downloads the newest stable release, checks its hashes and its
+signature, and puts `cataly` in `~/.local/bin`. npm and Bun install the same
+binary from the `cataly` package.
 
-## Set up
+### First setup
 
 ```sh
 cataly setup
 ```
 
-One command does the whole first run. Discord leaves three steps to you; setup prints them:
+Setup asks for your bot token and prints an invite link, then sets up the rest:
+your home room `#cataly`, the status room `#cataly-ops`, the lead's model,
+approval buttons, the default jobs, and a user service (systemd) that starts the
+hub. Then write in `#cataly`.
 
-1. In the [Developer Portal](https://discord.com/developers/applications): **New Application**,
-   name it, **Create**.
-2. **Bot**, **Reset Token**, copy it, and paste it when setup asks (it is not shown).
-3. Open the invite link setup prints, pick your server, **Authorize**. Setup waits for the bot.
+## Everyday use
 
-Then it fills in the rest without asking: you (the application's owner) as the owner, `#cataly`
-(your talks with the lead) and `#cataly-ops` found or created, OMP's default model
-for the lead, approval buttons for OMP's permission requests (only your presses count), Cataly's
-avatar and banner on the bot (the avatar also as the application's icon), a backup of the state folder to your private GitHub repository
-`<gh login>/cataly-home` when `gh` is logged in, the health and pressure jobs, and a user service
-(systemd on Linux, launchd on macOS) that starts the hub. It shows a short summary and asks once;
-nothing changes before you say yes. Then write in `#cataly`: the lead answers there.
-`#cataly-ops` holds the status panel and the few alerts worth a ping, kept apart from your talks
-with the lead (see [`[ops]`](docs/config.md#ops)).
+| Command | What it does |
+| --- | --- |
+| `cataly status` | The hub, the lead and the lanes at a glance. |
+| `cataly health` | What still needs fixing, and how. |
+| `cataly update` | Stops the hub in order (a working session is never cut off), installs the new version, starts it again and resumes the lead and lanes. If the new version does not answer, it goes back. |
+| `cataly rollback` | Steps back to the previous version (`install.sh` installs). |
+| `cataly service disable` then `cataly uninstall` | Removes the service and the program. Your configuration (`~/.config/cataly`) and state (`~/.local/state/cataly`) are kept. |
 
-Running `cataly setup` again shows what is set and changes nothing. Change a default later with a
-flag (`--lead-model provider/id`, `--approvals off`, `--backup off`, `--service off`,
-`--owner <id>`, `--profile` to put Cataly's avatar and banner back) or by editing the config.
-Scripts use `cataly setup --yes` with the same flags, and `--json`.
+When a new release is out, the hub tells you once in your home room. An npm or
+Bun install updates through the package manager it came from.
 
-Put provider keys the service needs into `secrets/service.env` (setup names the missing ones).
-`cataly health` shows what still needs fixing.
+<table width="100%"><tr><td>
 
-## Update
+**Early release**
 
-When a new release is out, the hub tells you once in your home room. Then run, from any
-terminal:
+Linux x86_64 only for now. Cataly is in daily use over Discord, voice included;
+Telegram and Slack pass their tests but have seen less real use.
 
-```sh
-cataly update
-```
+</td></tr></table>
 
-It downloads and checks the release, asks the running hub to stop in order, switches to the new
-version, starts the hub the way it ran before (the user service, or in the background), and waits
-30 s for the new version to answer; otherwise it switches back. The new hub resumes the lead and
-every lane on their own session files, so their conversations and goals carry on (a paused lane
-stays paused), and posts once in your home room that it was updated and which sessions it
-resumed. A session that is working or waiting for your answer is never stopped: the update waits
-up to 60 s, then says which session it waits for and changes nothing; run it again once that work
-is done. OMP sessions you started yourself are not the hub's and are never touched.
+## Help
 
-`cataly update --no-restart` installs without touching a running hub; the new version runs from
-the hub's next start. `cataly rollback` goes back to the previous version the same way.
+Problems and ideas: [Issues](https://github.com/vntrevx/Cataly/issues). Please
+leave tokens, IDs and private transcripts out of public reports.
 
-An npm or Bun install updates the same way, but the package manager that installed it does the
-install step: `cataly update` sees that it runs from `node_modules/cataly-<platform>`, stops the
-hub in order, runs `npm install --global cataly@<version>` (into the same npm prefix) or
-`bun add --global cataly@<version>` (with the same `BUN_INSTALL`), and starts the new hub from the
-same path; if the new version does not come up, the earlier one is installed again. The user
-service runs the binary inside the package folder, a path the next npm or Bun upgrade keeps.
-Such an install keeps no previous version: `cataly rollback` names the install command to use
-instead.
+Building from source and contributing: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Uninstall
+## License
 
-Stop the hub (`cataly service disable` stops and removes the service setup made), then run
-`cataly uninstall`. It removes the extension link and, for an `install.sh` install, the program
-folder and the command link; for an npm or Bun install it names `npm uninstall --global cataly`
-or `bun remove --global cataly`. Config and state are kept.
-
-## Where things live
-
-- Config: `~/.config/cataly/config.toml`, tokens in `~/.config/cataly/secrets/` (owner-only files).
-- State (store, logs, files, backups): `~/.local/state/cataly`.
-- Both follow `XDG_CONFIG_HOME` and `XDG_STATE_HOME`.
-
-Every setting is described in [`docs/config.md`](docs/config.md).
-
-## Licence
-
-Copyright (c) 2026 vntrevx. Cataly is licensed under the GNU Affero General Public License,
-version 3 only (AGPL-3.0-only); see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE). Commercial
-licences without the AGPL obligations are available from vntrevx; contact
-[vntrevx on GitHub](https://github.com/vntrevx). Contributions need the [CLA](CLA.md).
-
-Third-party licences ship in `THIRD-PARTY-NOTICES.txt` (`sh scripts/third-party-notices.sh`
-generates it).
+Cataly is open source under the [GNU AGPL 3.0](LICENSE); its source is in this
+repository. Commercial licences without the AGPL obligations are available from
+[vntrevx](https://github.com/vntrevx). Cataly runs on
+[oh-my-pi (OMP)](https://github.com/can1357/oh-my-pi), installed separately. Third-party
+licences ship with every release in `THIRD-PARTY-NOTICES.txt`.

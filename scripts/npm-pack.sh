@@ -5,7 +5,8 @@
 #
 # For each target (linux-x64, darwin-arm64) it packs cataly-<target>: npm/cataly-<target>/package.json
 # with <version>, the binary, the extension that binary prints, LICENSE and the <notices> file.
-# Then it packs cataly: the launcher, public/README.md, LICENSE and <notices>, with an optional
+# Then it packs cataly: the launcher, the repository's README.md (its relative image paths and
+# links made absolute, since npm resolves neither), LICENSE and <notices>, with an optional
 # dependency on exactly the targets packed here, so a release never names a package it lacks.
 # Every binary must report <version> and its target. The versions come from the arguments only;
 # the package.json files in the repository keep 0.0.0-source.
@@ -74,7 +75,12 @@ stamp "$repo/npm/cataly/package.json" "$dir/package.json" \
 	'.optionalDependencies = ($targets | map({key: ("cataly-" + .), value: $v}) | from_entries)'
 cp "$repo/npm/cataly/bin/cataly.js" "$dir/bin/"
 chmod 755 "$dir/bin/cataly.js"
-cp "$repo/public/README.md" "$dir/README.md"
+raw=https://raw.githubusercontent.com/vntrevx/Cataly/main
+blob=https://github.com/vntrevx/Cataly/blob/main
+sed -E -e "s@(src|srcset)=\"([^\"#:]+)\"@\\1=\"$raw/\\2\"@g" \
+	-e "s@href=\"([^\"#:]+)\"@href=\"$blob/\\1\"@g" \
+	-e "s@\\]\\(([^)#:]+)\\)@]($blob/\\1)@g" "$repo/README.md" >"$dir/README.md" ||
+	fail "README.md could not be copied"
 cp "$repo/LICENSE" "$dir/"
 cp "$notices" "$dir/THIRD-PARTY-NOTICES.txt"
 chmod 644 "$dir/THIRD-PARTY-NOTICES.txt"

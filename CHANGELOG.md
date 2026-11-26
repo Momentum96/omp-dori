@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2 (Unreleased)
+
+- The source and the releases now live together in vntrevx/Cataly.
+
 ## 0.2.1 (2026-11-26)
 
 - Cataly is now open source under AGPL-3.0-only, with commercial licences available from vntrevx;

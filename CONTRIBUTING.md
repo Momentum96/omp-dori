@@ -1,5 +1,19 @@
 # Contributing
 
+This repository holds Cataly's source, its releases and its front page (`README.md`).
+
+## Build from source
+
+You need the Rust toolchain from `rust-toolchain.toml` and [Bun](https://bun.sh) for the OMP
+extension in `extension/`.
+
+```sh
+cargo build --release                    # add --features voice for Discord voice
+```
+
+The binary lands in `target/release/cataly`. `sh scripts/third-party-notices.sh` writes the
+third-party licences, `THIRD-PARTY-NOTICES.txt`, that every release ships.
+
 ## Build and test
 
 You need the Rust toolchain from `rust-toolchain.toml` and [Bun](https://bun.sh) for the OMP

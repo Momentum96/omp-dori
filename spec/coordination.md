@@ -13,7 +13,7 @@ the CLI), the lead, lane sessions and the daemon itself.
 This is the "supervision area" the evidence and reporting spec refers to: it reads that spec's last-progress mark
 (EVR-08, EVR-16) and defines no progress measure of its own. The mailbox here is the one delivery path; lead-to-lane
 delivery (EVR-33) and report wake lines (EVR-17) use it. Today the lead, a second model session, the supervisor and
-the planner are four long-lived processes; in cataly-core they are one Rust daemon (with two timers and a thin CLI
+the planner are four long-lived processes; in the new Cataly they are one Rust daemon (with two timers and a thin CLI
 client) plus the lead's OMP session, and every record has one writer.
 
 ## Capabilities

@@ -9,7 +9,7 @@ Decisions the owner made. They override defaults in `DESIGN.md` section 12 and i
 | 1 | Licence | The product must carry no code, structure, names or prose of the earlier upstream project. Ideas only. A commercial sale is possible later. |
 | 2 | Name | The product is Cataly. No earlier product name appears anywhere. |
 | 3 | Relays | Keep Discord, Telegram, Slack and voice. Keep the terminal runtime (tern). |
-| 4 | Windows | No Windows build of cataly-core is planned. Telegram intake on Windows is dropped. The earlier product keeps its Windows CI as it is. |
+| 4 | Windows | No Windows build of the new Cataly is planned. Telegram intake on Windows is dropped. The earlier product keeps its Windows CI as it is. |
 | 5 | Lane goals | Lanes use OMP goals. |
 | 6 | Helper session | No always-on second model session. The lead is the only standing session. |
 | 7 | Model fallback | On. When a model's quota runs out, the session may fall back to another configured model. This never redeems a reset, buys credits or enables paid overage; those stay refused in code. |

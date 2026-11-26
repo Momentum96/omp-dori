@@ -390,7 +390,7 @@ flag on turn end. The old tree also pinned OMP 19.0.1 built from source with a l
    without OMP goal mode (the daemon delivers the next instruction), or wait for a public upstream surface?
 2. Stuck exits: may the daemon SIGTERM, then SIGKILL, an OMP child still running 15 s after end of input? The old
    product never did and left such sessions stuck.
-3. Windows: should cataly-core build for Windows at all (tern only, named pipe instead of a Unix socket), or does
+3. Windows: should the new Cataly build for Windows at all (tern only, named pipe instead of a Unix socket), or does
    the existing product keep serving Windows for now?
 4. After a daemon crash, may the lead resume its last session when the lease shows it free though its stop was not
    clean? And is a default cap of 8 live OMP children right?

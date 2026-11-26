@@ -1,6 +1,6 @@
-# Clean-room rules for cataly-core
+# Clean-room rules for Cataly
 
-cataly-core is written from behaviour specs only. It contains no code, structure, names or
+Cataly (from 0.2.0) is written from behaviour specs only. It contains no code, structure, names or
 prose from the earlier Cataly tree or from the project that tree was copied from.
 
 ## Rules for everyone who writes in this repository

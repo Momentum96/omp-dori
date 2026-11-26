@@ -10,7 +10,7 @@
 #
 #   cataly-<version>-linux-x64        the binary
 #   cataly-<version>.ts               its OMP extension (`cataly extension`)
-#   install.sh                        the installer with the release key filled in
+#   install.sh                        the installer, which must already hold the release key
 #   LICENSE, THIRD-PARTY-NOTICES.txt
 #   cataly-<version>.tgz, cataly-linux-x64-<version>.tgz   the npm and Bun packages (npm pack)
 #   SHA256SUMS                        every file above
@@ -48,15 +48,13 @@ for file in release.pub release.pem; do
 	[ -f "$keys/$file" ] || fail "$keys/$file is missing"
 done
 
-# public/ is what the release repository shows; its copies must be the ones released.
-for file in LICENSE install.sh assets/banner.jpg; do
-	cmp -s "$file" "public/$file" || fail "public/$file differs from $file; copy $file there first"
-done
 key=$(tr -d ' \n' <"$keys/release.pub")
 echo "$key" | grep -Eq '^[0-9a-f]{64}$' || fail "$keys/release.pub is not 64 lower-case hex digits"
 # The private key must be the one the binary will trust.
 pem_key=$(openssl pkey -in "$keys/release.pem" -pubout -outform DER | tail -c 32 | od -An -v -tx1 | tr -d ' \n')
 [ "$pem_key" = "$key" ] || fail "release.pem does not belong to release.pub"
+# install.sh is read straight from the repository's main branch, so it must hold this key already.
+grep -q "^RELEASE_KEY=\"$key\"\$" install.sh || fail "install.sh does not hold the key in $keys/release.pub"
 
 out="$(dirname "$repo")/release-local/v$version"
 [ ! -e "$out" ] || fail "$out exists; remove it to build $version again"
@@ -80,8 +78,7 @@ binary="$part/cataly-$version-linux-x64"
 cp "$bin" "$binary"
 chmod 755 "$binary"
 "$bin" extension >"$part/cataly-$version.ts"
-sed "s/@RELEASE_KEY@/$key/" install.sh >"$part/install.sh"
-grep -q "^RELEASE_KEY=\"$key\"\$" "$part/install.sh" || fail "install.sh has no release key line"
+cp install.sh "$part/"
 cp LICENSE "$part/"
 sh scripts/third-party-notices.sh x86_64-unknown-linux-gnu "$part/THIRD-PARTY-NOTICES.txt"
 chmod 644 "$part/THIRD-PARTY-NOTICES.txt"

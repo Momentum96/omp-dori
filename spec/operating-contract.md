@@ -8,7 +8,7 @@ without asking and what it must never do. Users: the owner (whose trust depends 
 sessions (lanes), and the daemon, which should enforce as many of the rules as possible itself.
 
 In the old product all of this lived as long prose repeated across several prompt files, with the same spending
-paragraph pasted into five of them. cataly-core should invert that: every rule that a program can check becomes daemon
+paragraph pasted into five of them. The new Cataly should invert that: every rule that a program can check becomes daemon
 behaviour (or an OMP extension hook), and the skill text the lead reads shrinks to the judgement calls only. Each
 capability below says where its rule should live: **[code]** daemon or extension enforces it, **[prompt]** only the
 model can apply it, **[both]** the model decides and code checks.

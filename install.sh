@@ -12,8 +12,9 @@
 set -eu
 
 REPO="vntrevx/Cataly"
-# The ed25519 public key releases are signed with (hex); the publish job fills it in.
-RELEASE_KEY="@RELEASE_KEY@"
+# The ed25519 public key releases are signed with (hex); scripts/release.sh refuses to sign with
+# any other key.
+RELEASE_KEY="b35b95383bf865e896c2bdcc0b5b4580c4c55a23b5cd401fdafc63ead72a3b9d"
 
 fail() {
 	echo "cataly install: $*" >&2
@@ -149,10 +150,6 @@ for asset in "cataly-$version-$target" "cataly-$version.ts"; do
 	[ "$(hash_of "$tmp/$asset")" = "$want" ] || fail "$asset does not match SHA256SUMS; nothing was installed"
 done
 
-# The copy in the repository is the template; the copy attached to a release carries the key.
-case "$RELEASE_KEY" in
-"@"*) echo "Cataly $version for $target" ;;
-*) echo "Cataly $version for $target; release key $RELEASE_KEY" ;;
-esac
+echo "Cataly $version for $target; release key $RELEASE_KEY"
 chmod 700 "$tmp/cataly-$version-$target"
 "$tmp/cataly-$version-$target" install --from "$tmp"
