@@ -3,7 +3,8 @@
 ## 0.2.4 (Unreleased)
 
 - The lead sleeps when it has been fully idle for `[lead] idle_sleep` (default `2h`; `0s` turns it
-  off): no turn, nothing in its inbox, no open card or owner question and no open lane. The hub
+  off): no turn, no message waiting or in doubt, no open card or owner question and no open lane
+  (quiet notes wait through the sleep and go with the first turn after it). The hub
   stops its OMP the orderly way and keeps the session; an owner message (typed or spoken), an
   urgent event, a lane report or `cataly lead send` resumes the same session, and the message is
   delivered once it is accepted. `cataly status`, `cataly lead status`, `cataly health` and the

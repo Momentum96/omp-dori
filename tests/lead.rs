@@ -645,20 +645,48 @@ fn an_open_lane_keeps_the_lead_awake() {
     .to_string();
     let opened = hub.cli(&["lane", "open", "--json", "--params", &params]);
     assert!(opened.status.success(), "{opened:?}");
-    // The lane's start note waits for the lead's next wake: an owner message carries it.
+    // The lane's start note (quiet: it waits for the lead's next turn, and alone would not keep
+    // the lead awake) shows the lane started.
     hub.until(Duration::from_secs(20), || {
         (lead_view(&hub)["notes"].as_u64() > Some(0)).then_some(())
     });
-    assert!(
-        hub.cli(&["lead", "send", "carry the notes"])
-            .status
-            .success()
+    stays_awake(&hub, &first["session"]["pid"], 4);
+    assert!(hub.stop().success());
+}
+
+/// Quiet notes wait for the lead's next turn, also through a sleep: a lead with only quiet notes
+/// pending sleeps, and the notes go with its first turn after the wake.
+#[test]
+fn quiet_notes_wait_through_a_sleep_and_go_with_the_first_turn() {
+    let mut hub = sleepy_hub(&[], "2s", "", "");
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    // An exit by itself brings the lead back on its session with a quiet resume note.
+    kill(&first["session"]["pid"]);
+    let second = live(&hub, &first["session"]["pid"]);
+    let file = second["session"]["session_file"].clone();
+    let slept = asleep(&hub);
+    assert_eq!(slept["notes"], 1, "{slept}");
+    assert_eq!(user_entries(&file, "resume note"), 0);
+    assert!(hub.cli(&["lead", "send", "WAKE-Q"]).status.success());
+    let woke = live(&hub, &second["session"]["pid"]);
+    assert_eq!(
+        woke["session"]["session_id"],
+        first["session"]["session_id"]
     );
     hub.until(Duration::from_secs(20), || {
-        let v = lead_view(&hub);
-        (v["waiting"] == 0 && v["notes"] == 0 && v["sent"] == 0 && v["in_doubt"] == 0).then_some(())
+        (user_entries(&file, "WAKE-Q") > 0).then_some(())
     });
-    stays_awake(&hub, &first["session"]["pid"], 4);
+    let text = std::fs::read_to_string(file.as_str().unwrap()).unwrap();
+    let turn = text
+        .lines()
+        .find(|l| l.contains("\"role\":\"user\"") && l.contains("WAKE-Q"))
+        .unwrap();
+    assert!(
+        turn.contains("resume note"),
+        "one turn carries both: {turn}"
+    );
+    assert_eq!(user_entries(&file, "resume note"), 1);
     assert!(hub.stop().success());
 }
 

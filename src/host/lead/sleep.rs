@@ -3,8 +3,9 @@
 //! waits in the inbox until that session is accepted. The timer rides on the lead's own task.
 //!
 //! Idle means, for the whole time: no turn running and no dialog open (an approval or a question
-//! card); nothing in the lead's inbox (a waking message, a quiet note for the next wake, a written
-//! batch awaiting its entry, an in-doubt delivery); no open owner question; and no open lane. Every
+//! card); nothing in the lead's inbox but quiet notes (no waking message, written batch awaiting its
+//! entry or in-doubt delivery); no open owner question; and no open lane. Quiet notes wait for the
+//! next turn anyway, so they wait through a sleep and go with the first turn after the wake. Every
 //! session event, delivery, settled in-doubt entry and start counts as activity; an idle check that
 //! finds the lead busy restarts the count.
 
@@ -126,7 +127,10 @@ impl<R: Runtime> Lead<R> {
             && matches!(
                 self.env
                     .store
-                    .read(|r| Ok(r.inbox_open(LEAD)?.is_empty()
+                    .read(|r| Ok(r
+                        .inbox_open(LEAD)?
+                        .iter()
+                        .all(|row| row.state == "pending" && !row.urgent && !row.owner)
                         && r.questions(true)?.is_empty()
                         && r.lanes(true)?.is_empty()))
                     .await,
@@ -138,8 +142,8 @@ impl<R: Runtime> Lead<R> {
         idle
     }
 
-    /// The orderly stop of the update path without force: it never interrupts a turn, and with the
-    /// inbox empty nothing is in doubt. The record keeps the session for the wake.
+    /// The orderly stop of the update path without force: it never interrupts a turn, and with only
+    /// quiet notes in the inbox nothing is written or in doubt. The record keeps the session.
     async fn hibernate(&self, after: Duration) {
         let Some(session) = self.current().filter(|s| s.alive()) else {
             return;
