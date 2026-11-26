@@ -693,6 +693,8 @@ pub(crate) struct Workers {
     hook: OnceLock<ChannelHook>,
     /// When a connection last failed, per worker: reachability is asked again only after [`RETRY`].
     failed: Mutex<HashMap<String, Instant>>,
+    /// Counts connections made and lost, so lanes hear a worker come or go.
+    changed: watch::Sender<u64>,
 }
 
 impl Workers {
@@ -714,6 +716,7 @@ impl Workers {
             gates: Mutex::new(HashMap::new()),
             hook: OnceLock::new(),
             failed: Mutex::new(HashMap::new()),
+            changed: watch::channel(0).0,
         });
         let _ = REGISTRY.set(Arc::clone(&workers));
         workers
@@ -742,6 +745,11 @@ impl Workers {
             failed.insert(name.to_string(), Instant::now());
         }
         ok
+    }
+
+    /// Changes whenever a connection is made or lost.
+    pub(crate) fn changes(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
     }
 
     /// Where channels the workers open go.
@@ -863,6 +871,11 @@ impl Workers {
                 self.set(name, State::Online, None, Some(link.hello.clone()))
                     .await;
                 log::info("worker connected", &[("worker", &name)]);
+                self.failed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(name);
+                self.changed.send_modify(|n| *n += 1);
                 tokio::spawn(Arc::clone(self).watch(Arc::clone(&link), accepted));
                 Ok(link)
             }
@@ -925,6 +938,7 @@ impl Workers {
             )
             .await;
             log::warn("worker connection lost", &[("worker", &link.name)]);
+            self.changed.send_modify(|n| *n += 1);
         }
     }
 

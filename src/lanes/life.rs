@@ -247,7 +247,7 @@ impl<R: Runtime> Lanes<R> {
             let (Some(id), Some(file)) = (rec.session_id.clone(), rec.session_file.clone()) else {
                 return Err("park needs a recorded session".into());
             };
-            let root = self.env.state_dir.join("sessions").join("lanes").join(key);
+            let root = self.session_root(&rec);
             let verified = crate::omp::transcript::verify(
                 PathBuf::from(file),
                 root,
@@ -392,14 +392,13 @@ impl<R: Runtime> Lanes<R> {
         } else {
             rec.worktrees.iter().map(PathBuf::from).collect()
         };
+        let place = rec.place();
         for dir in dirs {
-            if let Some(why) = git::unsent(&dir).await {
+            if let Some(why) = git::unsent(&place, &dir).await {
                 reasons.push(format!("unsent work: {why}"));
             }
         }
-        let identities: Vec<(String, String)> = self.cfg().lanes.identities.clone();
-        let results =
-            super::checks::run_all(&rec.checks, std::path::Path::new(&rec.cwd), &identities).await;
+        let results = self.read_checks(rec).await;
         let lines: Vec<String> = results
             .iter()
             .map(|o| {
@@ -587,10 +586,12 @@ impl<R: Runtime> Lanes<R> {
                             .push(format!("worktree {w} kept: it holds a published file"));
                         continue;
                     }
-                    intent.receipt.push(match git::remove_worktree(&w).await {
-                        Ok(()) => format!("worktree {w} removed"),
-                        Err(e) => e,
-                    });
+                    intent
+                        .receipt
+                        .push(match git::remove_worktree(&rec.place(), &w).await {
+                            Ok(()) => format!("worktree {w} removed"),
+                            Err(e) => e,
+                        });
                 }
             }
             intent.step = "cleaned".into();
@@ -675,7 +676,7 @@ impl<R: Runtime> Lanes<R> {
         let (Some(id), Some(file)) = (rec.session_id.clone(), rec.session_file.clone()) else {
             return Err("no recorded session ID".into());
         };
-        let root = self.env.state_dir.join("sessions").join("lanes").join(key);
+        let root = self.session_root(&rec);
         let verified = crate::omp::transcript::verify(
             PathBuf::from(&file),
             root,
@@ -689,12 +690,16 @@ impl<R: Runtime> Lanes<R> {
         if self.session(key).is_some() {
             return Err("a live session already runs this session".into());
         }
-        if self.lease_free(&id).await != Some(true) {
+        if self.lease_free(rec.worker.as_deref(), &id).await != Some(true) {
             return Err("another OMP holds this session's lease".into());
         }
         let config = self.cfg();
         let exe = self
-            .admission(&config, std::path::Path::new(&rec.cwd))
+            .admission(
+                &config,
+                std::path::Path::new(&rec.cwd),
+                rec.worker.as_deref(),
+            )
             .await?;
         self.tern_spend(&config, &rec).await?;
         let now = now_ms();
@@ -759,8 +764,11 @@ impl<R: Runtime> Lanes<R> {
         Ok(format!("reopened on session {id} with run {}", rec.run_id))
     }
 
-    /// Whether OMP shows the session's lease free; `None` when unknown.
-    async fn lease_free(&self, id: &str) -> Option<bool> {
+    /// Whether OMP shows the session's lease free, on the lane's machine; `None` when unknown.
+    pub(super) async fn lease_free(&self, worker: Option<&str>, id: &str) -> Option<bool> {
+        if let Some(worker) = worker {
+            return Self::lease_free_on(worker, id).await;
+        }
         let path = self.env.omp.path()?;
         match crate::omp::usage::lease(&path, &[id]).await {
             Ok(l) if l.held.iter().any(|h| h == id) => Some(false),
@@ -885,6 +893,10 @@ impl<R: Runtime> Lanes<R> {
                 .with("lane", key)
                 .with("detail", format!("{why}; last lines: {}", last.join(" | "))),
         );
+        // A worker lane comes back by itself once its worker answers (docs/design/workers.md 2.4).
+        if rec.worker.is_some() {
+            self.nudge.notify_one();
+        }
     }
 
     /// Hub start (LANE req. 70; decision 9): finish recorded intents, bring every lane that was
@@ -920,7 +932,7 @@ impl<R: Runtime> Lanes<R> {
         self.nudge.notify_one();
     }
 
-    async fn recover_one(self: &Arc<Self>, key: &str) -> String {
+    pub(super) async fn recover_one(self: &Arc<Self>, key: &str) -> String {
         let Ok(_turn) = self.turn(key).await else {
             return "busy".into();
         };
@@ -949,23 +961,16 @@ impl<R: Runtime> Lanes<R> {
             return "start unconfirmed; held for inspection".into();
         }
         let was_active = matches!(rec.state, State::Running | State::Rejected | State::Claimed);
-        let deadline = Instant::now() + LEASE_WAIT;
-        loop {
-            match self.lease_free(&id).await {
-                Some(true) => break,
-                _ if Instant::now() >= deadline => {
-                    rec.lost = Some("the lease stayed held after the hub restart".into());
-                    let _ = self
-                        .save(&rec, Some(rev), Some("lost: lease held at recovery".into()))
-                        .await;
-                    return "lost: the session's lease stayed held".into();
-                }
-                _ => tokio::time::sleep(Duration::from_millis(500)).await,
-            }
+        if let Err(line) = self.lease_wait(&mut rec, rev, &id).await {
+            return line;
         }
         let config = self.cfg();
         let admitted = match self
-            .admission(&config, std::path::Path::new(&rec.cwd))
+            .admission(
+                &config,
+                std::path::Path::new(&rec.cwd),
+                rec.worker.as_deref(),
+            )
             .await
         {
             Ok(exe) => self.tern_spend(&config, &rec).await.map(|()| exe),
@@ -1051,4 +1056,35 @@ fn new_run(rec: &mut Record, now: i64) {
         active_ms: now,
         ..Watch::default()
     };
+}
+
+impl<R: Runtime> Lanes<R> {
+    /// Waits until the session's lease is free for a restart; `Err` is the recovery line of a lane
+    /// left lost. A lane whose worker cannot be reached now stays lost and comes back when the
+    /// worker does (docs/design/workers.md 2.4).
+    async fn lease_wait(&self, rec: &mut Record, rev: Revision, id: &str) -> Result<(), String> {
+        if let Some(worker) = rec.worker.clone()
+            && let Err(why) = self.worker_up(&worker).await
+        {
+            rec.lost = Some(why.clone());
+            let _ = self
+                .save(rec, Some(rev), Some(format!("lost: {why}")))
+                .await;
+            return Err(format!("lost: {why}; it resumes when {worker} is back"));
+        }
+        let deadline = Instant::now() + LEASE_WAIT;
+        loop {
+            match self.lease_free(rec.worker.as_deref(), id).await {
+                Some(true) => return Ok(()),
+                _ if Instant::now() >= deadline => {
+                    rec.lost = Some("the lease stayed held after the hub restart".into());
+                    let _ = self
+                        .save(rec, Some(rev), Some("lost: lease held at recovery".into()))
+                        .await;
+                    return Err("lost: the session's lease stayed held".into());
+                }
+                _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            }
+        }
+    }
 }

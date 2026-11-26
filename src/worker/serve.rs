@@ -697,7 +697,8 @@ fn transcript(worker: &Worker, name: &str, params: &Value) -> Result<Value, Stri
         _ => return Err("verify needs exactly or recorded".into()),
     };
     let verified = exact(&path, &root, text("session"), &folder).map_err(|e| e.to_string())?;
-    Ok(verified.map_or(Value::Null, |t| {
-        json!({ "model": t.model, "cwd": t.cwd.display().to_string() })
-    }))
+    Ok(verified.map_or(
+        Value::Null,
+        |t| json!({ "model": t.model, "cwd": t.cwd.display().to_string() }),
+    ))
 }

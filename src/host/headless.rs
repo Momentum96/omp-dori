@@ -147,24 +147,23 @@ impl Headless {
         token: &str,
     ) -> Result<(Arc<Session>, Started), StartError> {
         let refused = |e: String| StartError::Refused(format!("{worker}: {e}"));
-        let link = crate::worker::link::connect(worker).await.map_err(refused)?;
+        let link = crate::worker::link::connect(worker)
+            .await
+            .map_err(refused)?;
         let root = PathBuf::from(&link.hello.root);
-        let copy = |local: &Path, dir: &str| {
-            let remote = root
-                .join(dir)
-                .join(local.file_name().unwrap_or_default());
-            (local.to_path_buf(), remote)
+        // The overlay and instructions go to the worker root's `settings`, under the same names.
+        let there = |local: &Path| {
+            root.join("settings")
+                .join(local.file_name().unwrap_or_default())
         };
-        let lane = spec.role == super::Role::Lane;
-        let mut files = vec![copy(
-            &crate::omp::launch::overlay_path(&self.state, lane),
-            "settings",
-        )];
-        if let Some(file) = &spec.instructions {
-            files.push(copy(file, "settings"));
-        }
-        for (local, remote) in &files {
-            let bytes = std::fs::read(local).map_err(|e| refused(format!("{}: {e}", local.display())))?;
+        let overlay = crate::omp::launch::overlay_path(&self.state, spec.role == super::Role::Lane);
+        let (overlay_there, instructions_there) =
+            (there(&overlay), spec.instructions.as_deref().map(there));
+        let copies = std::iter::once((&overlay, &overlay_there))
+            .chain(spec.instructions.iter().zip(instructions_there.iter()));
+        for (local, remote) in copies {
+            let bytes =
+                std::fs::read(local).map_err(|e| refused(format!("{}: {e}", local.display())))?;
             link.write(&remote.display().to_string(), &bytes)
                 .await
                 .map_err(refused)?;
@@ -174,7 +173,11 @@ impl Headless {
                 let remote = root
                     .join("sessions")
                     .join(dir.file_name().unwrap_or_default());
-                let mkdir = ["mkdir".to_string(), "-p".into(), remote.display().to_string()];
+                let mkdir = [
+                    "mkdir".to_string(),
+                    "-p".into(),
+                    remote.display().to_string(),
+                ];
                 link.exec(&mkdir, None, &[], Duration::from_secs(10))
                     .await
                     .map_err(refused)?;
@@ -190,18 +193,18 @@ impl Headless {
             model: &spec.model,
             thinking: spec.thinking.as_deref(),
             target: &target,
-            overlay: &files[0].1,
-            instructions: files.get(1).map(|(_, r)| r.as_path()),
+            overlay: &overlay_there,
+            instructions: instructions_there.as_deref(),
             extra: &self.extra_flags,
             max_cost: spec.max_cost,
             tools: spec.tools.as_deref(),
         }
         .argv();
-        let mut env: Vec<(String, String)> = crate::omp::child_env()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        env.push(("CATALY_LAUNCH".into(), token.to_string()));
+        // The worker's own OMP profile and logins: nothing of this machine's environment goes along.
+        let env = [
+            ("PI_NOTIFICATIONS".to_string(), "off".to_string()),
+            ("CATALY_LAUNCH".to_string(), token.to_string()),
+        ];
         let cwd = spec.cwd.display().to_string();
         let (channel, stream, hold) = link.spawn(&argv, &cwd, &env).await.map_err(refused)?;
         let (read, write) = tokio::io::split(stream);
@@ -274,6 +277,7 @@ pub(crate) enum Proc {
     /// OMP on a worker: the end of its channel's input closes it there by the same rule.
     Remote(Box<Remote>),
     /// Tests: the transport is in-process and ends with the fake.
+    #[cfg(test)]
     Fake,
 }
 
@@ -375,6 +379,7 @@ impl Session {
         let (pid, worker) = match &proc {
             Proc::Child(c) => (c.pid(), None),
             Proc::Remote(r) => (None, Some(r.worker.clone())),
+            #[cfg(test)]
             Proc::Fake => (None, None),
         };
         let now = now_ms();
@@ -610,6 +615,14 @@ fn placeholder(spec: &StartSpec, now: i64) -> Snapshot {
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A session file OMP reported, as the hub records it: a worker's carries its name.
+    fn recorded(&self, file: &str) -> String {
+        match &self.worker {
+            Some(worker) => crate::worker::remote_path(worker, file),
+            None => file.to_string(),
+        }
     }
 
     fn status_of(st: &State) -> (Status, bool) {
@@ -870,10 +883,15 @@ impl Inner {
                     (how.to_string(), detail)
                 } else {
                     let _ = remote.hold.link().signal(remote.channel, "KILL").await;
-                    ("kill".into(), Some(format!("needed KILL on {}", remote.worker)))
+                    (
+                        "kill".into(),
+                        Some(format!("needed KILL on {}", remote.worker)),
+                    )
                 }
             }
-            Some(Proc::Fake) | None => (how.to_string(), detail),
+            #[cfg(test)]
+            Some(Proc::Fake) => (how.to_string(), detail),
+            None => (how.to_string(), detail),
         };
         self.record_stop(how, detail)
     }
@@ -1189,7 +1207,9 @@ async fn event_loop(inner: Arc<Inner>, mut events: mpsc::Receiver<Value>) {
             format!("{exit:?}")
         }
         Some(Proc::Remote(remote)) => format!("output closed on {}", remote.worker),
-        Some(Proc::Fake) | None => "output closed".into(),
+        #[cfg(test)]
+        Some(Proc::Fake) => "output closed".into(),
+        None => "output closed".into(),
     };
     log::warn(
         "session child exited",

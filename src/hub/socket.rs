@@ -290,7 +290,16 @@ async fn connection(hub: &Arc<Hub>, stream: UnixStream, pid: Option<i32>) {
             return;
         }
         if request.method == super::bridge::HELLO {
-            super::bridge::serve(hub, request.id, request.params, &mut reader, writer, pid).await;
+            super::bridge::serve(
+                hub,
+                request.id,
+                request.params,
+                &mut reader,
+                writer,
+                pid,
+                None,
+            )
+            .await;
             return;
         }
         if placement.is_none() {

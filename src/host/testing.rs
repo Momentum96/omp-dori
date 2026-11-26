@@ -61,6 +61,7 @@ pub(crate) fn spec(handle: &str, expected: Option<(&str, PathBuf)>) -> StartSpec
         instructions: None,
         max_cost: None,
         tools: None,
+        worker: None,
     }
 }
 
@@ -109,7 +110,14 @@ impl Fake {
         let rpc = Rpc::connect(reader, writer, Duration::from_secs(5), Some(tx))
             .await
             .unwrap();
-        Session::bind(rpc, rx, None, spec, Settings::default()).await
+        Session::bind(
+            rpc,
+            rx,
+            super::headless::Proc::Fake,
+            spec,
+            Settings::default(),
+        )
+        .await
     }
 
     pub(crate) fn session_id(&self) -> String {

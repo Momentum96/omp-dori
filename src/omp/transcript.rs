@@ -706,13 +706,18 @@ pub(crate) async fn search(path: PathBuf, marker: String) -> Result<Found> {
         let link = crate::worker::link::connect(worker)
             .await
             .map_err(TranscriptError::Io)?;
-        let answer = link.find(file, &marker).await.map_err(TranscriptError::Io)?;
+        let answer = link
+            .find(file, &marker)
+            .await
+            .map_err(TranscriptError::Io)?;
         return match answer.get("found").and_then(Value::as_str) {
             Some("yes") => Ok(Found::Yes),
             Some("no") => Ok(Found::No),
             Some("missing") => Ok(Found::Missing),
             Some("out_of_time") => Ok(Found::OutOfTime),
-            _ => Err(TranscriptError::Io("the worker's search answer is unknown".into())),
+            _ => Err(TranscriptError::Io(
+                "the worker's search answer is unknown".into(),
+            )),
         };
     }
     tokio::task::spawn_blocking(move || find_marker(&path, &marker))
@@ -730,17 +735,19 @@ pub(crate) async fn verify(
 ) -> Result<Option<Transcript>> {
     if let Some((worker, file)) = crate::worker::split_remote(&path) {
         let local = |p: &Path| {
-            crate::worker::split_remote(p).map_or_else(|| p.display().to_string(), |(_, f)| f.into())
+            crate::worker::split_remote(p)
+                .map_or_else(|| p.display().to_string(), |(_, f)| f.into())
         };
-        let mut params = serde_json::json!({
+        let (kind, dir) = match &folder {
+            Folder::Exactly(d) => ("exactly", d),
+            Folder::Recorded(d) => ("recorded", d),
+        };
+        let params = serde_json::json!({
             "path": file,
             "root": local(&root),
             "session": session,
+            kind: local(dir),
         });
-        match &folder {
-            Folder::Exactly(d) => params["exactly"] = Value::String(local(d)),
-            Folder::Recorded(d) => params["recorded"] = Value::String(local(d)),
-        }
         let link = crate::worker::link::connect(worker)
             .await
             .map_err(TranscriptError::Io)?;
@@ -748,9 +755,15 @@ pub(crate) async fn verify(
         if answer.is_null() {
             return Ok(None);
         }
-        let cwd = answer.get("cwd").and_then(Value::as_str).unwrap_or_default();
+        let cwd = answer
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         return Ok(Some(Transcript {
-            model: answer.get("model").and_then(Value::as_str).map(str::to_string),
+            model: answer
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             cwd: PathBuf::from(cwd),
         }));
     }

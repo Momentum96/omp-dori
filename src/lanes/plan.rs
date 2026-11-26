@@ -731,7 +731,7 @@ impl<R: Runtime> Lanes<R> {
         let open = u32::try_from(lanes.len()).unwrap_or(u32::MAX);
         let free = p.max_open.saturating_sub(open).min(p.max_starts);
         let why = if (self.env.lead_live)() {
-            self.admission(&config, std::path::Path::new(&first.cwd))
+            self.admission(&config, std::path::Path::new(&first.cwd), None)
                 .await
                 .err()
         } else {

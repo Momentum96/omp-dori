@@ -459,6 +459,15 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         voice: relays.voice,
     });
     {
+        // A worker's bridge channels reach the bridge, scoped to that worker's lanes (design 2.5).
+        let weak = Arc::downgrade(&hub);
+        hub.workers.set_hook(Arc::new(move |worker, accepted| {
+            if let Some(hub) = weak.upgrade() {
+                tokio::spawn(bridge::from_worker(hub, worker, accepted.stream));
+            }
+        }));
+    }
+    {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
         supervisor.spawn("control", move || {
             socket::serve(Arc::clone(&hub), Arc::clone(&listener))

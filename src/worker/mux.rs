@@ -302,11 +302,6 @@ impl Mux {
         self.shared.shut();
     }
 
-    /// Channels open now, the control channel included.
-    pub(crate) fn channels(&self) -> usize {
-        self.shared.table().len()
-    }
-
     /// Registers channel `id` and starts its two pumps; returns the user's end.
     fn attach(&self, id: u32) -> DuplexStream {
         let (user, far) = tokio::io::duplex(CHUNK);

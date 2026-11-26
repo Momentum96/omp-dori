@@ -1,7 +1,8 @@
 //! Queued launches (LANE-11; LANE req. 22-27): an open that names predecessor lanes is validated and
 //! its brief assembled now, then kept with the key reserved until the lead or the owner starts it.
 //! The hub tells the lead once per change when it becomes ready or is held again, and never starts it
-//! by itself.
+//! by itself, except a lane that waits only for its worker to be reachable (the owner's decision,
+//! docs/design/workers.md 2.6): that one starts as soon as the worker answers.
 
 use std::sync::Arc;
 
@@ -32,6 +33,21 @@ pub(crate) struct Queued {
     /// What the lead was last told: `ready`, `held: ...` or `expired`.
     pub(crate) told: Option<String>,
     pub(crate) note: Option<String>,
+    /// The kickoff line for its thread, posted when it starts (a lane queued for its worker).
+    #[serde(default)]
+    pub(crate) kickoff: Option<String>,
+}
+
+impl Queued {
+    /// The worker the launch waits for, when it names one.
+    fn worker(&self) -> Option<&str> {
+        self.input.get("worker").and_then(Value::as_str)
+    }
+
+    /// It waits for nothing but its worker, so the hub starts it by itself.
+    fn waits_for_worker(&self) -> bool {
+        self.after.is_empty() && self.worker().is_some()
+    }
 }
 
 impl Queued {
@@ -57,12 +73,13 @@ pub(crate) fn completed(rec: &Record) -> Result<(), String> {
 }
 
 impl<R: Runtime> Lanes<R> {
-    /// Stores an open that names predecessors (LANE req. 22-23).
+    /// Stores an open that names predecessors (LANE req. 22-23), or whose worker cannot be reached.
     pub(super) async fn queue(
         &self,
         open: &OpenInput,
         valid: &record::Validated,
         mut input: Value,
+        kickoff: Option<String>,
     ) -> Result<Value, String> {
         let key = &valid.key;
         if self.row(key).await?.is_some() {
@@ -137,6 +154,7 @@ impl<R: Runtime> Lanes<R> {
             state: PENDING.into(),
             told: None,
             note: None,
+            kickoff,
         };
         // A started entry of an earlier lane under this key is replaced.
         docs::put(&self.env.store, QUEUED, key, &q, None).await?;
@@ -144,7 +162,8 @@ impl<R: Runtime> Lanes<R> {
         Ok(json!({ "key": key, "outcome": "queued", "after": q.after }))
     }
 
-    /// Why a queued launch cannot start now; `Ok` when every predecessor is ready.
+    /// Why a queued launch cannot start now; `Ok` when every predecessor is ready and its worker,
+    /// if it names one, answers.
     async fn readiness(&self, q: &Queued, now: i64) -> Result<(), String> {
         if now >= q.expires_ms {
             return Err("expired".into());
@@ -160,6 +179,12 @@ impl<R: Runtime> Lanes<R> {
                 Err(_) => held.push(format!("{p} has no lane yet")),
             }
         }
+        if held.is_empty()
+            && let Some(worker) = q.worker()
+            && let Err(why) = self.worker_up(worker).await
+        {
+            held.push(why);
+        }
         if held.is_empty() {
             Ok(())
         } else {
@@ -168,8 +193,9 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// Tells the lead when a pending launch became ready, held or expired, once per change (LANE
-    /// req. 25). Runs with oversight.
-    pub(super) async fn queue_sweep(&self) {
+    /// req. 25), and starts a launch that waited only for its worker once that worker answers.
+    /// Runs with oversight.
+    pub(super) async fn queue_sweep(self: &Arc<Self>) {
         let Ok((all, _)) = docs::all::<Queued>(&self.env.store, QUEUED).await else {
             return;
         };
@@ -183,6 +209,22 @@ impl<R: Runtime> Lanes<R> {
                 Err(e) if e == "expired" => e,
                 Err(e) => format!("held: {e}"),
             };
+            if state == "ready" && q.waits_for_worker() {
+                let detail = match self.start_queued(&q.key).await {
+                    Ok(v) => format!(
+                        "started on {}: {}",
+                        q.worker().unwrap_or_default(),
+                        s(&v, "outcome").unwrap_or_default()
+                    ),
+                    Err(e) => format!("did not start: {e}"),
+                };
+                self.emit(
+                    Emit::new(EventKind::LaneQueued, Severity::Info, true, &q.key)
+                        .with("lane", &q.key)
+                        .with("detail", detail),
+                );
+                continue;
+            }
             let changed = match (&q.told, state.as_str()) {
                 (None, s) => s == "ready" || s == "expired",
                 (Some(t), s) => t != s && !(t.starts_with("held") && s.starts_with("held")),
@@ -235,10 +277,7 @@ impl<R: Runtime> Lanes<R> {
         // Predecessors' signals read back live now, with their records unchanged meanwhile.
         for p in &q.after {
             let (rec, before) = self.load(p).await?;
-            let identities = self.cfg().lanes.identities.clone();
-            let results =
-                super::checks::run_all(&rec.checks, std::path::Path::new(&rec.cwd), &identities)
-                    .await;
+            let results = self.read_checks(&rec).await;
             if let Some(f) = results.iter().find(|o| !o.pass) {
                 return Err(format!("{p}: {} fails now: {}", f.signal, f.detail));
             }
@@ -253,7 +292,10 @@ impl<R: Runtime> Lanes<R> {
         q.state = STARTING.into();
         let version = docs::put(&self.env.store, QUEUED, key, &q, Some(version)).await?;
         let digest = record::digest(&open);
-        let outcome = self.open_one(valid, None, digest, None, None).await;
+        let outcome = self
+            .open_one(valid, None, digest, None, q.kickoff.clone())
+            .await
+            .map(|(outcome, _)| outcome);
         match &outcome {
             // The kickoff may have reached the agent: left for inspection, never retried.
             Ok(o) if o.starts_with("unconfirmed") => q.note = Some(o.clone()),

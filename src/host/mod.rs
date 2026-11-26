@@ -54,6 +54,8 @@ pub(crate) struct StartSpec {
     pub(crate) max_cost: Option<f64>,
     /// `--tools`: the look-only tool set of a review lane (OPC-46).
     pub(crate) tools: Option<String>,
+    /// The worker the session runs on (design 2.1); `None` runs it here.
+    pub(crate) worker: Option<String>,
 }
 
 /// A bound session (DESIGN 4.1 `Started`).
