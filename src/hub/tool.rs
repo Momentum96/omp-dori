@@ -37,7 +37,8 @@ pub(crate) fn definition() -> Value {
     lane.open (key, title, brief or brief_file, checks: list of {kind: pr_merged|issue_closed|command|file|web|pr_policy, \
     ...}, thread? or thread_from? discord:<room>/<message> (a message in a lane thread starts a new thread beside it), \
     kickoff? (with thread_from: one line posted first in the new thread), cwd?, model?, origin?, look_only?, ceilings?, \
-    worktree? {path, branch, base} (the lane works there), \
+    worktree? {path, branch, base} (the lane works there), worker? (a configured worker from lane.workers, only on \
+    evidence: the owner named it or a platform only it has, or the repository is listed for it), \
     priority? 1-9, after? [predecessor keys: queued], expires_hours?, preview?), lane.list (all?), lane.board (key?), \
     lane.pause|resume (key, reason?), lane.park|abandon (key, reason, condition?), lane.object (key, reason), \
     lane.close (key, note?, lesson?), lane.reopen (key, note?), lane.send (key, text, id?, steer?), lane.release \
@@ -49,7 +50,8 @@ pub(crate) fn definition() -> Value {
     lane.review (pr owner/name#N, model?), lane.merge (pr, dry_run?; only with the owner's authorisation). Files and \
     rules: lane.publish (key, path, title?, visibility private|public), lane.files (key?), lane.rule-add (text, \
     evidence, scope global|repo, key?), lane.rule-retire (id), lane.rules, lane.board-found (destination, message). \
-    Host: lane.admission (cwd?), lane.slots. Onboarding (read-only while it runs: posts, questions, lanes and jobs are \
+    Host: lane.admission (cwd?, worker?), lane.slots, lane.workers (name, OS and arch, state, lanes in use, repos). \
+    Onboarding (read-only while it runs: posts, questions, lanes and jobs are \
     refused): onboarding (state), onboarding.start (reopen?, message?: only when the owner raised it again), \
     onboarding.consent (answer yes|no, message), onboarding.tool (name, answer allowed|declined, reads, message), \
     onboarding.finish (text: short summary of what is known, tools used or skipped, and gaps).",
@@ -121,6 +123,58 @@ fn done(d: LeadDone, ok: String) -> Result<String, String> {
     }
 }
 
+/// `lane.workers`: one line per configured worker, for placement from evidence (design 2.6).
+fn workers(views: &[crate::worker::link::View]) -> String {
+    if views.is_empty() {
+        return "no workers: every lane runs on this machine".into();
+    }
+    views
+        .iter()
+        .map(|v| {
+            let platform = match (&v.os, &v.arch) {
+                (Some(os), Some(arch)) => format!("{os} {arch}"),
+                _ => "platform not seen yet".into(),
+            };
+            let state = serde_json::to_value(v.state)
+                .ok()
+                .and_then(|s| s.as_str().map(str::to_string))
+                .unwrap_or_default();
+            let reason = v
+                .reason
+                .as_deref()
+                .map_or_else(String::new, |r| format!(" ({r})"));
+            let repos = if v.repos.is_empty() {
+                "none listed".into()
+            } else {
+                v.repos.join(", ")
+            };
+            format!(
+                "- {}: {platform}, {state}{reason}, lanes {}/{}, repos {repos}",
+                v.name, v.lanes, v.lanes_max
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One `lane.*` operation: `lane.workers` from the worker table, the rest by the lanes as the lead.
+async fn lane(hub: &Arc<Hub>, op: &str, input: &Value) -> Result<String, String> {
+    if op == "workers" {
+        return Ok(workers(&hub.workers.list()));
+    }
+    let mut lane_input = input.clone();
+    if let Some(map) = lane_input.as_object_mut() {
+        map.insert("op".into(), json!(op));
+    }
+    hub.lanes
+        .call(crate::lanes::Caller::Lead, &lane_input)
+        .await
+        .map(|v| match v {
+            Value::String(s) => s,
+            other => other.to_string(),
+        })
+}
+
 /// Runs one call; `Err` is shown to the model as a tool error.
 pub(crate) async fn call(hub: &Arc<Hub>, input: &Value) -> Result<String, String> {
     let op = s(input, "op").unwrap_or_default();
@@ -128,18 +182,7 @@ pub(crate) async fn call(hub: &Arc<Hub>, input: &Value) -> Result<String, String
         return reply;
     }
     if let Some(lane_op) = op.strip_prefix("lane.") {
-        let mut lane_input = input.clone();
-        if let Some(map) = lane_input.as_object_mut() {
-            map.insert("op".into(), json!(lane_op));
-        }
-        return hub
-            .lanes
-            .call(crate::lanes::Caller::Lead, &lane_input)
-            .await
-            .map(|v| match v {
-                Value::String(s) => s,
-                other => other.to_string(),
-            });
+        return lane(hub, lane_op, input).await;
     }
     match op {
         "requests" => {

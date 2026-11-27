@@ -16,6 +16,7 @@ mod proto;
 mod relay;
 mod store;
 mod sys;
+mod worker;
 
 /// Runs the `cataly` command line with the process arguments and returns its exit status.
 pub fn run() -> std::process::ExitCode {

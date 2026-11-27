@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Semaphore, broadcast};
@@ -203,34 +203,11 @@ pub(crate) async fn serve(
     }
 }
 
-pub(super) enum Line {
-    Text(String),
-    TooLong,
-    Closed,
-}
+pub(super) use crate::proto::Line;
 
 /// Reads one line of at most `MAX_LINE` bytes.
 pub(super) async fn read_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Line {
-    let mut buf = Vec::new();
-    loop {
-        let chunk = match reader.fill_buf().await {
-            Ok([]) | Err(_) => return Line::Closed,
-            Ok(chunk) => chunk,
-        };
-        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
-            Some(i) => (i + 1, true),
-            None => (chunk.len(), false),
-        };
-        buf.extend_from_slice(chunk.get(..take).unwrap_or_default());
-        reader.consume(take);
-        if buf.len() > MAX_LINE + 1 {
-            return Line::TooLong;
-        }
-        if done {
-            buf.pop();
-            return String::from_utf8(buf).map_or(Line::TooLong, Line::Text);
-        }
-    }
+    crate::proto::read_line(reader, MAX_LINE).await
 }
 
 async fn send(writer: &mut OwnedWriteHalf, response: &Response) -> bool {
@@ -313,7 +290,16 @@ async fn connection(hub: &Arc<Hub>, stream: UnixStream, pid: Option<i32>) {
             return;
         }
         if request.method == super::bridge::HELLO {
-            super::bridge::serve(hub, request.id, request.params, &mut reader, writer, pid).await;
+            super::bridge::serve(
+                hub,
+                request.id,
+                request.params,
+                &mut reader,
+                writer,
+                pid,
+                None,
+            )
+            .await;
             return;
         }
         if placement.is_none() {

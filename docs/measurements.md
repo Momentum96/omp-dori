@@ -670,3 +670,18 @@ Total for this fix: 0.3411 USD in the test ledger, about 0.343 USD with the reco
 
 Run (from the worktree, the key in `OPENAI_API_KEY`):
 `CATALY_LIVE_VOICE_MAX_USD=0.72 CATALY_LIVE_VOICE_RECORDING=request.pcm cargo test --release --features voice --test live_voice -- --ignored --nocapture`.
+
+## Remote workers, phase 1 (2026-11-27, Linux x64, release build)
+
+Hub idle resident memory by the part A method (`VmRSS` 10 s after `status` first answers), one
+pressure job, no relays and no lead; then `cataly worker doctor box` leaves one idle worker
+connected (its `ssh` child is a separate process, not counted), and `VmRSS` again 10 s later. The
+worker is a second Cataly home on the same machine behind `tests/support/fake-ssh`.
+
+| What | Measured |
+| --- | --- |
+| Hub idle, no worker connected | 16.27 MiB (16,664 kB) |
+| Hub idle, one idle worker connected | 16.52 MiB (16,912 kB): +0.24 MiB |
+
+Steps: `worker add`, `worker init`, `worker add --host-key`, `cataly hub`, sleep 10,
+`grep VmRSS /proc/$P/status`, `worker doctor box`, sleep 10, `grep VmRSS` again.

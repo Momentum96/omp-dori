@@ -150,6 +150,10 @@ pub(crate) struct Record {
     /// The runtime the lane's session was started with; a resume or reopen stays on it (HOST req. 91).
     #[serde(default)]
     pub(crate) runtime: crate::config::session::RuntimeKind,
+    /// The worker the lane runs on (docs/design/workers.md 2.6); `None` runs it on this machine.
+    /// Its `cwd` and `worktrees` are then paths on that worker.
+    #[serde(default)]
+    pub(crate) worker: Option<String>,
 }
 
 pub(crate) const fn default_priority() -> u8 {
@@ -159,6 +163,11 @@ pub(crate) const fn default_priority() -> u8 {
 impl Record {
     pub(crate) fn open(&self) -> bool {
         self.state != State::Closed
+    }
+
+    /// Where the lane's per-machine work runs: here, or on its worker.
+    pub(crate) fn place(&self) -> crate::worker::Place {
+        crate::worker::Place::of(self.worker.as_deref())
     }
 
     /// The text of the state for listings.
@@ -200,6 +209,8 @@ pub(crate) struct OpenInput {
     pub(crate) after: Vec<String>,
     /// A queued launch expires after this many hours (LANE req. 23).
     pub(crate) expires_hours: Option<f64>,
+    /// A configured worker to run the lane on (docs/design/workers.md 2.6).
+    pub(crate) worker: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -227,6 +238,7 @@ pub(crate) struct Validated {
     pub(crate) worktree: Option<Worktree>,
     pub(crate) priority: u8,
     pub(crate) warnings: Vec<String>,
+    pub(crate) worker: Option<String>,
 }
 
 /// LANE req. 3.
@@ -267,6 +279,13 @@ pub(crate) fn model_error(model: &str) -> Option<String> {
 
 fn digits(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A name given with blanks around it, or nothing when it is blank.
+fn named(text: Option<&str>) -> Option<String> {
+    text.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// LANE req. 5: the exact form of a Discord, Telegram or Slack message reference.
@@ -439,12 +458,13 @@ pub(crate) fn validate(input: &OpenInput, settings: &LaneSettings) -> Result<Val
         worktree: input.worktree.clone(),
         priority,
         warnings,
+        worker: named(input.worker.as_deref()),
     })
 }
 
 /// A digest of the inputs for request-ID dedupe (LANE req. 10); the brief is only hashed.
 pub(crate) fn digest(input: &OpenInput) -> String {
-    let doc = serde_json::json!([
+    let mut doc = serde_json::json!([
         input.key,
         input.title,
         input.brief,
@@ -460,6 +480,10 @@ pub(crate) fn digest(input: &OpenInput) -> String {
         input.priority,
         input.after,
     ]);
+    // Added last and only when set, so digests of earlier local opens stay the same.
+    if let (Some(worker), Some(list)) = (&input.worker, doc.as_array_mut()) {
+        list.push(serde_json::json!(worker));
+    }
     crate::config::sha256_hex(doc.to_string().as_bytes())
 }
 

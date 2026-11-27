@@ -802,8 +802,12 @@ impl Discord {
         state_dir: &Path,
         fields: &[&'static str],
     ) -> Result<(), String> {
-        let data =
-            |bytes: &[u8]| Value::String(format!("data:image/jpeg;base64,{}", base64(bytes)));
+        let data = |bytes: &[u8]| {
+            Value::String(format!(
+                "data:image/jpeg;base64,{}",
+                crate::sys::base64::encode(bytes)
+            ))
+        };
         let chosen = || IMAGES.iter().filter(|(f, _)| fields.contains(f));
         let mut user = serde_json::Map::new();
         let mut app = serde_json::Map::new();
@@ -894,29 +898,6 @@ fn read_record(state_dir: &Path, me: &Value) -> serde_json::Map<String, Value> {
         .and_then(|bytes| serde_json::from_slice::<serde_json::Map<String, Value>>(&bytes).ok())
         .filter(|r| r.get("bot").is_some() && r.get("bot") == me.get("id"))
         .unwrap_or_default()
-}
-
-/// Standard base64 with padding.
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk.first().copied().unwrap_or(0),
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
-            if i <= chunk.len() {
-                let index = usize::try_from((n >> shift) & 63).unwrap_or(0);
-                out.push(char::from(TABLE.get(index).copied().unwrap_or(b'A')));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 /// The config with the guild, owner, the lead's channel and the `cataly-ops` destination; a
@@ -1182,12 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn base64_matches_the_standard_and_the_images_are_jpegs() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    fn the_images_are_jpegs() {
         for (field, bytes) in IMAGES {
             assert!(bytes.starts_with(&[0xFF, 0xD8, 0xFF]), "{field}");
             assert!(bytes.len() <= 512 * 1024, "{field}");

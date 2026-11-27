@@ -186,6 +186,29 @@ fn publish_in_place(path: &Path, before: &Snapshot, bytes: &[u8]) -> Result<(), 
     }
 }
 
+/// Removes `[section]` with its lines, up to the next header; every other byte is kept. Comment
+/// lines just above the next header stay with that header.
+pub(crate) fn remove_section(text: &str, section: &str) -> String {
+    let header = format!("[{section}]");
+    let mut inside = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let bare = line.split('#').next().unwrap_or_default().trim();
+        if bare.starts_with('[') {
+            inside = bare == header;
+        }
+        if !inside {
+            out.push_str(line);
+        }
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\n")
+    }
+}
+
 /// Removes `key`'s line from `[section]`, keeping every other byte as it is; `None` when the section
 /// has no such line. The counterpart of [`set_rendered`] for a key that went away.
 pub(crate) fn remove_key(text: &str, section: &str, key: &str) -> Option<String> {
@@ -398,6 +421,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), old);
         assert_eq!(remove_obsolete_hold(&path), Cleanup::Nothing);
+    }
+
+    #[test]
+    fn remove_section_takes_out_one_table() {
+        let text = "[hub]\nlog_level = \"info\"\n\n[workers.a]\ndestination = \"d@a\"\n\n[workers.b]\ndestination = \"d@b\"\n";
+        assert_eq!(
+            remove_section(text, "workers.a"),
+            "[hub]\nlog_level = \"info\"\n\n[workers.b]\ndestination = \"d@b\"\n"
+        );
+        assert_eq!(
+            remove_section(text, "workers.b"),
+            "[hub]\nlog_level = \"info\"\n\n[workers.a]\ndestination = \"d@a\"\n"
+        );
+        assert_eq!(remove_section(text, "workers.c"), text);
+        assert_eq!(remove_section("[workers.a]\nx = 1\n", "workers.a"), "");
     }
 
     #[test]

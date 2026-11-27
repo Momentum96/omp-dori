@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::sys::command::{self, Output, Spec};
+use crate::worker::Place;
 
 /// GitHub reads and commands (EVR req. 57).
 const LIMIT: Duration = Duration::from_secs(120);
@@ -190,18 +191,23 @@ fn split_url(url: &str) -> Result<(String, String), String> {
 /// Git and gh run with their redirecting variables removed and the C locale (LANE req. 60).
 pub(crate) const CLEAN_ENV: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_TERMINAL_PROMPT", "0")];
 
-async fn run(argv: &[String], cwd: &Path, limit: Duration) -> Result<(bool, String), String> {
-    let finished = command::run(&Spec {
-        argv,
-        cwd: Some(cwd),
-        env: &CLEAN_ENV,
-        timeout: limit,
-        kill_grace: command::KILL_GRACE,
-        output_cap: OUTPUT_CAP,
-        output: Output::Capture,
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+async fn run(
+    place: &Place,
+    argv: &[String],
+    cwd: &Path,
+    limit: Duration,
+) -> Result<(bool, String), String> {
+    let finished = place
+        .run(&Spec {
+            argv,
+            cwd: Some(cwd),
+            env: &CLEAN_ENV,
+            timeout: limit,
+            kill_grace: command::KILL_GRACE,
+            output_cap: OUTPUT_CAP,
+            output: Output::Capture,
+        })
+        .await?;
     if finished.timed_out {
         return Err(format!("no answer within {} s", limit.as_secs()));
     }
@@ -261,15 +267,73 @@ fn field<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
         })
 }
 
+/// Where a lane's checks run (docs/design/workers.md 2.7): `command` and `file` where the lane works,
+/// in its directory; `pr_merged`, `issue_closed`, `web` and `pr_policy` on the hub, with its `gh`
+/// login, from `hub_dir`.
+pub(crate) struct Site<'a> {
+    pub(crate) place: &'a Place,
+    pub(crate) cwd: &'a Path,
+    pub(crate) hub_dir: &'a Path,
+}
+
+/// This machine, for lanes that run here.
+static HERE: Place = Place::Local;
+
+impl Site<'_> {
+    /// A lane on this machine: everything runs here, in its directory.
+    pub(crate) fn local(cwd: &Path) -> Site<'_> {
+        Site {
+            place: &HERE,
+            cwd,
+            hub_dir: cwd,
+        }
+    }
+
+    /// Where `signal` runs.
+    fn of(&self, signal: &Signal) -> &str {
+        match signal {
+            Signal::Command { .. } | Signal::File { .. } => self.place.name(),
+            _ => Place::Local.name(),
+        }
+    }
+}
+
+/// A `file` signal's bytes against its hash and JSON field, checked here wherever they were read.
+fn file(
+    bytes: &[u8],
+    sha256: Option<&str>,
+    key: Option<&str>,
+    value: Option<&Value>,
+) -> Result<String, String> {
+    if let Some(want) = sha256 {
+        let got = crate::config::sha256_hex(bytes);
+        if !got.eq_ignore_ascii_case(want) {
+            return Err(format!("hash {}", got.get(..12).unwrap_or_default()));
+        }
+    }
+    if let Some(key) = key {
+        let doc: Value = serde_json::from_slice(bytes).map_err(|_| "not JSON".to_string())?;
+        let got = field(&doc, key);
+        if got != value {
+            return Err(format!(
+                "{key} is {}",
+                got.map_or("absent".into(), Value::to_string)
+            ));
+        }
+    }
+    Ok("present".into())
+}
+
 /// One signal read back live.
 async fn check(
     signal: &Signal,
-    cwd: &Path,
+    site: &Site<'_>,
     identities: &[(String, String)],
 ) -> Result<String, String> {
+    let (cwd, hub) = (site.cwd, site.hub_dir);
     match signal {
         Signal::PrMerged { repo, number } => {
-            let pr = gh(&format!("repos/{repo}/pulls/{number}"), cwd).await?;
+            let pr = gh(&format!("repos/{repo}/pulls/{number}"), hub).await?;
             let merged = pr.get("merged").and_then(Value::as_bool) == Some(true);
             match pr.get("merge_commit_sha").and_then(Value::as_str) {
                 Some(sha) if merged => Ok(format!("merged as {sha}")),
@@ -277,14 +341,14 @@ async fn check(
             }
         }
         Signal::IssueClosed { repo, number } => {
-            let issue = gh(&format!("repos/{repo}/issues/{number}"), cwd).await?;
+            let issue = gh(&format!("repos/{repo}/issues/{number}"), hub).await?;
             match issue.get("state").and_then(Value::as_str) {
                 Some("closed") => Ok("closed".into()),
                 other => Err(format!("state {}", other.unwrap_or("unknown"))),
             }
         }
         Signal::Command { argv, pattern } => {
-            let (ok, out) = run(argv, cwd, LIMIT).await?;
+            let (ok, out) = run(site.place, argv, cwd, LIMIT).await?;
             if !ok {
                 return Err("exited with a failure".into());
             }
@@ -300,26 +364,18 @@ async fn check(
             field: key,
             value,
         } => {
-            let file = resolve(path, cwd);
-            let bytes = std::fs::read(&file).map_err(|e| format!("not readable: {e}"))?;
-            if let Some(want) = sha256 {
-                let got = crate::config::sha256_hex(&bytes);
-                if !got.eq_ignore_ascii_case(want) {
-                    return Err(format!("hash {}", got.get(..12).unwrap_or_default()));
+            let bytes = match site.place {
+                Place::Local => {
+                    std::fs::read(resolve(path, cwd)).map_err(|e| format!("not readable: {e}"))?
                 }
-            }
-            if let Some(key) = key {
-                let doc: Value =
-                    serde_json::from_slice(&bytes).map_err(|_| "not JSON".to_string())?;
-                let got = field(&doc, key);
-                if got != value.as_ref() {
-                    return Err(format!(
-                        "{key} is {}",
-                        got.map_or("absent".into(), Value::to_string)
-                    ));
-                }
-            }
-            Ok("present".into())
+                // On a worker the path is the worktree's; its home is not the hub's.
+                Place::Worker(_) => site
+                    .place
+                    .read(&cwd.join(path), crate::worker::FILE_MAX)
+                    .await
+                    .map_err(|e| format!("not readable: {e}"))?,
+            };
+            file(&bytes, sha256.as_deref(), key.as_deref(), value.as_ref())
         }
         Signal::Web {
             url,
@@ -362,7 +418,7 @@ async fn check(
                 _ => Ok(format!("status {want}")),
             }
         }
-        Signal::PrPolicy { repo, number } => policy(repo, *number, cwd, identities).await,
+        Signal::PrPolicy { repo, number } => policy(repo, *number, hub, identities).await,
     }
 }
 
@@ -453,16 +509,21 @@ async fn policy(
     Ok("policy holds".into())
 }
 
-/// Reads every signal back live, in parallel (EVR req. 56).
+/// Reads every signal back live, in parallel (EVR req. 56). A worker lane's signals name where they
+/// ran (docs/design/workers.md 2.7).
 pub(crate) async fn run_all(
     signals: &[Signal],
-    cwd: &Path,
+    site: &Site<'_>,
     identities: &[(String, String)],
 ) -> Vec<Outcome> {
     let futures = signals.iter().map(|s| async move {
-        let result = check(s, cwd, identities).await;
+        let result = check(s, site, identities).await;
+        let signal = match site.place {
+            Place::Local => s.name(),
+            Place::Worker(_) => format!("{} ({})", s.name(), site.of(s)),
+        };
         Outcome {
-            signal: s.name(),
+            signal,
             pass: result.is_ok(),
             detail: cut(&result.unwrap_or_else(|e| e)),
         }
@@ -511,7 +572,7 @@ mod tests {
             { "kind": "file", "path": "a.json", "field": "v.n", "value": 3 }
         ]))
         .unwrap();
-        let out = run_all(&signals, &dir, &[]).await;
+        let out = run_all(&signals, &Site::local(&dir), &[]).await;
         let pass: Vec<bool> = out.iter().map(|o| o.pass).collect();
         assert_eq!(pass, [true, false, true, false]);
         assert!(out.iter().all(|o| o.detail.chars().count() <= DETAIL));

@@ -1,0 +1,14 @@
+#!/bin/sh
+# A fake `tailscale` for the worker tests. `tailscale ip -4 <machine>` prints the address in
+# tailscale-data/<machine> (exit 1 when the machine is unknown); `tailscale ip` prints
+# tailscale-data/self.
+dir=$(cd "$(dirname "$0")" && pwd)/tailscale-data
+[ "$1" = ip ] || exit 2
+shift
+[ "$1" = -4 ] && shift
+if [ $# -eq 0 ]; then
+    cat "$dir/self"
+    exit 0
+fi
+[ -f "$dir/$1" ] || { echo "no such peer: $1" >&2; exit 1; }
+cat "$dir/$1"

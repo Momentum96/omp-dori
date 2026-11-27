@@ -224,6 +224,29 @@ pub(crate) fn plan(
     }
 }
 
+/// The lead's start spec: always on this machine, never on a worker.
+fn lead_spec(
+    handle: String,
+    settings: &crate::config::session::LeadSettings,
+    cwd: PathBuf,
+    target: Target,
+    expected_id: Option<String>,
+) -> StartSpec {
+    StartSpec {
+        handle,
+        role: Role::Lead,
+        cwd,
+        model: settings.model.clone(),
+        thinking: settings.thinking.clone(),
+        target,
+        expected_id,
+        instructions: settings.instructions.clone(),
+        max_cost: None,
+        tools: None,
+        worker: None,
+    }
+}
+
 /// The note for a resume after anything but a clean close; a sleep records how its close went.
 fn unclean(row: &SessionRow) -> Option<String> {
     match (
@@ -668,18 +691,7 @@ impl<R: Runtime> Lead<R> {
             .await
             .map_err(|e| e.to_string())?;
         self.set_phase(Phase::Starting, None);
-        let spec = StartSpec {
-            handle: handle.clone(),
-            role: Role::Lead,
-            cwd,
-            model: settings.model.clone(),
-            thinking: settings.thinking.clone(),
-            target,
-            expected_id: expected.clone(),
-            instructions: settings.instructions.clone(),
-            max_cost: None,
-            tools: None,
-        };
+        let spec = lead_spec(handle.clone(), &settings, cwd, target, expected);
         match runtime.start(spec).await {
             Ok((session, started)) => {
                 self.bound(handle, session, &started, how, note).await;

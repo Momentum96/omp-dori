@@ -196,24 +196,47 @@ fn cut(text: &str, max: usize) -> String {
     super::evidence::cut(&super::evidence::display(text), max)
 }
 
+/// The lanes as the ops panel counts them.
+#[derive(Debug, Default)]
+pub(crate) struct OpsCounts {
+    /// Open lanes whose session is working.
+    pub(crate) running: usize,
+    /// The other open lanes.
+    pub(crate) waiting: usize,
+    /// The model of each live lane session (`provider/id`, or the requested selector until OMP
+    /// names one).
+    pub(crate) models: Vec<String>,
+    /// Per worker: its open lanes, and how many of them are lost and wait for it to come back.
+    pub(crate) workers: std::collections::HashMap<String, (usize, usize)>,
+}
+
 impl<R: Runtime> Lanes<R> {
-    /// Lanes for the ops panel: working, the other open ones, and the model of each live lane
-    /// session (`provider/id`, or the requested selector until OMP names one).
-    pub(crate) async fn ops_counts(&self) -> (usize, usize, Vec<String>) {
+    /// Lanes for the ops panel.
+    pub(crate) async fn ops_counts(&self) -> OpsCounts {
         let rows = self
             .env
             .store
             .read(|r| r.lanes(true))
             .await
             .unwrap_or_default();
-        let running = rows
-            .iter()
-            .filter(|row| {
-                self.session(&row.key)
-                    .is_some_and(|s| s.snapshot().status == Status::Working)
-            })
-            .count();
-        let models = self
+        let mut counts = OpsCounts::default();
+        for row in &rows {
+            if self
+                .session(&row.key)
+                .is_some_and(|s| s.snapshot().status == Status::Working)
+            {
+                counts.running += 1;
+            }
+            if let Ok(rec) = serde_json::from_str::<Record>(&row.record)
+                && let Some(worker) = rec.worker
+            {
+                let on = counts.workers.entry(worker).or_default();
+                on.0 += 1;
+                on.1 += usize::from(rec.lost.is_some());
+            }
+        }
+        counts.waiting = rows.len() - counts.running;
+        counts.models = self
             .live_map()
             .values()
             .filter(|s| s.alive())
@@ -224,7 +247,7 @@ impl<R: Runtime> Lanes<R> {
                     .unwrap_or_else(|| snap.requested_model.clone())
             })
             .collect();
-        (running, rows.len() - running, models)
+        counts
     }
 
     /// The body (EVR req. 51), without the update time when `stamp` is false.

@@ -181,6 +181,19 @@ Telegram and Slack pass their tests but have seen less real use.
 
 </td></tr></table>
 
+## Several PCs
+
+One hub and one bot can use other machines as workers over SSH (optionally over Tailscale).
+On the hub run `cataly worker add user@host`; it prints a `cataly worker init` line to run on the
+other machine, which allows the hub's key only for Cataly's worker mode and prints the machine's
+host-key fingerprint. Then `cataly worker add user@host --host-key SHA256:…` pins it and checks the
+connection; `cataly worker list` and `cataly worker doctor` show its state. Lanes there run tools
+with that user's rights, so a dedicated OS user is recommended. Ask for a lane "on linux-box" (or
+name a platform only that machine has) and the lead opens it there: the worker uses its own clone
+of the repository at a pushed commit, so uncommitted edits on the hub stay behind, and the thread's
+first line says so. If the worker is offline the lane waits and starts once it is reachable; if
+the connection drops, the lane resumes on the same session when the worker is back.
+
 ## Help
 
 Problems and ideas: [Issues](https://github.com/vntrevx/Cataly/issues). Please

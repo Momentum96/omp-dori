@@ -99,6 +99,10 @@ pub(crate) enum EventKind {
     LaneRecap,
     /// A queued launch became ready, held or expired (LANE req. 25).
     LaneQueued,
+    /// A worker's connection dropped or failed (docs/design/workers.md 2.9); once per change.
+    WorkerOffline,
+    /// A worker answers again after it was offline; once per change.
+    WorkerOnline,
     /// A planner pass summary (COORD req. 34).
     PlannerRun,
     /// An item question for the owner, through the lead (COORD req. 32).
@@ -121,7 +125,7 @@ type KindRow = (
     &'static str,
 );
 
-const KINDS: [KindRow; 66] = [
+const KINDS: [KindRow; 68] = [
     (
         EventKind::HubStarted,
         "hub.started",
@@ -492,6 +496,18 @@ const KINDS: [KindRow; 66] = [
         "lane.queued",
         &["lane", "detail"],
         "queued launch {lane} {detail}",
+    ),
+    (
+        EventKind::WorkerOffline,
+        "worker.offline",
+        &["worker", "detail"],
+        "worker {worker} is offline: {detail}",
+    ),
+    (
+        EventKind::WorkerOnline,
+        "worker.online",
+        &["worker"],
+        "worker {worker} is back online",
     ),
     (
         EventKind::PlannerRun,

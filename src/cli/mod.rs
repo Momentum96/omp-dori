@@ -11,6 +11,7 @@ mod setup_discord;
 mod setup_voice;
 mod slot;
 mod transcribe;
+mod worker;
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -160,15 +161,23 @@ fn execute(p: &Parsed, paths: &Paths) -> Result<(), Failure> {
     }
     if matches!(
         p.spec.path,
-        ["install" | "update" | "rollback" | "uninstall"] | ["service", _]
+        ["install" | "update" | "rollback" | "uninstall"]
+            | ["service", _]
+            | ["worker", "add" | "init"]
     ) {
         owner_only(paths)?;
+    }
+    if let Some(done) = worker::local(p, paths) {
+        return done;
     }
     if let Some(done) = install::run(p, paths) {
         return done;
     }
     let mut hub = Client::connect(&paths.socket)?;
     if let Some(done) = owner_verbs(p, &mut hub, as_json) {
+        return done;
+    }
+    if let Some(done) = worker::remote(p, &mut hub, as_json) {
         return done;
     }
     match p.spec.path {
@@ -477,6 +486,9 @@ fn print_status(s: &Status) {
             "tasks    {} restarts, {} panics",
             s.task_restarts, s.panics
         ));
+    }
+    for w in &s.workers {
+        out::line(&format!("worker   {}", worker::describe(w)));
     }
 }
 

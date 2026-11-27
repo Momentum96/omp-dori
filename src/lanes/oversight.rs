@@ -349,12 +349,16 @@ impl<R: Runtime> Lanes<R> {
             }
         }
         self.recover().await;
+        // A worker that connects or drops wakes the sweep: a lost lane reattaches, a queued one
+        // starts (docs/design/workers.md 2.4, 2.6).
+        let mut workers = crate::worker::link::registry().map(|w| w.changes());
         loop {
             if *stop.borrow() {
                 return Ok(());
             }
             let o = self.cfg().lanes.oversight.clone();
             let mut next = if o.enabled { self.pass(&o).await } else { None };
+            self.reattach().await;
             self.queue_sweep().await;
             if let Some(board) = self.board_tick().await {
                 next = Some(next.map_or(board, |n| n.min(board)));
@@ -365,10 +369,17 @@ impl<R: Runtime> Lanes<R> {
                     Duration::from_millis(u64::try_from(at - now).unwrap_or(0))
                 })
                 .min(o.sweep)
+                // A lane waiting for a worker that failed is tried again when its minute is over.
+                .min(
+                    crate::worker::link::registry()
+                        .and_then(|w| w.next_retry())
+                        .unwrap_or(Duration::MAX),
+                )
                 .max(Duration::from_millis(200));
             tokio::select! {
                 () = self.nudge.notified() => {}
                 () = tokio::time::sleep(sleep) => {}
+                () = worker_change(&mut workers) => {}
                 _ = stop.changed() => {}
             }
         }
@@ -456,7 +467,9 @@ impl<R: Runtime> Lanes<R> {
         };
         let mut due = decide(&rec.watch, &facts, o);
         if due.stuck {
-            facts.sample_complete = super::git::sample(Path::new(&rec.cwd)).await.is_some();
+            facts.sample_complete = super::git::sample(&rec.place(), Path::new(&rec.cwd))
+                .await
+                .is_some();
             due = decide(&rec.watch, &facts, o);
         }
         self.thread_quiet(rec, last.as_ref(), o, now).await;
@@ -495,6 +508,7 @@ impl<R: Runtime> Lanes<R> {
                 rec.run_id, rec.watch.round_ms
             )),
             true,
+            false,
         )
         .await;
         self.keep(&rec.key, |r| r.watch.reminders = r.watch.reminders.max(n))
@@ -627,6 +641,16 @@ impl<R: Runtime> Lanes<R> {
         }
         true
     }
+}
+
+/// The next change of the workers' connections; never, without a worker table.
+async fn worker_change(rx: &mut Option<watch::Receiver<u64>>) {
+    if let Some(rx) = rx
+        && rx.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
 }
 
 #[cfg(test)]

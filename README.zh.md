@@ -147,6 +147,10 @@ cataly setup
 
 </td></tr></table>
 
+## 多台电脑
+
+一个中枢、一个机器人即可通过 SSH（也可经由 Tailscale）把其他机器当作工作机。在中枢上运行 `cataly worker add user@host`，它会给出一行在另一台机器上运行的 `cataly worker init`：它只允许中枢的密钥进入 Cataly 的工作机模式，并显示主机密钥指纹。然后用 `cataly worker add user@host --host-key SHA256:…` 固定并检查连接；`cataly worker list` 和 `cataly worker doctor` 显示状态。那里的通道以该用户的权限运行工具，因此建议使用专用的系统用户。请求“在 linux-box 上”开一个通道（或说出只有那台机器有的平台），主导就会在那里打开它：工作机用自己的仓库克隆，停在已推送的提交上，中枢上未提交的修改不会带过去，线程第一行会说明这一点。工作机离线时通道会等待，连上后自动开始；连接中断后，工作机回来时通道在同一会话上继续。
+
 ## 帮助
 
 问题和想法：[Issues](https://github.com/vntrevx/Cataly/issues)。请不要在公开报告中包含令牌、ID 和私人对话记录。

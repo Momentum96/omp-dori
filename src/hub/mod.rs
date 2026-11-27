@@ -70,6 +70,7 @@ pub(crate) struct Hub {
     pub(crate) telegram: Arc<crate::relay::intake::Shared>,
     pub(crate) slack: Arc<crate::relay::intake::Shared>,
     links: Arc<crate::host::bridge::Links>,
+    workers: Arc<crate::worker::link::Workers>,
     streams: Arc<streams::Streams>,
     #[cfg(feature = "voice")]
     pub(crate) voice: Arc<voice::Voice<Hosted>>,
@@ -121,6 +122,7 @@ impl Hub {
             quota_gate: crate::proto::legacy_gate(),
             lead,
             resumed: self.resumed(),
+            workers: self.workers.list(),
         })
     }
 
@@ -408,6 +410,16 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     }
     let links = Arc::new(crate::host::bridge::Links::default());
     let lead_cwd = stream_cwd(&config_rx.borrow());
+    let workers = crate::worker::link::Workers::new(
+        config_rx.clone(),
+        &paths.config_file,
+        paths.logs_dir.clone(),
+        store.clone(),
+    );
+    {
+        let (workers, stop) = (Arc::clone(&workers), shutdown_rx.clone());
+        supervisor.spawn("workers", move || Arc::clone(&workers).run(stop.clone()));
+    }
     let streams = streams::Streams::new(
         jobs.clone(),
         store.clone(),
@@ -423,6 +435,7 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         &supervisor,
         &shutdown_rx,
         &links,
+        &workers,
     );
     let hub = Arc::new(Hub {
         paths: paths.clone(),
@@ -440,10 +453,20 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
         telegram: relays.telegram,
         slack: relays.slack,
         links,
+        workers,
         streams: Arc::clone(&streams),
         #[cfg(feature = "voice")]
         voice: relays.voice,
     });
+    {
+        // A worker's bridge channels reach the bridge, scoped to that worker's lanes (design 2.5).
+        let weak = Arc::downgrade(&hub);
+        hub.workers.set_hook(Arc::new(move |worker, accepted| {
+            if let Some(hub) = weak.upgrade() {
+                tokio::spawn(bridge::from_worker(hub, worker, accepted.stream));
+            }
+        }));
+    }
     {
         let (hub, listener) = (Arc::clone(&hub), Arc::clone(&listener));
         supervisor.spawn("control", move || {
@@ -474,6 +497,8 @@ async fn serve(paths: &Paths, config: Config, store: Store, cleanup: Cleanup) ->
     lead.shutdown().await;
     // Lanes end their input; the next hub brings them back on their files (decision 9).
     lanes.shutdown().await;
+    // Then the worker connections: a worker closes what is left of its lanes when its stream ends.
+    hub.workers.shutdown().await;
     // Running job children get TERM, then KILL after the grace; their real end is recorded.
     jobs.drain(KILL_GRACE * 2 + Duration::from_secs(2)).await;
     let _ = std::fs::remove_file(&paths.socket);
@@ -509,9 +534,11 @@ fn sessions(
     supervisor: &Supervisor,
     shutdown: &watch::Receiver<bool>,
     links: &Arc<crate::host::bridge::Links>,
+    workers: &Arc<crate::worker::link::Workers>,
 ) -> Sessions {
     let agent_start = Latency::default();
     let events = hub_events(jobs);
+    workers.set_events(Arc::clone(&events));
     let lead = Lead::new(LeadEnv {
         config: config.clone(),
         omp: Arc::clone(omp),
@@ -540,7 +567,7 @@ fn sessions(
         let (lanes, stop) = (Arc::clone(&lanes), shutdown.clone());
         supervisor.spawn("lanes", move || Arc::clone(&lanes).run(stop.clone()));
     }
-    ops_people(jobs, &lead, &lanes);
+    ops_people(jobs, &lead, &lanes, workers);
     {
         let (slots, stop) = (Arc::clone(&lanes.slots), shutdown.clone());
         supervisor.spawn("slots", move || Arc::clone(&slots).run(stop.clone()));
@@ -721,16 +748,37 @@ fn lanes(
 }
 
 /// The lead and the lanes as the ops panel shows them.
-fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::Lanes<Hosted>>) {
+fn ops_people(
+    jobs: &Jobs,
+    lead: &Arc<Lead<Hosted>>,
+    lanes: &Arc<crate::lanes::Lanes<Hosted>>,
+    workers: &Arc<crate::worker::link::Workers>,
+) {
     use crate::host::Status;
     use crate::host::lead::Phase;
+    use crate::jobs::ops::render::WorkerLine;
     use crate::jobs::ops::render::{LeadState, People};
-    let (lead, lanes) = (Arc::clone(lead), Arc::clone(lanes));
+    let (lead, lanes, workers) = (Arc::clone(lead), Arc::clone(lanes), Arc::clone(workers));
     jobs.ctx().ops.set_people(Arc::new(move || {
         let (lead, lanes) = (Arc::clone(&lead), Arc::clone(&lanes));
+        let views = workers.list();
         Box::pin(async move {
             let view = lead.view().await;
-            let (running, waiting, lane_models) = lanes.ops_counts().await;
+            let counts = lanes.ops_counts().await;
+            // A worker's lanes are its open lane records, lost ones included.
+            let workers: Vec<WorkerLine> = views
+                .into_iter()
+                .map(|w| {
+                    let (open, lost) = counts.workers.get(&w.name).copied().unwrap_or_default();
+                    WorkerLine {
+                        name: w.display,
+                        state: w.state,
+                        lanes: open,
+                        lost,
+                        max: w.lanes_max,
+                    }
+                })
+                .collect();
             let state = match (&view.session, &view.phase) {
                 (Some(s), _) if s.quota_blocked.is_some() => LeadState::Held,
                 (Some(s), _) => match s.status {
@@ -752,13 +800,14 @@ fn ops_people(jobs: &Jobs, lead: &Arc<Lead<Hosted>>, lanes: &Arc<crate::lanes::L
                 .map(|s| s.model.clone().unwrap_or_else(|| s.requested_model.clone()))
                 .into_iter()
                 .collect();
-            models.extend(lane_models);
+            models.extend(counts.models);
             People {
                 lead: state,
                 model: view.session.and_then(|s| s.model),
-                running,
-                waiting,
+                running: counts.running,
+                waiting: counts.waiting,
                 models,
+                workers,
             }
         })
     }));

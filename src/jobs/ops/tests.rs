@@ -472,6 +472,7 @@ fn the_live_omp_usage_renders_named_providers_and_green() {
         running: 0,
         waiting: 0,
         models: vec!["anthropic/claude-opus-5-5".into()],
+        workers: Vec::new(),
     };
     p.host.sessions = p.people.models.len();
     for (lang, words) in [

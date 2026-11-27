@@ -58,7 +58,8 @@ rusqlite = { version = "0.41.1", default-features = false, features = ["bundled"
 rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "process", "termios"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
-tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "process", "time", "signal", "sync", "io-util", "macros"] }
+# `io-std`: worker mode speaks its stream on stdin and stdout (docs/design/workers.md 2.2).
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "net", "process", "time", "signal", "sync", "io-util", "io-std", "macros"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 toml = { version = "0.9.12", default-features = false, features = ["std", "parse", "serde"] }

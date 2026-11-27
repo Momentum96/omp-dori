@@ -731,6 +731,44 @@ alerts = { github = false }
 
 ---
 
+## `[workers.<name>]`
+
+Other machines (or other OS users) that run lanes for this hub over SSH. `cataly worker add`
+writes a section; `cataly worker remove` takes it out. Enrolment, the forced command and the
+security boundary are described in `docs/design/workers.md`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `destination` | string | required | `user@host`; with `tailscale`, the host is the tailnet IP |
+| `port` | integer 1-65535 | `22` | The worker's sshd port; a pin on another port is `[host]:port` |
+| `name` | string | the section name | The name shown (the tailnet machine name with `tailscale`) |
+| `tailscale` | bool | `false` | `worker doctor` checks the address again with `tailscale ip` |
+| `repos` | list of strings | `[]` | Git origins (normalised to `host/owner/name`): placement evidence and doctor checks |
+| `lanes` | integer 1-8 | `1` | Remote lanes at once |
+
+Files: the hub's key `<config>/secrets/worker-<name>` (0600), the pins `<config>/known_hosts`,
+the hub ID `<config>/hub-id`. On the worker: `<config>/worker.toml` (`omp` path and `PATH`, written
+by `worker init`) and the root `<state>/worker/<hub id>/`. Worker states are kept in the store as
+coordination documents of kind `worker` (no schema migration).
+
+Lanes on a worker: `lane.open` takes `worker = <name>` (the lead sets it only from evidence). The
+worker keeps one bare clone per Git origin under `<root>/repos/` and a worktree per lane under
+`<root>/lanes/<key>`, at a commit that must be on the origin; the session file stays under
+`<root>/sessions/`. A remote lane counts toward `[lanes] max` and the worker's `lanes`, not toward
+`[sessions] cap`; it runs headless only. `repos` is placement evidence, not an allow-list.
+
+```toml
+[workers.linux-box]
+destination = "dev@100.101.102.103"
+port = 2222
+name = "linux-box"
+tailscale = true
+repos = ["github.com/vntrevx/cataly-core"]
+lanes = 1
+```
+
+---
+
 ## `[destinations.<name>]`
 
 Where job events go besides the store and the event log. The name `log` is reserved: it is the
