@@ -596,18 +596,29 @@ pub(super) fn maintain(tx: &Transaction<'_>, now: i64) -> rusqlite::Result<()> {
 }
 
 impl Reads {
-    /// The newest session record of a role.
-    pub(crate) fn latest_session(&self, role: &str) -> rusqlite::Result<Option<SessionRow>> {
-        self.0
-            .query_row(
-                &format!(
-                    "SELECT {SESSION_COLUMNS} FROM sessions WHERE role = ?1 \
-                     ORDER BY started_ms DESC, rowid DESC LIMIT 1"
-                ),
-                [role],
-                session_from_row,
-            )
-            .optional()
+    /// A failed, unbound resume records an attempt, not a new lead identity. A failed fresh start
+    /// still supersedes earlier sessions.
+    pub(crate) fn lead_resume_record(&self) -> rusqlite::Result<(Option<SessionRow>, bool)> {
+        let read = |skip_failed_resume| {
+            self.0
+                .query_row(
+                    &format!(
+                        "SELECT {SESSION_COLUMNS} FROM sessions WHERE role = 'lead' \
+                         AND (NOT ?1 OR NOT (mode = 'resume' AND state = 'failed' AND session_id IS NULL)) \
+                         ORDER BY started_ms DESC, rowid DESC LIMIT 1"
+                    ),
+                    [skip_failed_resume],
+                    session_from_row,
+                )
+                .optional()
+        };
+        let last = read(false)?;
+        if last.as_ref().is_some_and(|row| {
+            row.mode == "resume" && row.state == "failed" && row.session_id.is_none()
+        }) {
+            return Ok((read(true)?, true));
+        }
+        Ok((last, false))
     }
 
     /// Records left starting or live (recovery, HOST req. 85).

@@ -124,6 +124,9 @@ the lead session through Cataly commands, and the Cataly OMP extension running i
 
 23. After spawn the daemon waits at most 15 s for the ready frame. A non-ready first frame, a protocol it does not
     support, or a timeout ends the start: the child is closed (HOST-20) and the record marked failed with reason.
+    After a ready timeout on an automatic lead resume, a reaped child is eligible for the lead's existing
+    restart backoff. Each retry checks the lease before resuming the same transcript. An unbound failed
+    resume attempt does not supersede the session it tried to resume.
 24. Then it sends get_state. The answer must carry a non-empty session id and an absolute transcript path. A
     second get_state must report the same pair. The pair is then bound to the session handle.
 25. The transcript file may be absent until OMP writes the first entry. If it is still absent at the first idle

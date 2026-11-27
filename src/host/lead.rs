@@ -9,9 +9,10 @@
 //! Resume rule (acceptance check 12): the lead resumes its last session (same ID and file) after a
 //! clean close; after an unclean stop with a free lease it resumes with a note; with a held lease it
 //! is reported and not started. A configured lead session ID must be resumed exactly. When its OMP
-//! exits by itself the lead is restarted on the same session with backoff, and held for the owner
-//! after more than 5 restarts in 10 minutes (DESIGN 2.2). A lead idle for `[lead] idle_sleep` is put
-//! to sleep and woken on the same session when a message needs it ([`sleep`]).
+//! exits by itself or misses the ready deadline on an automatic resume, the lead is restarted on the
+//! same session with backoff, and held for the owner after more than 5 restarts in 10 minutes
+//! (DESIGN 2.2). A lead idle for `[lead] idle_sleep` is put to sleep and woken on the same session
+//! when a message needs it ([`sleep`]).
 
 mod sleep;
 
@@ -315,6 +316,7 @@ pub(crate) struct Lead<R: Runtime> {
     restarts: Mutex<Restarts>,
     /// The hub asked the current child to close, so its end is no exit by itself.
     closing: AtomicBool,
+    shutting_down: AtomicBool,
     /// Internal `deliver` call to the prompt line written (DESIGN 2.3 wake, hub part).
     pub(crate) wake_latency: Latency,
     /// Prompt line written to the entry found in the session file.
@@ -349,6 +351,7 @@ impl<R: Runtime> Lead<R> {
             overlay: OnceLock::new(),
             restarts: Mutex::new(Restarts::default()),
             closing: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
             wake_latency: Latency::default(),
             confirm_latency: Latency::default(),
             followers: broadcast::channel(256).0,
@@ -417,24 +420,28 @@ impl<R: Runtime> Lead<R> {
                 if self.restart_wait() == Some(Duration::ZERO) {
                     self.restart().await;
                 }
-                waking = self.wants_wake().await;
-                if waking || self.wants_autostart() {
-                    match self.start(false).await {
-                        Ok(view) => {
-                            if waking {
-                                let session = view.session.and_then(|s| s.session_id);
-                                log::info(
-                                    "lead woke",
-                                    &[("session", &session.unwrap_or_default())],
-                                );
+                {
+                    let _one = self.starting.lock().await;
+                    waking = self.wants_wake().await;
+                    if waking || self.wants_autostart() {
+                        *self.restarts() = Restarts::default();
+                        match self.launch(false, None, true).await {
+                            Ok(view) => {
+                                if waking {
+                                    let session = view.session.and_then(|s| s.session_id);
+                                    log::info(
+                                        "lead woke",
+                                        &[("session", &session.unwrap_or_default())],
+                                    );
+                                }
+                                last_refusal = None;
                             }
-                            last_refusal = None;
+                            Err(reason) if last_refusal.as_deref() != Some(&reason) => {
+                                log::info("lead not started yet", &[("reason", &reason)]);
+                                last_refusal = Some(reason);
+                            }
+                            Err(_) => {}
                         }
-                        Err(reason) if last_refusal.as_deref() != Some(&reason) => {
-                            log::info("lead not started yet", &[("reason", &reason)]);
-                            last_refusal = Some(reason);
-                        }
-                        Err(_) => {}
                     }
                 }
                 let _ = self.flush(None).await;
@@ -600,17 +607,21 @@ impl<R: Runtime> Lead<R> {
     /// Starts the lead (COORD req. 2): refused when a lead runs; resume or fresh by [`plan`]. Earlier
     /// automatic restarts no longer count.
     pub(crate) async fn start(self: &Arc<Self>, fresh: bool) -> Result<View, String> {
+        let _one = self.starting.lock().await;
         *self.restarts() = Restarts::default();
-        self.launch(fresh, None).await
+        self.launch(fresh, None, false).await
     }
 
-    /// A start; `again` is the session an automatic restart resumes.
+    /// Under the start lock; `again` is the session an already scheduled restart resumes.
     async fn launch(
         self: &Arc<Self>,
         fresh: bool,
         again: Option<(String, PathBuf)>,
+        retry_timeout: bool,
     ) -> Result<View, String> {
-        let _one = self.starting.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err("the hub is stopping".into());
+        }
         if self.current().is_some_and(|s| s.alive()) {
             return Err("a lead is already running".into());
         }
@@ -638,9 +649,9 @@ impl<R: Runtime> Lead<R> {
             None => self.target(&settings, fresh, default).await?,
         };
         self.overlay(&config)?;
-        let kind = match &expected {
-            Some(id) => self.stored_runtime(id).await?,
-            None => config.sessions.runtime,
+        let (kind, mode) = match &expected {
+            Some(id) => (self.stored_runtime(id).await?, "resume"),
+            None => (config.sessions.runtime, "fresh"),
         };
         if kind != config.sessions.runtime {
             log::info(
@@ -662,12 +673,7 @@ impl<R: Runtime> Lead<R> {
             name: "lead".into(),
             model: settings.model.clone(),
             thinking: settings.thinking.clone(),
-            mode: if expected.is_some() {
-                "resume"
-            } else {
-                "fresh"
-            }
-            .into(),
+            mode: mode.into(),
             expected_id: expected.clone(),
             expected_file: match &target {
                 Target::Resume(f) => Some(f.display().to_string()),
@@ -691,13 +697,22 @@ impl<R: Runtime> Lead<R> {
             .await
             .map_err(|e| e.to_string())?;
         self.set_phase(Phase::Starting, None);
+        let retry = match (&target, &expected) {
+            (Target::Resume(file), Some(id)) if retry_timeout => Some((id.clone(), file.clone())),
+            _ => None,
+        };
         let spec = lead_spec(handle.clone(), &settings, cwd, target, expected);
-        match runtime.start(spec).await {
+        let result = if self.shutting_down.load(Ordering::Acquire) {
+            Err(StartError::Refused("the hub is stopping".into()))
+        } else {
+            runtime.start(spec).await
+        };
+        match result {
             Ok((session, started)) => {
                 self.bound(handle, session, &started, how, note).await;
                 Ok(self.view().await)
             }
-            Err(e) => Err(self.not_started(handle, &e, automatic).await),
+            Err(e) => Err(self.not_started(handle, &e, automatic, retry).await),
         }
     }
 
@@ -708,17 +723,17 @@ impl<R: Runtime> Lead<R> {
         fresh: bool,
         default: PathBuf,
     ) -> Result<Chosen, String> {
-        let last = self
+        let (last, failed_resume) = self
             .env
             .store
-            .read(|r| r.latest_session("lead"))
+            .read(crate::store::Reads::lead_resume_record)
             .await
             .map_err(|e| e.to_string())?;
-        let held = last
+        let check_lease = last
             .as_ref()
-            .filter(|r| r.state == "orphan_held" || r.state == "held")
+            .filter(|r| failed_resume || r.state == "orphan_held" || r.state == "held")
             .and_then(|r| r.session_id.clone());
-        let lease = match held {
+        let lease = match check_lease {
             Some(id) => self.lease(&id).await,
             None => Lease::Unknown,
         };
@@ -742,6 +757,13 @@ impl<R: Runtime> Lead<R> {
                 Ok(Chosen::fresh(dir, default, how))
             }
             Plan::Resume { id, file, note } => {
+                if failed_resume && lease != Lease::Free {
+                    let reason = format!(
+                        "the earlier lead session {id} is held by another OMP or its lease is unknown"
+                    );
+                    self.set_phase(Phase::Held, Some(reason.clone()));
+                    return Err(reason);
+                }
                 let verified = transcript::verify(
                     file.clone(),
                     dir.clone(),
@@ -847,7 +869,13 @@ impl<R: Runtime> Lead<R> {
 
     /// A start that did not bind: the record says why, and the owner hears it unless the start was
     /// an automatic restart (its retry or hold reports instead).
-    async fn not_started(&self, handle: String, e: &StartError, automatic: bool) -> String {
+    async fn not_started(
+        &self,
+        handle: String,
+        e: &StartError,
+        retrying: bool,
+        resume: Option<(String, PathBuf)>,
+    ) -> String {
         let detail = e.to_string();
         self.update(SessionUpdate {
             handle,
@@ -856,12 +884,27 @@ impl<R: Runtime> Lead<R> {
             ..SessionUpdate::default()
         })
         .await;
-        if automatic {
+        if let Some(session) = resume
+            && matches!(e, StartError::ReadyTimeout(_))
+            && !self.shutting_down.load(Ordering::Acquire)
+        {
+            self.exited(session, &detail, None);
+            if let Some(reason) = self.refusal() {
+                self.emit(
+                    Emit::new(EventKind::LeadNotStarted, Severity::Warning, true, "lead")
+                        .with("reason", &reason),
+                );
+            }
+            return detail;
+        }
+        if retrying && !matches!(e, StartError::CleanupUnconfirmed(_)) {
             return detail;
         }
         let phase = match e {
             StartError::Refused(_) => Phase::NotStarted,
-            StartError::Failed(_) => Phase::Held,
+            StartError::Failed(_)
+            | StartError::ReadyTimeout(_)
+            | StartError::CleanupUnconfirmed(_) => Phase::Held,
         };
         self.set_phase(phase, Some(detail.clone()));
         self.emit(
@@ -878,7 +921,7 @@ impl<R: Runtime> Lead<R> {
             Ok(Some(saved)) => Ok(Chosen {
                 target: Target::Resume(file),
                 expected: Some(id),
-                note: Some("resumed after its OMP process exited by itself".into()),
+                note: Some("resumed after a lead OMP failure".into()),
                 cwd: saved.cwd,
                 how: LeadStart::Resumed,
             }),
@@ -889,14 +932,15 @@ impl<R: Runtime> Lead<R> {
     }
 
     /// The runtime the lead session `id` was started with: a resume stays on it whatever the
-    /// config says now (HOST req. 91). Every resume target comes from the newest lead record.
+    /// config says now (HOST req. 91). Uses the same record as resume target selection.
     async fn stored_runtime(&self, id: &str) -> Result<RuntimeKind, String> {
-        let last = self
+        let (last, _) = self
             .env
             .store
-            .read(|r| r.latest_session("lead"))
+            .read(crate::store::Reads::lead_resume_record)
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let last = last
             .filter(|row| row.session_id.as_deref() == Some(id))
             .ok_or_else(|| format!("no record of lead session {id} to resume"))?;
         RuntimeKind::from_name(&last.runtime).ok_or_else(|| {
@@ -918,17 +962,32 @@ impl<R: Runtime> Lead<R> {
 
     /// The automatic restart (DESIGN 2.2): the same session when its lease is free (HOST req. 86-88).
     async fn restart(self: &Arc<Self>) {
-        let Some((_, (id, file))) = self.restarts().due.take() else {
-            return;
-        };
-        if self.current().is_some_and(|s| s.alive()) {
-            // The owner started the lead meanwhile.
+        let _one = self.starting.lock().await;
+        if self.shutting_down.load(Ordering::Acquire) {
             return;
         }
+        if self.current().is_some_and(|s| s.alive()) {
+            // The owner started the lead meanwhile.
+            self.restarts().due = None;
+            return;
+        }
+        let (id, file) = {
+            let mut restarts = self.restarts();
+            match restarts.due.take() {
+                Some((at, session)) if at <= Instant::now() => {
+                    self.set_phase(Phase::Starting, None);
+                    session
+                }
+                due => {
+                    restarts.due = due;
+                    return;
+                }
+            }
+        };
         let lease = self.lease(&id).await;
         if lease != Lease::Free {
             let reason = format!(
-                "the lead's OMP exited and its session {id} {}; not restarted, held for the owner",
+                "the lead's session {id} {}; not restarted, held for the owner",
                 if lease == Lease::Held {
                     "is held by another OMP"
                 } else {
@@ -942,11 +1001,16 @@ impl<R: Runtime> Lead<R> {
             );
             return;
         }
-        match self.launch(false, Some((id.clone(), file.clone()))).await {
+        match self
+            .launch(false, Some((id.clone(), file.clone())), false)
+            .await
+        {
             Ok(_) => log::info("lead restarted", &[("session", &id)]),
             Err(reason) => {
                 log::warn("lead restart failed", &[("reason", &reason)]);
-                self.exited((id, file), &format!("its restart failed: {reason}"), None);
+                if self.phase().0 != Phase::Held && !self.shutting_down.load(Ordering::Acquire) {
+                    self.exited((id, file), &format!("its restart failed: {reason}"), None);
+                }
             }
         }
     }
@@ -1385,6 +1449,9 @@ impl<R: Runtime> Lead<R> {
         if let Some(how) = self.came.get() {
             return Some(*how);
         }
+        if self.restart_wait().is_some() {
+            return None;
+        }
         let (refused, starting) = {
             let phase = self.phase();
             (phase.1.is_some(), matches!(phase.0, Phase::Starting))
@@ -1474,6 +1541,7 @@ impl<R: Runtime> Lead<R> {
     /// Stops the lead; refused while it works or has a dialog unless forced (HOST req. 83). With no
     /// lead running it cancels a planned automatic restart, or keeps a sleeping lead stopped.
     pub(crate) async fn stop(&self, force: bool) -> Result<View, String> {
+        let _one = self.starting.lock().await;
         let session = match self.live() {
             Ok(session) => session,
             Err(e) => {
@@ -1517,6 +1585,9 @@ impl<R: Runtime> Lead<R> {
 
     /// Hub shutdown: a clean close so the next start resumes the same session.
     pub(crate) async fn shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let _one = self.starting.lock().await;
+        self.restarts().due = None;
         let Some(session) = self.current().filter(|s| s.alive()) else {
             return;
         };

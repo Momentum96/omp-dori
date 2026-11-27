@@ -105,6 +105,14 @@ rpc() {
         --resume=*) resume=${arg#--resume=} ;;
         esac
     done
+    if [ -n "$resume" ]; then
+        echo $$ >> "$dir/resume-pids"
+        if mv "$dir/slow-resume" "$dir/slow-resume.used" 2>/dev/null; then
+            cat > /dev/null
+            exit 1
+        fi
+        [ -f "$dir/fail-resume" ] && exit 7
+    fi
     umask 077
     if [ -n "$resume" ]; then
         file=$resume

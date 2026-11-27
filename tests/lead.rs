@@ -133,6 +133,93 @@ fn lead_restarts_on_its_session_after_omp_exits() {
     assert_eq!(pids.lines().count(), 4, "{pids}");
 }
 
+fn restart_with_slow_lead(persistent_failure: bool) -> (TestHub, Value) {
+    let mut hub = TestHub::new("");
+    let omp = hub.install_fake("omp");
+    hub.fixture("omp", "rpc", Some(""));
+    hub.fixture("omp", "turns", Some(""));
+    let work = hub.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let config = format!(
+        "[omp]\npath = \"{}\"\n[lead]\nmodel = \"fake/primary\"\ncwd = \"{}\"\n",
+        omp.display(),
+        work.display()
+    );
+    hub.write_config(&config);
+    hub.start();
+    let first = live(&hub, &Value::Null);
+    assert!(hub.stop().success());
+    hub.fixture("omp", "slow-resume", Some(""));
+    if persistent_failure {
+        hub.fixture("omp", "fail-resume", Some(""));
+        let id = first["session"]["session_id"].as_str().unwrap();
+        hub.write_config(&format!("{config}session_id = \"{id}\"\n"));
+    }
+    hub.start();
+    (hub, first)
+}
+
+#[test]
+fn hub_restart_recovers_from_a_lead_ready_timeout_on_the_same_transcript() {
+    let (mut hub, first) = restart_with_slow_lead(false);
+    assert!(hub.cli(&["lead", "send", "after-restart"]).status.success());
+    let resumed = live(&hub, &first["session"]["pid"]);
+    assert_eq!(
+        resumed["session"]["session_id"],
+        first["session"]["session_id"]
+    );
+    let file = resumed["session"]["session_file"].as_str().unwrap();
+    assert_eq!(file, first["session"]["session_file"].as_str().unwrap());
+    let pids = std::fs::read_to_string(hub.root.join("bin/omp-data/resume-pids")).unwrap();
+    assert_eq!(pids.lines().count(), 2, "one failed start and one retry");
+    let failed = pids.lines().next().unwrap();
+    let child = Command::new("kill").args(["-0", failed]).output().unwrap();
+    assert!(
+        !child.status.success(),
+        "failed OMP {failed} is still running"
+    );
+    hub.until(Duration::from_secs(5), || {
+        std::fs::read_to_string(file)
+            .unwrap()
+            .contains("after-restart")
+            .then_some(())
+    });
+    assert!(hub.stop().success());
+    assert_eq!(
+        std::fs::read_to_string(file)
+            .unwrap()
+            .matches("after-restart")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn hub_shutdown_cancels_a_lead_ready_retry_and_next_hub_can_resume() {
+    let (mut hub, first) = restart_with_slow_lead(true);
+    hub.until(Duration::from_secs(25), || {
+        let lead = hub.json(&["lead", "status", "--json"]);
+        let reason = lead["reason"].as_str()?;
+        (reason.contains("Code(7)") && reason.contains("restarting in 2 s")).then_some(())
+    });
+    assert!(hub.stop().success());
+    let pids = hub.root.join("bin/omp-data/resume-pids");
+    assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 2);
+    hub.fixture("omp", "fail-resume", None);
+    hub.start();
+    let resumed = live(&hub, &first["session"]["pid"]);
+    assert_eq!(
+        resumed["session"]["session_id"],
+        first["session"]["session_id"]
+    );
+    assert_eq!(
+        resumed["session"]["session_file"],
+        first["session"]["session_file"]
+    );
+    assert!(hub.stop().success());
+    assert_eq!(std::fs::read_to_string(pids).unwrap().lines().count(), 3);
+}
+
 /// Just after an OMP update the first probe can outlast its bound under load. A failed probe is
 /// tried again by itself after 5 s, with no change to the executable; status, health and the
 /// sessions refusal name the retry, and the lead starts as soon as a probe works.

@@ -123,8 +123,21 @@ impl Runtime for Headless {
         let rpc = match Rpc::connect(stdout, stdin, READY_WITHIN, Some(tx)).await {
             Ok(rpc) => rpc,
             Err(e) => {
-                child.close(CLOSE_WAIT, KILL_GRACE).await;
-                return Err(StartError::Failed(format!("no rpc-ui ready frame: {e}")));
+                let (exit, step) = child.close(CLOSE_WAIT, KILL_GRACE).await;
+                let timed_out = e == RpcError::Timeout("ready frame");
+                let detail = if timed_out {
+                    format!("no rpc-ui ready frame within {} s", READY_WITHIN.as_secs())
+                } else {
+                    format!("rpc-ui handshake failed: {e}")
+                };
+                let detail = format!("{detail} (OMP cleanup: {step:?}, {exit:?})");
+                return Err(if exit == Exit::Unknown {
+                    StartError::CleanupUnconfirmed(detail)
+                } else if timed_out {
+                    StartError::ReadyTimeout(detail)
+                } else {
+                    StartError::Failed(detail)
+                });
             }
         };
         let settings = Settings {

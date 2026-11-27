@@ -70,8 +70,13 @@ impl<R: Runtime> Lead<R> {
         if self.env.config.borrow().lead.is_none() || self.phase().0 != Phase::NotStarted {
             return;
         }
-        let last = match self.env.store.read(|r| r.latest_session("lead")).await {
-            Ok(last) => last,
+        let last = match self
+            .env
+            .store
+            .read(crate::store::Reads::lead_resume_record)
+            .await
+        {
+            Ok((last, _)) => last,
             Err(e) => {
                 log::warn("lead sleep not read", &[("error", &e)]);
                 return;
@@ -195,9 +200,8 @@ impl<R: Runtime> Lead<R> {
     }
 
     /// `lead stop` while the lead sleeps: it stays stopped, and its record shows the clean stop a
-    /// live `lead stop` leaves. `false` when the lead is not asleep.
+    /// live `lead stop` leaves. The caller holds the start lock. `false` when the lead is not asleep.
     pub(super) async fn stop_asleep(&self) -> bool {
-        let _one = self.starting.lock().await;
         let Some(asleep) = self.asleep() else {
             return false;
         };

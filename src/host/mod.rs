@@ -76,13 +76,19 @@ pub(crate) enum StartError {
     Refused(String),
     /// The child was spawned and closed again.
     Failed(String),
+    /// A local child missed the ready deadline and was reaped.
+    ReadyTimeout(String),
+    /// A local child failed its handshake and may still be running.
+    CleanupUnconfirmed(String),
 }
 
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(r) => write!(f, "refused: {r}"),
-            Self::Failed(r) => write!(f, "failed: {r}"),
+            Self::Failed(r) | Self::ReadyTimeout(r) | Self::CleanupUnconfirmed(r) => {
+                write!(f, "failed: {r}")
+            }
         }
     }
 }

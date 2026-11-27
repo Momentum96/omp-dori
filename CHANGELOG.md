@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6 (Unreleased)
+
+- Recover the lead on its existing session after a transient rpc-ui ready timeout. Retries use the
+  lead's existing backoff after verifying the child exited and the session lease is free. Failed
+  resume attempts keep their diagnostics without superseding the last bound session.
+
 ## 0.2.5 (2026-11-27)
 
 - The lead can open lanes again: `cataly_lead` now declares every parameter its operations read,
