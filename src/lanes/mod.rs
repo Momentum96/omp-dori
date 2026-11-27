@@ -41,6 +41,7 @@ use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
 use crate::omp::Omp;
 use crate::omp::launch::Target;
+use crate::params as p;
 use crate::store::Store;
 use crate::store::lanes::{LaneDone, LaneRow, LaneWrite, Revision};
 use crate::sys::latency::Latency;
@@ -114,11 +115,6 @@ pub(crate) struct Env<R: Runtime> {
 pub(crate) enum Caller {
     Owner,
     Lead,
-    /// A lane's bridge connection: its session handle and the session it vouched for.
-    Lane {
-        handle: String,
-        session: String,
-    },
 }
 
 /// The lanes of this hub.
@@ -152,20 +148,14 @@ fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|t| !t.is_empty())
 }
 
-fn need<'a>(v: &'a Value, key: &str) -> Result<&'a str, String> {
-    s(v, key).ok_or_else(|| format!("{key} is required"))
-}
-
 /// An objection's reasons: the `reasons` list, or the single `reason`.
 fn reasons(input: &Value) -> Result<Vec<String>, String> {
-    Ok(match input.get("reasons") {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        _ => vec![need(input, "reason")?.to_string()],
-    })
+    let list = p::REASONS.list(input);
+    if list.is_empty() {
+        Ok(vec![p::REASON.some(input)?.to_string()])
+    } else {
+        Ok(list)
+    }
 }
 
 /// `opened:length`, the revision a caller saw (LANE req. 30, 33).
@@ -494,17 +484,14 @@ impl<R: Runtime> Lanes<R> {
         Ok(())
     }
 
-    /// Runs one operation for a caller; the answer is JSON for the CLI and the tools.
+    /// Runs one operation for the owner or the lead; the answer is JSON for the CLI and the tools.
     pub(crate) async fn call(
         self: &Arc<Self>,
         caller: Caller,
         input: &Value,
     ) -> Result<Value, String> {
-        let op = s(input, "op").unwrap_or_default();
-        if let Caller::Lane { handle, session } = &caller {
-            return self.lane_op(op, handle, session, input).await;
-        }
-        let key = || need(input, "key");
+        let op = p::OP.text(input).unwrap_or_default();
+        let key = || p::KEY.some(input);
         let by = if caller == Caller::Owner {
             "owner"
         } else {
@@ -513,80 +500,80 @@ impl<R: Runtime> Lanes<R> {
         let text = |t: String| Ok(json!(t));
         match op {
             "open" => self.open(input).await,
-            "list" => {
-                self.list(input.get("all").and_then(Value::as_bool).unwrap_or(false))
-                    .await
-            }
-            "board" => self.board(s(input, "key")).await.map(Value::String),
+            "list" => self.list(p::ALL.flag(input)).await,
+            "board" => self.board(p::KEY.text(input)).await.map(Value::String),
             "history" | "reports" => self.ledger(op, key()?).await,
             "pause" => text(
                 self.pause(
                     key()?,
                     by,
-                    s(input, "reason").unwrap_or("explicit instruction"),
+                    p::REASON.text(input).unwrap_or("explicit instruction"),
                 )
                 .await?,
             ),
             "resume" => text(self.resume(key()?).await?),
             "park" | "abandon" => text(
-                self.park(key()?, op, need(input, "reason")?, s(input, "condition"))
+                self.park(key()?, op, p::REASON.some(input)?, p::CONDITION.text(input))
                     .await?,
             ),
-            "claim" => text(self.claim(key()?, need(input, "evidence")?).await?),
+            "claim" => text(self.claim(key()?, p::EVIDENCE.some(input)?).await?),
             "object" => text(self.object(key()?, &reasons(input)?).await?),
             "close" => text(
                 self.close(
                     key()?,
-                    s(input, "note").unwrap_or("closed by the lead"),
-                    s(input, "lesson"),
+                    p::NOTE.text(input).unwrap_or("closed by the lead"),
+                    p::LESSON.text(input),
                 )
                 .await?,
             ),
-            "reopen" => text(self.reopen(key()?, s(input, "note")).await?),
+            "reopen" => text(self.reopen(key()?, p::NOTE.text(input)).await?),
             "send" => text(
                 self.send(
                     key()?,
-                    need(input, "text")?,
-                    s(input, "revision"),
-                    s(input, "id"),
-                    input.get("steer").and_then(Value::as_bool).unwrap_or(false),
+                    p::TEXT.some(input)?,
+                    p::REVISION.text(input),
+                    p::ID.text(input),
+                    p::STEER.flag(input),
                 )
                 .await?,
             ),
-            "release" => text(self.release(key()?, need(input, "note")?).await?),
-            "read" => self.read(key()?, input.get("count").and_then(Value::as_u64)),
+            "release" => text(self.release(key()?, p::NOTE.some(input)?).await?),
+            "read" => self.read(key()?, p::COUNT.uint(input)),
             "interrupt" => text(
-                self.control(key()?, s(input, "revision"), |s| {
+                self.control(key()?, p::REVISION.text(input), |s| {
                     Box::pin(async move { s.interrupt().await })
                 })
                 .await?,
             ),
             "model" => {
-                let model = need(input, "model")?.to_string();
-                text(self.set_model(key()?, s(input, "revision"), &model).await?)
+                let model = p::MODEL.some(input)?.to_string();
+                text(
+                    self.set_model(key()?, p::REVISION.text(input), &model)
+                        .await?,
+                )
             }
             "answer" => self
                 .answer(
                     key()?,
-                    need(input, "dialog")?,
-                    input.get("answer").unwrap_or(&Value::Null),
+                    p::DIALOG.some(input)?,
+                    p::ANSWER.raw(input).unwrap_or(&Value::Null),
                 )
                 .await
                 .map(|()| json!("answered")),
             "grant" => {
-                let rule = input.get("rule").and_then(Value::as_u64);
+                let rule = p::RULE.uint(input);
                 let rule = rule.ok_or("rule is required")?;
                 text(
                     self.grant(
                         key()?,
                         usize::try_from(rule).unwrap_or(0),
-                        need(input, "reason")?,
+                        p::REASON.some(input)?,
                     )
                     .await?,
                 )
             }
             "drift" => self.drift().await,
-            "spend" => self.spend_view(s(input, "key")).await,
+            "spend" => self.spend_view(p::KEY.text(input)).await,
             other => self.coord_op(&caller, other, input).await,
         }
     }
@@ -598,7 +585,7 @@ impl<R: Runtime> Lanes<R> {
         op: &str,
         input: &Value,
     ) -> Result<Value, String> {
-        let key = || need(input, "key");
+        let key = || p::KEY.some(input);
         let text = |t: String| Ok(json!(t));
         match op {
             "priority" => text(self.set_priority(key()?, input).await?),
@@ -610,17 +597,18 @@ impl<R: Runtime> Lanes<R> {
             "review" => self.review(input).await,
             "merge" => self.merge(input).await,
             "publish" => self.publish(input, None).await,
-            "files" => self.files(s(input, "key")).await,
+            "files" => self.files(p::KEY.text(input)).await,
             "rule-add" | "rule-retire" | "rules" => self.rule_op(op, input, None).await,
             "board-found" => self.board_found(input).await,
             "admission" => {
                 let config = self.cfg();
-                let cwd = s(input, "cwd")
+                let cwd = p::CWD
+                    .text(input)
                     .map(PathBuf::from)
                     .or_else(|| config.lanes.cwd.clone())
                     .unwrap_or_else(|| PathBuf::from("/"));
                 Ok(
-                    match self.admission(&config, &cwd, s(input, "worker")).await {
+                    match self.admission(&config, &cwd, p::WORKER.text(input)).await {
                         Ok(_) => json!({ "admit": true, "detail": "a start may go ahead now" }),
                         Err(e) => json!({ "admit": false, "detail": e }),
                     },
@@ -663,13 +651,13 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// The lane tool (EVR-01, EVR-20, LANE req. 53, 61): only for the current run's own session.
-    async fn lane_op(
+    pub(crate) async fn lane_call(
         self: &Arc<Self>,
-        op: &str,
         handle: &str,
         session: &str,
         input: &Value,
     ) -> Result<Value, String> {
+        let op = p::OP.text(input).unwrap_or_default();
         let key = self
             .key_of(handle)
             .await
@@ -703,7 +691,7 @@ impl<R: Runtime> Lanes<R> {
                 if !current {
                     return Err(crate::store::lanes::MOVED_ON.into());
                 }
-                self.claim(&key, need(input, "evidence")?)
+                self.claim(&key, p::EVIDENCE.some(input)?)
                     .await
                     .map(Value::String)
             }
@@ -711,7 +699,7 @@ impl<R: Runtime> Lanes<R> {
                 if !current {
                     return Err(crate::store::lanes::MOVED_ON.into());
                 }
-                let path = need(input, "path")?.to_string();
+                let path = p::PATH.some(input)?.to_string();
                 let real = std::fs::canonicalize(&path).map_err(|e| format!("{path}: {e}"))?;
                 let real = real.display().to_string();
                 self.keep(&key, |r| {
@@ -933,23 +921,16 @@ impl<R: Runtime> Lanes<R> {
 
     /// Validation, preview, dedupe, then the start (LANE req. 1-16).
     async fn open(self: &Arc<Self>, input: &Value) -> Result<Value, String> {
-        let mut input_value = input.clone();
-        if let Some(map) = input_value.as_object_mut() {
-            map.remove("op");
-        }
-        let thread_from = input_value
-            .as_object_mut()
-            .and_then(|m| m.remove("thread_from"))
-            .and_then(|v| v.as_str().map(str::to_string));
-        let kickoff = match input_value
-            .as_object_mut()
-            .and_then(|m| m.remove("kickoff"))
-        {
+        let thread_from = p::THREAD_FROM.text(input).map(str::to_string);
+        let kickoff = match p::KICKOFF.text(input) {
             None => None,
-            Some(v) => Some(Self::kickoff_line(&v, thread_from.is_some())?),
+            Some(text) => Some(Self::kickoff_line(text, thread_from.is_some())?),
         };
-        let open: OpenInput =
-            serde_json::from_value(input_value.clone()).map_err(|e| format!("open: {e}"))?;
+        let open: OpenInput = p::parse::<OpenInput>(input).map_err(|e| format!("open: {e}"))?;
+        let mut stored = input.clone();
+        p::OP.clear(&mut stored);
+        p::THREAD_FROM.clear(&mut stored);
+        p::KICKOFF.clear(&mut stored);
         let config = self.cfg();
         let valid = record::validate(&open, &config.lanes)?;
         remote::placement(&config, &valid)?;
@@ -966,13 +947,13 @@ impl<R: Runtime> Lanes<R> {
             if thread_from.is_some() {
                 return Err("a queued launch takes thread, not thread_from".into());
             }
-            return self.queue(&open, &valid, input_value, None).await;
+            return self.queue(&open, &valid, stored, None).await;
         }
         if let Some(queued) = self
             .wait_for_worker(
                 &open,
                 &valid,
-                &mut input_value,
+                &mut stored,
                 thread_from.as_deref(),
                 kickoff.as_deref(),
             )
@@ -1180,8 +1161,7 @@ impl<R: Runtime> Lanes<R> {
     }
 
     /// The lead's kickoff line for a new thread: one line, only with `thread_from`.
-    fn kickoff_line(v: &Value, new_thread: bool) -> Result<String, String> {
-        let text = v.as_str().unwrap_or_default().trim();
+    fn kickoff_line(text: &str, new_thread: bool) -> Result<String, String> {
         if !new_thread {
             return Err("kickoff goes with thread_from".into());
         }

@@ -12,12 +12,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use super::Lanes;
 use super::docs::{self, ITEM, PLAN_RUN, PLANNER};
 use super::record::{self, Record, State};
-use super::{Lanes, need, s};
 use crate::host::Runtime;
 use crate::jobs::event::{Emit, EventKind, Severity, one_line};
 use crate::log;
+use crate::params as p;
 use crate::sys::now_ms;
 
 const HOUR_MS: i64 = 3_600_000;
@@ -213,7 +214,7 @@ impl<R: Runtime> Lanes<R> {
         match op {
             "item-add" => text(self.item_add(input).await?),
             "items" => {
-                let all = input.get("all").and_then(Value::as_bool).unwrap_or(false);
+                let all = p::ALL.flag(input);
                 let (items, damaged) = docs::all::<Item>(&self.env.store, ITEM).await?;
                 let items: Vec<Item> = items
                     .into_iter()
@@ -223,8 +224,8 @@ impl<R: Runtime> Lanes<R> {
                 Ok(json!({ "items": items, "damaged": damaged }))
             }
             "item-answer" => {
-                let id = need(input, "id")?;
-                let answer = need(input, "text")?;
+                let id = p::ID.some(input)?;
+                let answer = p::TEXT.some(input)?;
                 let (mut item, v) = self.item(id).await?;
                 if item.status != "open" {
                     return Err(format!("item {id} is {}", item.status));
@@ -239,8 +240,8 @@ impl<R: Runtime> Lanes<R> {
                 text(format!("item {id} answered; it can start again"))
             }
             "item-drop" => {
-                let id = need(input, "id")?;
-                let reason = need(input, "reason")?;
+                let id = p::ID.some(input)?;
+                let reason = p::REASON.some(input)?;
                 let (mut item, v) = self.item(id).await?;
                 if item.status == "running" {
                     return Err(format!("item {id} is running; close its lane first"));
@@ -269,7 +270,7 @@ impl<R: Runtime> Lanes<R> {
             "plan-stop" | "plan-resume" => {
                 let (mut state, v) = self.planner_state().await?;
                 state.stopped = (op == "plan-stop")
-                    .then(|| s(input, "reason").unwrap_or("stopped").to_string());
+                    .then(|| p::REASON.text(input).unwrap_or("stopped").to_string());
                 docs::put(&self.env.store, PLANNER, "state", &state, Some(v)).await?;
                 text(format!(
                     "planner {}",
@@ -286,11 +287,11 @@ impl<R: Runtime> Lanes<R> {
 
     /// COORD req. 36-37.
     async fn item_add(&self, input: &Value) -> Result<String, String> {
-        let id = need(input, "id")?;
+        let id = p::ID.some(input)?;
         if let Some(e) = record::key_error(id) {
             return Err(e);
         }
-        let brief = match (s(input, "brief"), s(input, "brief_file")) {
+        let brief = match (p::BRIEF.text(input), p::BRIEF_FILE.text(input)) {
             (Some(b), None) => b.to_string(),
             (None, Some(f)) => {
                 let path = std::path::Path::new(f);
@@ -301,17 +302,17 @@ impl<R: Runtime> Lanes<R> {
             }
             _ => return Err("give exactly one of brief and brief_file".into()),
         };
-        let priority = match input.get("priority") {
-            None | Some(Value::Null) => record::default_priority(),
-            Some(v) => v
-                .as_u64()
-                .and_then(|p| u8::try_from(p).ok())
+        let priority = match p::PRIORITY.uint(input) {
+            None => record::default_priority(),
+            Some(v) => u8::try_from(v)
+                .ok()
                 .filter(|p| (1..=9).contains(p))
                 .ok_or("priority must be 1 to 9")?,
         };
-        let checks = input.get("checks").cloned().unwrap_or(Value::Null);
+        let checks = p::CHECKS.raw(input).cloned().unwrap_or(Value::Null);
         super::checks::parse(&checks)?;
-        let cwd = s(input, "cwd")
+        let cwd = p::CWD
+            .text(input)
             .map(std::path::PathBuf::from)
             .or_else(|| self.cfg().lanes.cwd.clone())
             .ok_or("no working directory: give cwd or set [lanes] cwd")?;
@@ -323,7 +324,7 @@ impl<R: Runtime> Lanes<R> {
         let now = now_ms();
         let mut item = Item {
             id: id.into(),
-            title: s(input, "title").unwrap_or(id).to_string(),
+            title: p::TITLE.text(input).unwrap_or(id).to_string(),
             brief,
             cwd: cwd.display().to_string(),
             checks,
@@ -347,17 +348,19 @@ impl<R: Runtime> Lanes<R> {
 
     /// Imports labelled open issues (COORD req. 40); reads only.
     async fn item_import(&self, input: &Value) -> Result<Value, String> {
-        let repo = need(input, "repo")?;
+        let repo = p::REPO.some(input)?;
         if repo.split('/').count() != 2 || repo.contains(['#', ' ', '?']) {
             return Err("repo must be owner/name".into());
         }
         let config = self.cfg();
-        let label = s(input, "label")
+        let label = p::LABEL
+            .text(input)
             .unwrap_or(&config.coord.planner.import_label)
             .to_string();
-        let checks = input.get("checks").cloned().unwrap_or(Value::Null);
+        let checks = p::CHECKS.raw(input).cloned().unwrap_or(Value::Null);
         super::checks::parse(&checks)?;
-        let cwd = s(input, "cwd")
+        let cwd = p::CWD
+            .text(input)
             .map(std::path::PathBuf::from)
             .or_else(|| config.lanes.cwd.clone())
             .ok_or("no working directory: give cwd or set [lanes] cwd")?;
@@ -898,9 +901,8 @@ impl<R: Runtime> Lanes<R> {
 
     /// Changes an open lane's priority (COORD req. 41).
     pub(super) async fn set_priority(&self, key: &str, input: &Value) -> Result<String, String> {
-        let priority = input
-            .get("priority")
-            .and_then(Value::as_u64)
+        let priority = p::PRIORITY
+            .uint(input)
             .and_then(|p| u8::try_from(p).ok())
             .filter(|p| (1..=9).contains(p))
             .ok_or("priority must be 1 to 9")?;
@@ -934,7 +936,7 @@ impl<R: Runtime> Lanes<R> {
                     Err(problems.join("\n"))
                 }
             }
-            "profile-revert" => notes.revert(need(input, "name")?).map(Value::String),
+            "profile-revert" => notes.revert(p::NAME.some(input)?).map(Value::String),
             _ => Ok(json!(notes.list())),
         }
     }

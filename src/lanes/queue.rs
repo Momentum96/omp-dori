@@ -14,6 +14,7 @@ use super::record::{self, OpenInput, Record, State};
 use super::{Lanes, s};
 use crate::host::Runtime;
 use crate::jobs::event::{Emit, EventKind, Severity};
+use crate::params as p;
 use crate::sys::now_ms;
 
 const STARTING: &str = "starting";
@@ -41,7 +42,7 @@ pub(crate) struct Queued {
 impl Queued {
     /// The worker the launch waits for, when it names one.
     fn worker(&self) -> Option<&str> {
-        self.input.get("worker").and_then(Value::as_str)
+        p::WORKER.text(&self.input)
     }
 
     /// It waits for nothing but its worker, so the hub starts it by itself.
@@ -130,17 +131,20 @@ impl<R: Runtime> Lanes<R> {
             return Err("expires_hours must be a positive number".into());
         }
         if let Some(m) = input.as_object_mut() {
-            for k in [
-                "brief_file",
-                "preview",
-                "request_id",
-                "after",
-                "expires_hours",
+            for param in [
+                p::BRIEF_FILE,
+                p::PREVIEW,
+                p::REQUEST_ID,
+                p::AFTER,
+                p::EXPIRES_HOURS,
             ] {
-                m.remove(k);
+                m.remove(param.name());
             }
-            m.insert("brief".into(), json!(valid.brief));
-            m.insert("cwd".into(), json!(valid.cwd.display().to_string()));
+            m.insert(p::BRIEF.name().to_string(), json!(valid.brief));
+            m.insert(
+                p::CWD.name().to_string(),
+                json!(valid.cwd.display().to_string()),
+            );
         }
         let now = now_ms();
         #[allow(clippy::cast_possible_truncation)]
@@ -278,19 +282,19 @@ impl<R: Runtime> Lanes<R> {
             .await
             .map_err(|e| format!("not ready: {e}"))?;
         // Predecessors' signals read back live now, with their records unchanged meanwhile.
-        for p in &q.after {
-            let (rec, before) = self.load(p).await?;
+        for pre in &q.after {
+            let (rec, before) = self.load(pre).await?;
             let results = self.read_checks(&rec).await;
             if let Some(f) = results.iter().find(|o| !o.pass) {
-                return Err(format!("{p}: {} fails now: {}", f.signal, f.detail));
+                return Err(format!("{pre}: {} fails now: {}", f.signal, f.detail));
             }
-            let (_, after) = self.load(p).await?;
+            let (_, after) = self.load(pre).await?;
             if after != before {
-                return Err(format!("{p} changed during the checks; try again"));
+                return Err(format!("{pre} changed during the checks; try again"));
             }
         }
         let open: OpenInput =
-            serde_json::from_value(q.input.clone()).map_err(|e| format!("queued input: {e}"))?;
+            p::parse::<OpenInput>(&q.input).map_err(|e| format!("queued input: {e}"))?;
         let valid = record::validate(&open, &self.cfg().lanes)?;
         q.state = STARTING.into();
         let version = docs::put(&self.env.store, QUEUED, key, &q, Some(version)).await?;
@@ -330,7 +334,7 @@ impl<R: Runtime> Lanes<R> {
         let now = now_ms();
         let mut out = Vec::new();
         for (q, _) in all {
-            if s(input, "key").is_some_and(|k| k != q.key) {
+            if p::KEY.text(input).is_some_and(|k| k != q.key) {
                 continue;
             }
             let ready = self.readiness(&q, now).await;

@@ -651,7 +651,65 @@ fn lead_bridge(hub: &TestHub) -> (Bridge, Value) {
     let hello = json!({ "ext": 1, "token": token, "session": session, "agent": "main" });
     let (bridge, answer) = Bridge::connect(&hub.socket(), hello);
     assert_eq!(answer["role"], "lead", "{answer}");
-    (bridge, session)
+    (
+        bridge,
+        json!({ "session": session, "tools": answer["tools"] }),
+    )
+}
+
+/// The input a model following the registered schema would send: every field it gives must be
+/// declared by the tool, with the JSON type the schema states.
+fn from_schema(meta: &Value, tool: &str, fields: &[(&str, Value)]) -> Value {
+    let tools = meta["tools"].as_array().unwrap();
+    let found = tools
+        .iter()
+        .find(|t| t["name"] == tool)
+        .unwrap_or_else(|| panic!("{tool} is not registered: {tools:?}"));
+    let properties = found["parameters"]["properties"].as_object().unwrap();
+    let mut input = serde_json::Map::new();
+    for (name, value) in fields {
+        let schema = properties
+            .get(*name)
+            .unwrap_or_else(|| panic!("{tool} does not declare `{name}`: {properties:?}"));
+        let kind = schema["type"].as_str().unwrap_or_else(|| {
+            panic!("`{name}` declares no single type: {schema}");
+        });
+        let matches = match kind {
+            "string" => value.is_string(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array() && schema["items"]["type"] == "string",
+            "object" => value.is_object(),
+            other => panic!("`{name}` has type {other}"),
+        };
+        assert!(matches, "`{name}` is {kind} in the schema, sent {value}");
+        if let Some(choices) = schema["enum"].as_array() {
+            assert!(
+                choices.iter().any(|c| c == value),
+                "`{name}` is one of {choices:?}, sent {value}"
+            );
+        }
+        if kind == "object" {
+            let declared = schema["properties"].as_object().unwrap();
+            for (k, v) in value.as_object().unwrap() {
+                let ty = declared
+                    .get(k)
+                    .unwrap_or_else(|| panic!("`{name}` does not declare `{k}`: {schema}"));
+                let ty = ty["type"].as_str().unwrap_or_default();
+                let ok = match ty {
+                    "string" => v.is_string(),
+                    "integer" => v.is_i64() || v.is_u64(),
+                    "number" => v.is_number(),
+                    "boolean" => v.is_boolean(),
+                    _ => false,
+                };
+                assert!(ok, "`{name}.{k}` is {ty}, sent {v}");
+            }
+        }
+        input.insert((*name).to_string(), value.clone());
+    }
+    Value::Object(input)
 }
 
 fn lead_tool(b: &mut Bridge, session: &Value, call: &str, input: Value) -> (String, bool) {
@@ -687,7 +745,8 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
     hub.until(WAIT, || {
         (hub.json(&["discord", "status", "--json"])["healthy"] == true).then_some(())
     });
-    let (mut b, s) = lead_bridge(&hub);
+    let (mut b, meta) = lead_bridge(&hub);
+    let s = meta["session"].clone();
     let (listed, _) = lead_tool(&mut b, &s, "w0", json!({ "op": "lane.workers" }));
     assert!(listed.starts_with("- box: "), "{listed}");
     let asked = 800_000_000_000_000_101u64;
@@ -697,14 +756,28 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
         OWNER,
         "run the tests on box",
     ));
-    let open = json!({
-        "op": "lane.open", "key": "box-test", "title": "Test on box",
-        "brief": "Run the tests.",
-        "checks": [{ "kind": "command", "argv": ["sh", "-c", "pwd -P | grep -q /cataly/worker/"] }],
-        "thread_from": format!("discord:{CH}/{asked}"),
-        "kickoff": "Testing on box; done when the check passes.",
-        "cwd": repo, "worker": "box",
-    });
+    // Exactly what a model that read the registered schema sends: typed objects and arrays.
+    let open = from_schema(
+        &meta,
+        "cataly_lead",
+        &[
+            ("op", json!("lane.open")),
+            ("key", json!("box-test")),
+            ("title", json!("Test on box")),
+            ("brief", json!("Run the tests.")),
+            (
+                "checks",
+                json!([{ "kind": "command", "argv": ["sh", "-c", "pwd -P | grep -q /cataly/worker/"] }]),
+            ),
+            ("thread_from", json!(format!("discord:{CH}/{asked}"))),
+            (
+                "kickoff",
+                json!("Testing on box; done when the check passes."),
+            ),
+            ("cwd", json!(repo)),
+            ("worker", json!("box")),
+        ],
+    );
     let (text, err) = lead_tool(&mut b, &s, "l1", open);
     assert!(!err && text.contains("started"), "{text}");
     assert!(

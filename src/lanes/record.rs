@@ -325,10 +325,11 @@ fn ceilings(
         Some(Value::Object(m)) => m,
         Some(_) => return Err("ceilings must be an object of minutes, tokens and cost".into()),
     };
-    if let Some(k) = map
-        .keys()
-        .find(|k| !["minutes", "tokens", "cost"].contains(&k.as_str()))
-    {
+    if let Some(k) = map.keys().find(|k| {
+        !crate::params::CEILING_FIELDS
+            .iter()
+            .any(|f| f.name == k.as_str())
+    }) {
         return Err(format!("unknown ceiling {k}"));
     }
     let one = |name: &str, default: Option<f64>| match map.get(name) {

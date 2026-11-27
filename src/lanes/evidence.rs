@@ -30,13 +30,15 @@ const ORGANISING: [&str; 11] = [
 
 /// The report tool's input (EVR req. 2).
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct ReportInput {
     pub(crate) kind: String,
     pub(crate) text: String,
     pub(crate) summary: Option<String>,
     pub(crate) files: Vec<String>,
     pub(crate) calls: Vec<String>,
+    /// The bridge's facts about the calls the report names (EXT req. 21-22).
+    pub(crate) facts: Option<Value>,
 }
 
 /// Checks kind and sizes; nothing is stored when this fails.

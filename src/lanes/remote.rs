@@ -19,6 +19,7 @@ use super::record::{Record, State, Validated};
 use crate::config::Config;
 use crate::host::{Control as _, Runtime};
 use crate::jobs::event::{Emit, EventKind, Severity};
+use crate::params as p;
 use crate::sys::command::{KILL_GRACE, Output, Spec};
 use crate::worker::Place;
 use crate::worker::link::Link;
@@ -94,9 +95,7 @@ impl<R: Runtime> Lanes<R> {
         };
         if let Some(source) = thread_from {
             let thread = self.thread_for(&v.key, &v.title, source).await?;
-            if let Some(map) = input.as_object_mut() {
-                map.insert("thread".into(), json!(thread));
-            }
+            p::THREAD.set(input, json!(thread));
         }
         let kickoff = kickoff.map(str::to_string);
         self.queue(open, v, input.clone(), kickoff).await?;

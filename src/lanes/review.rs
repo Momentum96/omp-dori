@@ -18,9 +18,10 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use super::docs::{self, VERDICT};
-use super::{LOOK_ONLY, Lanes, need, s};
+use super::{LOOK_ONLY, Lanes};
 use crate::host::Runtime;
 use crate::log;
+use crate::params as p;
 use crate::sys::command::{self, KILL_GRACE, Output, Spec};
 use crate::sys::now_ms;
 
@@ -270,7 +271,7 @@ impl<R: Runtime> Lanes<R> {
 
     /// COORD req. 53-56: exit 0 for approve, a refusal for reject.
     pub(super) async fn review(&self, input: &Value) -> Result<Value, String> {
-        let pr = need(input, "pr")?;
+        let pr = p::PR.some(input)?;
         let (repo, number) = parse_pr(pr)?;
         let cwd = self.work_dir();
         let head = self.head(&repo, number, &cwd).await?;
@@ -298,7 +299,8 @@ impl<R: Runtime> Lanes<R> {
                 .omp
                 .path()
                 .ok_or("the OMP executable was not found")?;
-            let model = s(input, "model")
+            let model = p::MODEL
+                .text(input)
                 .map(str::to_string)
                 .or_else(|| config.coord.review_model.clone());
             let overlay = self.overlay(&config)?;
@@ -395,12 +397,9 @@ impl<R: Runtime> Lanes<R> {
     /// COORD req. 55, OPC-58: necessary, not sufficient; the lead merges only with the owner's
     /// authorisation.
     pub(super) async fn merge(&self, input: &Value) -> Result<Value, String> {
-        let pr = need(input, "pr")?;
+        let pr = p::PR.some(input)?;
         let (repo, number) = parse_pr(pr)?;
-        let dry = input
-            .get("dry_run")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let dry = p::DRY_RUN.flag(input);
         let cwd = self.work_dir();
         let head = self.head(&repo, number, &cwd).await?;
         let id = format!("{repo}#{number}@{head}");

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::Hub;
 use crate::jobs::memory::Memory;
+use crate::params as p;
 use crate::store::Apply;
 use crate::sys::now_ms;
 
@@ -53,14 +54,6 @@ async fn save(hub: &Hub, memory: Memory) -> Result<(), String> {
         })
         .await
         .map_err(|e| e.to_string())
-}
-
-fn text<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
 }
 
 /// Whether onboarding runs; an unreadable record counts as running (fail closed).
@@ -133,16 +126,17 @@ async fn run(hub: &Hub, verb: &str, input: &Value) -> Result<String, String> {
             if phase != "running" {
                 return Err("onboarding is not running; call onboarding.start first".into());
             }
-            let answer = text(input, "answer").ok_or("answer is yes or no")?;
-            let message =
-                text(input, "message").ok_or("message: the owner's message with the answer")?;
-            if !matches!(answer, "yes" | "no") {
-                return Err("answer is yes or no".into());
+            let reply = p::REPLY.text(input).ok_or("reply is yes or no")?;
+            let message = p::MESSAGE
+                .text(input)
+                .ok_or("message: the owner's message with the answer")?;
+            if !matches!(reply, "yes" | "no") {
+                return Err("reply is yes or no".into());
             }
-            memory.transition(CONSENT, "answer", answer);
+            memory.transition(CONSENT, "answer", reply);
             memory.transition(CONSENT, "message", message);
             memory.transition(CONSENT, "at", &now_ms().to_string());
-            if answer == "no" {
+            if reply == "no" {
                 memory.transition(PHASE, "value", "done");
                 Ok("Stored: the owner said no. Read nothing; do not ask again unless the owner raises it.".into())
             } else {
@@ -154,7 +148,7 @@ async fn run(hub: &Hub, verb: &str, input: &Value) -> Result<String, String> {
             if phase != "running" {
                 return Err("onboarding is not running".into());
             }
-            let summary = text(input, "text").ok_or(
+            let summary = p::TEXT.text(input).ok_or(
                 "text: the short summary of what is known, tools used or skipped, and gaps",
             )?;
             if summary.chars().count() > TEXT_MAX {
@@ -178,11 +172,8 @@ fn start(
     consent: Option<&str>,
     input: &Value,
 ) -> Result<String, String> {
-    let reopen = input
-        .get("reopen")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let message = text(input, "message");
+    let reopen = p::REOPEN.flag(input);
+    let message = p::MESSAGE.text(input);
     if phase == "running" {
         return Ok("Onboarding already runs.".into());
     }
@@ -216,7 +207,7 @@ fn tool(
     if phase != "running" || consent != Some("yes") {
         return Err("ask about tools only while onboarding runs with the owner's consent".into());
     }
-    let name = text(input, "name").ok_or("name: the integration")?;
+    let name = p::NAME.text(input).ok_or("name: the integration")?;
     if name.len() > NAME_MAX
         || !name
             .chars()
@@ -226,12 +217,16 @@ fn tool(
             "name is 1-{NAME_MAX} letters, digits, '.', '-' or '_'"
         ));
     }
-    let answer = text(input, "answer").ok_or("answer is allowed or declined")?;
+    let answer = p::REPLY.text(input).ok_or("reply is allowed or declined")?;
     if !matches!(answer, "allowed" | "declined") {
-        return Err("answer is allowed or declined".into());
+        return Err("reply is allowed or declined".into());
     }
-    let reads = text(input, "reads").ok_or("reads: what it would read and why")?;
-    let message = text(input, "message").ok_or("message: the owner's message with the answer")?;
+    let reads = p::READS
+        .text(input)
+        .ok_or("reads: what it would read and why")?;
+    let message = p::MESSAGE
+        .text(input)
+        .ok_or("message: the owner's message with the answer")?;
     let subject = format!("tool:{name}");
     memory.transition(&subject, "answer", answer);
     memory.transition(&subject, "reads", reads);

@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 
 use super::docs::{self, BOARD};
 use super::record::Record;
-use super::{BoxFut, Lanes, need};
+use super::{BoxFut, Lanes};
 use crate::host::{Control, Runtime, Status};
+use crate::params as p;
 use crate::store::Store;
 use crate::sys::now_ms;
 
@@ -436,8 +437,8 @@ impl<R: Runtime> Lanes<R> {
 
     /// The lead found the message of an uncertain creation (EVR req. 53).
     pub(super) async fn board_found(&self, input: &Value) -> Result<Value, String> {
-        let dest = need(input, "destination")?;
-        let message = need(input, "message")?;
+        let dest = p::DESTINATION.some(input)?;
+        let message = p::MESSAGE.some(input)?;
         let valid = if dest.starts_with("telegram:") {
             message.parse::<i64>().is_ok_and(|m| m > 0)
         } else if dest.starts_with("slack:") {

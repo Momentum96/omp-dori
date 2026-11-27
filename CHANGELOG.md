@@ -2,6 +2,17 @@
 
 ## 0.2.5 (2026-11-27)
 
+- The lead can open lanes again: `cataly_lead` now declares every parameter its operations read,
+  with its real JSON type, so a model that follows the schema sends `checks` as a list of signal
+  objects, `worktree` as `{path, branch, base}`, `ceilings` as an object and the lane fields
+  (`key`, `brief`, `brief_file`, `thread_from`, `kickoff`, `cwd`, `model`, `origin`, `look_only`,
+  `worker`, `priority`, `after`, `expires_hours`, `preview`, `request_id`) typed. One table in
+  `src/params.rs` builds both tools' schemas and every operation reads its input through it, so the
+  schema cannot fall behind the operations; a test walks each tool's operations from its entry and
+  fails on a parameter that is read but not declared, declared with another type, or offered and
+  never read. Onboarding's consent and tool answer is now `reply`, because the lane dialog's
+  `answer` is an object and one name cannot be two types. The bridge's facts about a report's calls
+  travel under `facts`, so they no longer overwrite a step's `evidence`.
 - **Remote workers, phase 1 (enrolment and connection).** `cataly worker add user@host[:port]`
   makes one ed25519 key for that machine and prints the `cataly worker init --hub-key '…'` line
   to run there. `worker init` writes a `restrict,command="… cataly worker serve --hub <id>"` line

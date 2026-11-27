@@ -76,9 +76,6 @@ const LANE_TOOL: &str = "cataly_lane";
 
 /// The lane's tool (EVR req. 1, 30; LANE req. 53, 61).
 fn lane_tool() -> Value {
-    let text = |d: &str| json!({ "type": "string", "description": d });
-    let list =
-        |d: &str| json!({ "type": "array", "items": { "type": "string" }, "description": d });
     json!({
         "name": LANE_TOOL,
         "label": "Cataly lane",
@@ -87,24 +84,10 @@ fn lane_tool() -> Value {
         "description": "Report to Cataly as this lane. op report: kind (progress, stuck, waiting, stopped, finished), \
     text, summary? (for the owner, at most 500 characters), files? and calls? as evidence. op step: name, result, \
     evidence (a link or path), receipts? (push commit, merge link, deploy ID), files?, calls?. op steps: list recorded \
-    steps. op claim: evidence (report IDs and shareable receipts). op worktree: path (a worktree you created).",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "op": text("report, step, steps, claim or worktree"),
-                "kind": text("report kind"),
-                "text": text("what happened, finished and next"),
-                "summary": text("one short line for the owner"),
-                "files": list("files whose content is evidence, relative to the working directory"),
-                "calls": list("tool call IDs whose results are evidence"),
-                "name": text("step name, unique in the lane"),
-                "result": text("step result"),
-                "evidence": text("step evidence or claim evidence"),
-                "receipts": list("remote-effect receipts"),
-                "path": text("worktree path")
-            },
-            "required": ["op"]
-        }
+    steps. op claim: evidence (report IDs and shareable receipts). op worktree: path (a worktree you created). \
+    op publish: key, path, title?, visibility private|public. op rule-add: text, evidence, scope global|repo; \
+    op rule-retire: id; op rules.",
+        "parameters": crate::params::parameters(crate::params::Tool::Lane),
     })
 }
 
@@ -453,10 +436,7 @@ fn answer_later(
     request: crate::proto::Incoming,
 ) {
     let (hub, tx) = (Arc::clone(hub), tx.clone());
-    let caller = (role == Role::Lane).then(|| crate::lanes::Caller::Lane {
-        handle: handle.to_string(),
-        session: session.to_string(),
-    });
+    let lane = (role == Role::Lane).then(|| (handle.to_string(), session.to_string()));
     let own_tool = match (sub, role) {
         (true, _) => None,
         (false, Role::Lane) => Some(LANE_TOOL),
@@ -470,7 +450,7 @@ fn answer_later(
             param("tool") == Some("bash")
                 && param("command").is_some_and(|c| shell::runs_tool(c, t))
         });
-        let reply = match (request.method.as_str(), &caller) {
+        let reply = match (request.method.as_str(), &lane) {
             ("bridge.model", None) => verdict((true, String::new())),
             ("bridge.shell", _) if tool_line.is_some() => {
                 verdict((false, tool_line.map_or_else(String::new, own_tool_in_shell)))
@@ -486,7 +466,10 @@ fn answer_later(
             ("bridge.model", Some(_)) => {
                 verdict(hub.lanes.model_check(&handle, &request.params).await)
             }
-            ("bridge.tool", _) => tool(&hub, caller, &request.params).await,
+            ("bridge.tool", _) => {
+                let pair = lane.as_ref().map(|(h, s)| (h.as_str(), s.as_str()));
+                tool(&hub, pair, &request.params).await
+            }
             (_, Some(_)) => json!({}),
             (_, None) => {
                 let answered =
@@ -517,7 +500,7 @@ fn event(hub: &Arc<Hub>, handle: &str, role: Role, params: &Value) {
 }
 
 /// One tool call, answered once per call ID (EXT req. 18).
-async fn tool(hub: &Arc<Hub>, caller: Option<crate::lanes::Caller>, params: &Value) -> Value {
+async fn tool(hub: &Arc<Hub>, lane: Option<(&str, &str)>, params: &Value) -> Value {
     let call = params
         .get("call")
         .and_then(Value::as_str)
@@ -529,16 +512,20 @@ async fn tool(hub: &Arc<Hub>, caller: Option<crate::lanes::Caller>, params: &Val
         return json!({ "text": text });
     }
     let mut input = params.get("input").cloned().unwrap_or(Value::Null);
-    let result = match caller {
-        Some(caller) => {
-            // The bridge's facts about the named calls travel with the input (EXT req. 22).
-            if let (Some(map), Some(facts)) = (input.as_object_mut(), params.get("evidence")) {
-                map.insert("evidence".into(), facts.clone());
+    let result = match lane {
+        Some((handle, session)) => {
+            // The bridge's facts about the named calls travel with the input (EXT req. 22). They go
+            // under the hub's own key, so they never take a parameter's place.
+            if let Some(facts) = params.get("facts") {
+                crate::params::FACTS.set(&mut input, facts.clone());
             }
-            hub.lanes.call(caller, &input).await.map(|v| match v {
-                Value::String(s) => s,
-                other => other.to_string(),
-            })
+            hub.lanes
+                .lane_call(handle, session, &input)
+                .await
+                .map(|v| match v {
+                    Value::String(s) => s,
+                    other => other.to_string(),
+                })
         }
         None => super::tool::call(hub, &input).await,
     };
