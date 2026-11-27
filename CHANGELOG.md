@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6 (Unreleased)
+
+- Hosted OMP sessions hide `eval` and its commit instructions from the model by disabling both
+  eval kernels. Cataly's existing eval denial and shell rules still apply.
+
 ## 0.2.5 (2026-11-27)
 
 - The lead can open lanes again: `cataly_lead` now declares every parameter its operations read,

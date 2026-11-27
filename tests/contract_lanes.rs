@@ -190,6 +190,7 @@ fn open_report_claim_close_in_stock_omp() {
         "{closed}"
     );
     assert_eq!(closed["session_id"], rec["session_id"]);
+    l.model.assert_eval_not_offered();
     assert!(l.hub.stop().success());
 }
 
@@ -402,7 +403,7 @@ fn tool_results(model: &FakeModel) -> Vec<(String, String)> {
 
 /// Safety 4 in stock OMP: a lane's subagent (the `task` tool) is held by the lane's rules. Its
 /// bridge connects as `sub` with the lane session as parent, so the hub's shell rule blocks its
-/// `bash`; and the overlay's `tools.approval.eval: deny` refuses its `eval` cell.
+/// `bash`; and the overlay leaves `eval` unavailable in the subagent.
 #[test]
 fn a_lane_subagent_is_held_by_shell_rules_and_eval_deny_in_stock_omp() {
     if !enabled() {
@@ -473,13 +474,15 @@ fn a_lane_subagent_is_held_by_shell_rules_and_eval_deny_in_stock_omp() {
         };
         eprintln!("subagent {name} result: {result}");
         assert!(!result.contains("EVAL-RAN"), "{result}");
-        // The hub's lane rule refuses the subagent's `bash`; OMP's user deny refuses its `eval`.
-        let refusal = if *name == "bash" {
-            "Blocked by shell rule"
+        if *name == "bash" {
+            assert!(result.contains("Blocked by shell rule"), "{result}");
         } else {
-            "blocked by user policy"
-        };
-        assert!(result.contains(refusal), "{result}");
+            assert!(
+                result.contains("blocked by user policy") || result.contains("not found"),
+                "{result}"
+            );
+        }
     }
+    l.model.assert_eval_not_offered();
     assert!(l.hub.stop().success());
 }

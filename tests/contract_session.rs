@@ -1059,8 +1059,7 @@ fn lead_asks(hub: &TestHub, model: &FakeModel, command: &str) -> (Value, String)
 /// names it, before OMP's approval, with a pointer to the direct call. Approvals follow the owner's
 /// own OMP settings (decision 19, DESIGN 12.2 A13): under OMP's default a command runs without a
 /// dialog; with the owner's `tools.approvalMode: always-ask` a write asks and the dialog reaches
-/// the hub. Rule 0 still refuses the CLI's `lead send` in the lead's shell; OMP's user deny still
-/// refuses `eval`.
+/// the hub. Rule 0 still refuses the CLI's `lead send` in the lead's shell, and `eval` is unavailable.
 #[test]
 fn lead_follows_the_owners_omp_approval_settings_in_stock_omp() {
     if !enabled() {
@@ -1128,9 +1127,11 @@ fn lead_follows_the_owners_omp_approval_settings_in_stock_omp() {
     let cell = json!({ "language": "js", "code": "console.log('EVAL' + '-RAN')" });
     let eval = lead_calls(&hub, model, "eval", &cell);
     assert!(
-        eval.contains("blocked by user policy") && !eval.contains("EVAL-RAN"),
+        (eval.contains("blocked by user policy") || eval.contains("not found"))
+            && !eval.contains("EVAL-RAN"),
         "{eval}"
     );
+    model.assert_eval_not_offered();
     // The owner's own OMP setting applies: a write asks, the dialog reaches the hub, Deny holds.
     assert!(hub.stop().success());
     std::fs::write(

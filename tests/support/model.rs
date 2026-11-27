@@ -112,6 +112,28 @@ impl FakeModel {
         self.bodies.lock().unwrap().clone()
     }
 
+    /// Checks what OMP sends to the model, including its instructions for using eval to commit.
+    pub fn assert_eval_not_offered(&self) {
+        let bodies = self.bodies.lock().unwrap();
+        assert!(!bodies.is_empty(), "no model requests");
+        for body in bodies.iter() {
+            assert!(
+                body["tools"].as_array().is_none_or(|tools| tools
+                    .iter()
+                    .all(|tool| tool["function"]["name"] != "eval")),
+                "eval was offered to the model"
+            );
+            for message in body["messages"].as_array().unwrap() {
+                if matches!(message["role"].as_str(), Some("system" | "developer")) {
+                    assert!(
+                        !message["content"].to_string().contains("commit.draft"),
+                        "eval commit instructions were sent to the model"
+                    );
+                }
+            }
+        }
+    }
+
     pub fn arrivals(&self) -> Vec<Instant> {
         self.arrivals.lock().unwrap().clone()
     }

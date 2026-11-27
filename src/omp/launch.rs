@@ -8,7 +8,8 @@
 //! revert (decision 7, OJ-10/11). `retry.fallbackOn` and `retry.fallbackChains` appear only when the
 //! owner set them in Cataly's `[fallback]` section; Cataly never invents a chain. Approvals follow
 //! the owner's own OMP settings: no approval mode and no shell patterns are set here (decision 19,
-//! DESIGN 12.2 A13). JSON is valid YAML, so the overlay is written as JSON.
+//! DESIGN 12.2 A13). Both eval kernels are disabled and the eval approval is denied. JSON is
+//! valid YAML, so the overlay is written as JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -144,8 +145,9 @@ pub(crate) fn overlay(fallback: &FallbackSettings, lane: bool) -> Value {
         retry.insert("fallbackChains".into(), json!(fallback.chains));
     }
     let mut root = Map::new();
-    // `eval` runs Python and JavaScript that can start any command, and no shell rule sees it:
-    // a user `deny` is absolute in OMP, subagents included (OMP approval-mode docs).
+    // Disabling both kernels keeps eval and its commit instructions out of model requests.
+    // Keep the approval denial: eval can run commands outside Cataly's shell rules.
+    root.insert("eval".into(), json!({ "py": false, "js": false }));
     root.insert("tools".into(), json!({ "approval": { "eval": "deny" } }));
     root.insert("ask".into(), json!({ "timeout": 0 }));
     root.insert(
@@ -263,9 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn overlay_denies_eval_in_every_session() {
+    fn overlay_disables_and_denies_eval_in_every_session() {
         for lane in [false, true] {
             let o = overlay(&FallbackSettings::default(), lane);
+            assert_eq!(
+                o["eval"],
+                json!({ "py": false, "js": false }),
+                "lane {lane}"
+            );
             assert_eq!(o["tools"]["approval"]["eval"], "deny", "lane {lane}");
         }
     }
