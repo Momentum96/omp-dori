@@ -40,6 +40,8 @@ pub(crate) enum Type {
     Choice(&'static [&'static str]),
     /// An object with exactly these fields.
     Object(&'static [Prop]),
+    /// An array whose items are all of this type.
+    Each(&'static Type),
     /// One of these types.
     Either(&'static [Type]),
 }
@@ -415,7 +417,7 @@ params! {
     /// A brief file.
     BRIEF_FILE: "brief_file", Type::Text, "an absolute path to the brief instead", [Lead], false;
     /// The completion signals.
-    CHECKS: "checks", Type::Object(CHECK_FIELDS), "the completion signals: a non-empty list of objects", [Lead], false;
+    CHECKS: "checks", Type::Each(&Type::Object(CHECK_FIELDS)), "the completion signals: a non-empty list", [Lead], false;
     /// Where the lane starts from.
     THREAD_FROM: "thread_from", Type::Text, "discord:<room>/<message>: the message the lane starts from", [Lead], false;
     /// The first line in a new thread.
@@ -521,6 +523,7 @@ fn schema(ty: &Type, about: &str) -> Value {
         Type::Open => json!({ "type": "object" }),
         Type::Choice(choices) => json!({ "type": "string", "enum": choices }),
         Type::Object(fields) => object(fields),
+        Type::Each(inner) => json!({ "type": "array", "items": schema(inner, "") }),
         Type::Either(types) => {
             json!({ "anyOf": types.iter().map(|t| schema(t, "")).collect::<Vec<_>>() })
         }
@@ -1062,6 +1065,7 @@ mod tests {
                 }
                 Value::Object(map)
             }
+            Type::Each(inner) => json!([sample(inner)]),
             Type::Either(types) => sample(&types[0]),
         }
     }
@@ -1136,6 +1140,7 @@ mod tests {
                         a.name == b.name && a.required == b.required && same_type(&a.ty, &b.ty)
                     })
             }
+            (Type::Each(x), Type::Each(y)) => same_type(x, y),
             (Type::Either(x), Type::Either(y)) => {
                 x.len() == y.len() && x.iter().zip(*y).all(|(a, b)| same_type(a, b))
             }

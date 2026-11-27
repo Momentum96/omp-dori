@@ -671,45 +671,50 @@ fn from_schema(meta: &Value, tool: &str, fields: &[(&str, Value)]) -> Value {
         let schema = properties
             .get(*name)
             .unwrap_or_else(|| panic!("{tool} does not declare `{name}`: {properties:?}"));
-        let kind = schema["type"].as_str().unwrap_or_else(|| {
-            panic!("`{name}` declares no single type: {schema}");
-        });
-        let matches = match kind {
-            "string" => value.is_string(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "number" => value.is_number(),
-            "boolean" => value.is_boolean(),
-            "array" => value.is_array() && schema["items"]["type"] == "string",
-            "object" => value.is_object(),
-            other => panic!("`{name}` has type {other}"),
-        };
-        assert!(matches, "`{name}` is {kind} in the schema, sent {value}");
-        if let Some(choices) = schema["enum"].as_array() {
-            assert!(
-                choices.iter().any(|c| c == value),
-                "`{name}` is one of {choices:?}, sent {value}"
-            );
-        }
-        if kind == "object" {
-            let declared = schema["properties"].as_object().unwrap();
-            for (k, v) in value.as_object().unwrap() {
-                let ty = declared
-                    .get(k)
-                    .unwrap_or_else(|| panic!("`{name}` does not declare `{k}`: {schema}"));
-                let ty = ty["type"].as_str().unwrap_or_default();
-                let ok = match ty {
-                    "string" => v.is_string(),
-                    "integer" => v.is_i64() || v.is_u64(),
-                    "number" => v.is_number(),
-                    "boolean" => v.is_boolean(),
-                    _ => false,
-                };
-                assert!(ok, "`{name}.{k}` is {ty}, sent {v}");
-            }
-        }
+        check_type(schema, name, value);
         input.insert((*name).to_string(), value.clone());
     }
     Value::Object(input)
+}
+
+/// A value is what its schema declares: its type, its choices, its fields and its items.
+fn check_type(schema: &Value, name: &str, value: &Value) {
+    let kind = schema["type"]
+        .as_str()
+        .unwrap_or_else(|| panic!("`{name}` declares no single type: {schema}"));
+    let ok = match kind {
+        "string" => value.is_string(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        other => panic!("`{name}` has type {other}"),
+    };
+    assert!(ok, "`{name}` is {kind} in the schema, sent {value}");
+    if let Some(choices) = schema["enum"].as_array() {
+        assert!(
+            choices.iter().any(|c| c == value),
+            "`{name}` is one of {choices:?}, sent {value}"
+        );
+    }
+    match kind {
+        "array" => {
+            for item in value.as_array().unwrap() {
+                check_type(&schema["items"], &format!("{name}[]"), item);
+            }
+        }
+        "object" => {
+            let declared = schema["properties"].as_object().unwrap();
+            for (k, v) in value.as_object().unwrap() {
+                let field = declared
+                    .get(k)
+                    .unwrap_or_else(|| panic!("`{name}` does not declare `{k}`: {schema}"));
+                check_type(field, &format!("{name}.{k}"), v);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn lead_tool(b: &mut Bridge, session: &Value, call: &str, input: Value) -> (String, bool) {

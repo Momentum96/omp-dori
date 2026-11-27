@@ -926,11 +926,11 @@ impl<R: Runtime> Lanes<R> {
             None => None,
             Some(text) => Some(Self::kickoff_line(text, thread_from.is_some())?),
         };
-        let open: OpenInput = p::parse::<OpenInput>(input).map_err(|e| format!("open: {e}"))?;
+        // What the record keeps: the input without the three the open handles itself.
         let mut stored = input.clone();
-        p::OP.clear(&mut stored);
         p::THREAD_FROM.clear(&mut stored);
         p::KICKOFF.clear(&mut stored);
+        let open: OpenInput = p::parse::<OpenInput>(&stored).map_err(|e| format!("open: {e}"))?;
         let config = self.cfg();
         let valid = record::validate(&open, &config.lanes)?;
         remote::placement(&config, &valid)?;
