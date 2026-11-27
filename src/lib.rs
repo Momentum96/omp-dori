@@ -12,6 +12,7 @@ mod jobs;
 mod lanes;
 mod log;
 mod omp;
+mod params;
 mod proto;
 mod relay;
 mod store;

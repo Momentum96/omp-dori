@@ -9,11 +9,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::Lanes;
 use super::docs::{self, FILE, RULE};
 use super::record::Record;
-use super::{Lanes, need, s};
 use crate::config::coord::PublishRoot;
 use crate::host::Runtime;
+use crate::params as p;
 use crate::sys::now_ms;
 
 const ALLOWED: [&str; 31] = [
@@ -169,18 +170,18 @@ impl<R: Runtime> Lanes<R> {
         }
         let key = match own {
             Some(k) => k.to_string(),
-            None => need(input, "key")?.to_string(),
+            None => p::KEY.some(input)?.to_string(),
         };
         let (rec, _) = self.load(&key).await?;
         if !rec.open() {
             return Err(format!("lane {key} is not open"));
         }
-        let given = PathBuf::from(need(input, "path")?);
+        let given = PathBuf::from(p::PATH.some(input)?);
         if !given.is_absolute() {
             return Err("path must be absolute".into());
         }
         let (real, real_root, root) = locate(roots, &given)?;
-        let public = match s(input, "visibility").unwrap_or("private") {
+        let public = match p::VISIBILITY.text(input).unwrap_or("private") {
             "public" => true,
             "private" => false,
             _ => return Err("visibility is private or public".into()),
@@ -195,7 +196,7 @@ impl<R: Runtime> Lanes<R> {
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let title = one_line(
-            s(input, "title").unwrap_or(&default_title),
+            p::TITLE.text(input).unwrap_or(&default_title),
             200,
             "the title",
         )?;
@@ -344,14 +345,16 @@ impl<R: Runtime> Lanes<R> {
     ) -> Result<Value, String> {
         match op {
             "rule-add" => {
-                let text = one_line(need(input, "text")?, 400, "the rule")?;
-                let evidence = one_line(need(input, "evidence")?, 2000, "the evidence")?;
-                let (scope, lane) = match (own, s(input, "scope").unwrap_or("repo")) {
+                let text = one_line(p::TEXT.some(input)?, 400, "the rule")?;
+                let evidence = one_line(p::EVIDENCE.some(input)?, 2000, "the evidence")?;
+                let (scope, lane) = match (own, p::SCOPE.text(input).unwrap_or("repo")) {
                     (Some(_), "global") => return Err("only the lead adds global rules".into()),
                     (Some(rec), _) => (rec.cwd.clone(), Some(rec.key.clone())),
-                    (None, "global") => ("global".to_string(), s(input, "key").map(str::to_string)),
+                    (None, "global") => {
+                        ("global".to_string(), p::KEY.text(input).map(str::to_string))
+                    }
                     (None, _) => {
-                        let (rec, _) = self.load(need(input, "key")?).await?;
+                        let (rec, _) = self.load(p::KEY.some(input)?).await?;
                         (rec.cwd.clone(), Some(rec.key))
                     }
                 };
@@ -370,7 +373,7 @@ impl<R: Runtime> Lanes<R> {
                 Ok(json!(format!("rule {id} added for {}", rule.scope)))
             }
             "rule-retire" => {
-                let id = need(input, "id")?;
+                let id = p::ID.some(input)?;
                 let (mut rule, v) = docs::get::<Rule>(&self.env.store, RULE, id)
                     .await?
                     .ok_or_else(|| format!("no rule {id}"))?;

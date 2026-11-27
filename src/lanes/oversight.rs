@@ -17,6 +17,7 @@ use crate::config::lanes::Oversight;
 use crate::host::{Control, Runtime, Status};
 use crate::jobs::event::{Emit, EventKind, Severity};
 use crate::log;
+use crate::params as p;
 use crate::store::lanes::{LaneDone, LaneWrite, ReportRow};
 use crate::sys::now_ms;
 
@@ -104,14 +105,13 @@ pub(crate) fn decide(w: &super::record::Watch, f: &Facts<'_>, o: &Oversight) -> 
 impl<R: Runtime> Lanes<R> {
     /// One report (EVR req. 1-8, 14-22): checked, evidence read, stored, then relayed.
     pub(super) async fn report(&self, rec: &Record, input: &Value) -> Result<String, String> {
-        let r: ReportInput =
-            serde_json::from_value(input.clone()).map_err(|e| format!("report: {e}"))?;
+        let r: ReportInput = p::parse::<ReportInput>(input).map_err(|e| format!("report: {e}"))?;
         evidence::check_report(&r)?;
         let mut items = Vec::new();
         for f in &r.files {
             items.push(evidence::file_item(Path::new(&rec.cwd), f)?);
         }
-        items.extend(evidence::tool_items(&r.calls, input.get("evidence"))?);
+        items.extend(evidence::tool_items(&r.calls, r.facts.as_ref())?);
         let total = items.len();
         let write = LaneWrite::Report {
             key: rec.key.clone(),
@@ -268,28 +268,17 @@ impl<R: Runtime> Lanes<R> {
         run: Option<String>,
         input: &Value,
     ) -> Result<String, String> {
-        let text = |k: &str, max: usize| -> Result<String, String> {
-            let t = input.get(k).and_then(Value::as_str).map_or("", str::trim);
+        let field = |param: &crate::params::Param, max: usize| -> Result<String, String> {
+            let t = param.text(input).unwrap_or_default();
             if t.is_empty() || t.chars().count() > max {
-                return Err(format!("{k} must hold 1 to {max} characters"));
+                return Err(format!("{} must hold 1 to {max} characters", param.name()));
             }
             Ok(t.to_string())
         };
-        let name = text("name", 200)?;
-        let result = text("result", 1000)?;
-        let evidence_ref = text("evidence", 1000)?;
-        let strings = |k: &str| -> Vec<String> {
-            input
-                .get(k)
-                .and_then(Value::as_array)
-                .map_or_else(Vec::new, |a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-        };
-        let receipts = strings("receipts");
+        let name = field(&p::NAME, 200)?;
+        let result = field(&p::RESULT, 1000)?;
+        let evidence_ref = field(&p::EVIDENCE, 1000)?;
+        let receipts = p::RECEIPTS.list(input);
         if receipts
             .iter()
             .any(|r| r.is_empty() || r.chars().count() > 500)
@@ -297,13 +286,11 @@ impl<R: Runtime> Lanes<R> {
             return Err("each receipt holds 1 to 500 characters".into());
         }
         let mut items = Vec::new();
-        if let Some(files) = input.get("files").and_then(Value::as_array) {
-            for f in files.iter().filter_map(Value::as_str) {
-                items.push(evidence::file_item(Path::new(&rec.cwd), f)?);
-            }
+        for f in p::FILES.list(input) {
+            items.push(evidence::file_item(Path::new(&rec.cwd), &f)?);
         }
-        let calls = strings("calls");
-        items.extend(evidence::tool_items(&calls, input.get("evidence"))?);
+        let calls = p::CALLS.list(input);
+        items.extend(evidence::tool_items(&calls, p::FACTS.raw(input))?);
         let unverified = run.is_none();
         let write = LaneWrite::Step {
             key: rec.key.clone(),

@@ -17,6 +17,7 @@ use tokio::sync::watch;
 use crate::jobs::Jobs;
 use crate::jobs::event::{Emit, EventKind, Severity, one_line};
 use crate::log;
+use crate::params as p;
 use crate::store::Store;
 use crate::store::lead::LeadWrite;
 use crate::sys::command::{self, Exit, KILL_GRACE};
@@ -56,16 +57,8 @@ pub(crate) struct Streams {
     running: Mutex<HashMap<String, State>>,
 }
 
-fn int(v: &Value, key: &str) -> Option<u64> {
-    v.get(key).and_then(Value::as_u64)
-}
-
 fn spec_of(input: &Value) -> Result<Spec, String> {
-    let name = input
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
+    let name = p::NAME.text(input).unwrap_or_default();
     let valid = !name.is_empty()
         && name.len() <= 64
         && name
@@ -74,30 +67,18 @@ fn spec_of(input: &Value) -> Result<Spec, String> {
     if !valid {
         return Err("name: 1 to 64 letters, digits, '-', '_' or '.'".into());
     }
-    let argv: Vec<String> = input
-        .get("argv")
-        .and_then(Value::as_array)
-        .map_or_default(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        });
+    let argv: Vec<String> = p::ARGV.list(input);
     if argv.is_empty() || argv.len() > ARGV_MAX {
         return Err("argv: the command and its arguments, 1 to 64 words (no shell)".into());
     }
-    let filter = input
-        .get("filter")
-        .and_then(Value::as_str)
-        .unwrap_or(".")
-        .to_string();
+    let filter = p::FILTER.text(input).unwrap_or(".").to_string();
     regex::RegexBuilder::new(&filter)
         .size_limit(1 << 20)
         .build()
         .map_err(|e| format!("filter: {e}"))?;
-    let restarts = int(input, "restarts").unwrap_or(5);
-    let delay_s = int(input, "delay").unwrap_or(10);
-    let silence_m = int(input, "silence");
+    let restarts = p::RESTARTS.uint(input).unwrap_or(5);
+    let delay_s = p::DELAY.uint(input).unwrap_or(10);
+    let silence_m = p::SILENCE.uint(input);
     if restarts > 100
         || !(1..=3600).contains(&delay_s)
         || silence_m.is_some_and(|m| !(1..=1440).contains(&m))
@@ -111,7 +92,7 @@ fn spec_of(input: &Value) -> Result<Spec, String> {
         restarts: u32::try_from(restarts).unwrap_or(5),
         delay_s,
         silence_m,
-        low: input.get("low").and_then(Value::as_bool).unwrap_or(false),
+        low: p::LOW.flag(input),
     })
 }
 

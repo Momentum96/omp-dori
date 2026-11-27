@@ -561,7 +561,7 @@ export class Bridge {
 	async tool(name: string, ms: number, callId: string, params: Json, ctx: Ctx): Promise<AgentToolResult> {
 		if (!this.main(ctx)) throw new Error(`${name} is not available in this session.`);
 		const call = { session: this.session, agent: ctx?.agent?.id, call: callId, tool: name, input: params };
-		const answer = await this.request("bridge.tool", { ...call, evidence: this.evidence(params) }, ms);
+		const answer = await this.request("bridge.tool", { ...call, facts: this.evidence(params) }, ms);
 		if (!answer) throw new Error(`Cataly did not answer in time: ${UNSURE}`);
 		const text = String(answer.text ?? "");
 		if (answer.error) throw new Error(text);
