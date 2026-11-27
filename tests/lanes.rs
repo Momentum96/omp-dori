@@ -987,7 +987,7 @@ fn onboarding_consent_is_stored_and_writes_wait() {
     let (_, err) = lead_tool(&mut b, &s, "o2", json!({ "op": "onboarding.start" }));
     assert!(!err);
     // Nothing is read before the consent answer.
-    let early = json!({ "op": "onboarding.tool", "name": "mail", "answer": "allowed", "reads": "subjects", "message": "m1" });
+    let early = json!({ "op": "onboarding.tool", "name": "mail", "reply": "allowed", "reads": "subjects", "message": "m1" });
     let (_, err) = lead_tool(&mut b, &s, "o3", early);
     assert!(err, "a tool before consent is refused");
     // Writes wait while onboarding runs.
@@ -1033,7 +1033,7 @@ fn onboarding_consent_is_stored_and_writes_wait() {
     );
     assert_eq!(shell(&mut b, "ls ~/.config")["allow"], true);
     // A "no" is stored and ends onboarding; it is not asked again.
-    let no = json!({ "op": "onboarding.consent", "answer": "no", "message": "owner-msg-1" });
+    let no = json!({ "op": "onboarding.consent", "reply": "no", "message": "owner-msg-1" });
     let (_, err) = lead_tool(&mut b, &s, "o7", no);
     assert!(!err);
     let (why, err) = lead_tool(&mut b, &s, "o8", json!({ "op": "onboarding.start" }));
