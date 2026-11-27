@@ -713,7 +713,12 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
     );
     let rec = record(&hub, "box-test");
     assert_eq!(rec["worker"], "box", "{rec}");
-    let root = w.root.join(format!("state/cataly/worker/{hub_id}"));
+    // The worker records its worktree resolved (macOS: /tmp is /private/tmp).
+    let root = w
+        .root
+        .join(format!("state/cataly/worker/{hub_id}"))
+        .canonicalize()
+        .unwrap();
     let cwd = rec["cwd"].as_str().unwrap();
     assert!(
         Path::new(cwd).starts_with(root.join("lanes")),
