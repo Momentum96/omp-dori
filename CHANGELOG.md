@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.5 (Unreleased)
+## 0.2.5 (2026-11-27)
 
 - **Remote workers, phase 1 (enrolment and connection).** `cataly worker add user@host[:port]`
   makes one ed25519 key for that machine and prints the `cataly worker init --hub-key '…'` line
