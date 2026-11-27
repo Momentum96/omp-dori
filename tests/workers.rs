@@ -743,7 +743,12 @@ fn a_worker_lane_runs_from_a_thread_and_checks_there() {
     let kickoff = fake.wait(WAIT, |f| f.bot_messages(&thread).first().cloned());
     let first = kickoff["content"].as_str().unwrap();
     assert!(first.starts_with("Testing on box"), "{first}");
-    assert!(first.contains("box (Linux"), "{first}");
+    let os = if cfg!(target_os = "macos") {
+        "macOS"
+    } else {
+        "Linux"
+    };
+    assert!(first.contains(&format!("box ({os}")), "{first}");
 
     // A report through the worker's bridge socket reaches the thread.
     let tokens = w.tokens(&rec["session_id"]);
